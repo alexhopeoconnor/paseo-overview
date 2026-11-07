@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "lib": ["ES2023", "DOM", "DOM.Iterable"] },
+  "include": ["client/web.ts", "client/scene/**/*.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,86 @@
+import type { OverviewEvent } from "../shared/model";
+
+export function decay(value: number, elapsedSeconds: number, halfLifeSeconds = 5): number {
+  return value * Math.pow(0.5, Math.max(0, elapsedSeconds) / halfLifeSeconds);
+}
+
+export function normaliseActivity(score: number): number {
+  return 1 - Math.exp(-Math.max(0, score) / 6);
+}
+
+export function heartbeatBpm(working: boolean, activity: number): number {
+  return working ? 36 + Math.min(1, Math.max(0, activity)) * 48 : 0;
+}
+
+interface Score { value: number; at: number }
+
+/** Activity is derived from unique daemon events, never from rendered pulses. */
+export class ActivityTracker {
+  private readonly seen = new Map<string, number>();
+  private readonly scores = new Map<string, Score>();
+
+  ingest(events: readonly OverviewEvent[], now: number): OverviewEvent[] {
+    const fresh: OverviewEvent[] = [];
+    for (const event of events) {
+      if (this.seen.has(event.id)) continue;
+      this.seen.set(event.id, now);
+      if (!Number.isFinite(event.timestamp) || event.timestamp < now - 15_000 || event.timestamp > now + 5_000) continue;
+      const previous = this.scores.get(event.nodeId);
+      const value = previous ? decay(previous.value, (now - previous.at) / 1000) : 0;
+      const weight = event.kind === "activity" ? 0.5 : 1;
+      this.scores.set(event.nodeId, { value: Math.min(30, value + weight), at: now });
+      fresh.push(event);
+    }
+    // Retain recent IDs even after their effects end; cap memory during long sessions.
+    for (const [id, at] of this.seen) {
+      if (now - at > 120_000 || this.seen.size > 4096) this.seen.delete(id);
+      else break;
+    }
+    return fresh;
+  }
+
+  score(nodeId: string, now: number): number {
+    const score = this.scores.get(nodeId);
+    return score ? decay(score.value, (now - score.at) / 1000) : 0;
+  }
+
+  prune(nodeIds: ReadonlySet<string>): void {
+    for (const id of this.scores.keys()) if (!nodeIds.has(id)) this.scores.delete(id);
+  }
+
+  clear(): void {
+    this.seen.clear();
+    this.scores.clear();
+  }
+}
+
+export interface PulseRequest {
+  nodeId: string;
+  workspaceId: string;
+  at: number;
+}
+
+/** Bounds are admission limits, not a backlog to replay after a busy period. */
+export class PulseLimiter {
+  private readonly lastByNode = new Map<string, number>();
+  private active: PulseRequest[] = [];
+
+  admit(nodeId: string, workspaceId: string, now: number): boolean {
+    this.active = this.active.filter((pulse) => now - pulse.at < 900);
+    for (const [id, at] of this.lastByNode) {
+      if (now - at > 10_000) this.lastByNode.delete(id);
+    }
+    const previous = this.lastByNode.get(nodeId);
+    if (previous !== undefined && now - previous < 1000) return false;
+    if (this.active.length >= 24) return false;
+    if (this.active.filter((pulse) => pulse.workspaceId === workspaceId).length >= 8) return false;
+    this.lastByNode.set(nodeId, now);
+    this.active.push({ nodeId, workspaceId, at: now });
+    return true;
+  }
+
+  clear(): void {
+    this.lastByNode.clear();
+    this.active = [];
+  }
+}
