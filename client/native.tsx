@@ -1,6 +1,16 @@
 import { Image, Pressable, ScrollView, Text, View } from "react-native";
+import { useState } from "react";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 import type { OverviewTheme } from "../shared/renderer";
+
+function ProjectIcon({ url, name, theme }: { url?: string; name: string; theme: OverviewTheme }) {
+  const [failed, setFailed] = useState(false);
+  const size = { width: 32, height: 32, borderRadius: 7 };
+  if (url && !failed) return <Image source={{ uri: url }} style={size} onError={() => setFailed(true)} />;
+  return <View accessible={false} style={{ ...size, alignItems: "center", justifyContent: "center", backgroundColor: theme.background, borderWidth: 1, borderColor: theme.border }}>
+    <Text style={{ color: theme.foreground, fontWeight: "600" }}>{Array.from(name.trim())[0]?.toLocaleUpperCase() || "?"}</Text>
+  </View>;
+}
 
 export function NativeOverview({ model, theme, onSelect, onOpenAgent }: {
   model: OverviewModel; theme: OverviewTheme;
@@ -30,7 +40,7 @@ export function NativeOverview({ model, theme, onSelect, onOpenAgent }: {
       for (const node of nodes) if (!seen.has(node.id)) visit(node, 0);
       return <View key={group.id} style={{ borderWidth: 1, borderColor: theme.border, borderRadius: 14, padding: 16, gap: 10, backgroundColor: theme.surface }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          {group.iconUrl ? <Image source={{ uri: group.iconUrl }} style={{ width: 32, height: 32, borderRadius: 7 }} /> : null}
+          <ProjectIcon key={group.iconUrl ?? "no-icon"} url={group.iconUrl} name={group.projectName} theme={theme} />
           <View style={{ flex: 1 }}><Text style={{ color: theme.muted, fontSize: 11 }}>{group.projectName}</Text><Text style={{ color: theme.foreground, fontSize: 16, fontWeight: "600" }}>{group.name}</Text></View>
           <Text style={{ color: theme.muted }}>{nodes.length}</Text>
         </View>

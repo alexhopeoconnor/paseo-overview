@@ -137,11 +137,30 @@ export function createOverviewStore(options: Options) {
     if (options.observeActivity === false) { schedule(); return; }
     for (const agent of agents) {
       if (timelines.has(agent.id)) continue;
-      const subscription = options.paseo.agents.ref(agent.id).timeline.subscribe(event => {
-        if (alive()) managedTimeline(agent.id, event);
-      });
-      timelines.set(agent.id, () => { void subscription.release().catch(() => {}); });
-      void subscription.ready.catch(error => { if (alive()) report(error); });
+      let subscription: { release(): Promise<void>; ready: Promise<void> } | undefined;
+      let released = false;
+      const cleanup = () => {
+        if (released) return;
+        released = true;
+        if (subscription) void subscription.release().catch(() => {});
+      };
+      const failed = (error: unknown) => {
+        if (!alive() || timelines.get(agent.id) !== cleanup) return;
+        timelines.delete(agent.id);
+        cleanup(); report(error);
+        // Retry only on a later directory update, avoiding a failure loop.
+      };
+      timelines.set(agent.id, cleanup);
+      try {
+        subscription = options.paseo.agents.ref(agent.id).timeline.subscribe(event => {
+          if (!alive() || timelines.get(agent.id) !== cleanup) return;
+          if (event.event.type === "error") failed(event.event.error);
+          else managedTimeline(agent.id, event);
+        });
+        // A callback can fail synchronously before subscribe returns its handle.
+        if (released) void subscription.release().catch(() => {});
+        void subscription.ready.catch(failed);
+      } catch (error) { failed(error); }
     }
     schedule();
   }

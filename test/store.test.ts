@@ -44,6 +44,7 @@ function setup(options: { acknowledgement?: Promise<object>; observeActivity?: b
   observations.push(directory, workspace, events);
   const timelineHandlers = new Map<string, (value: unknown) => void>();
   const timelineReleases = new Map<string, ReturnType<typeof vi.fn>>();
+  const timelineReadiness: Promise<void>[] = [];
   const mutations = {
     refresh: vi.fn(() => { throw new Error("forbidden refresh"); }),
     refetch: vi.fn(() => { throw new Error("forbidden history read"); }),
@@ -57,9 +58,9 @@ function setup(options: { acknowledgement?: Promise<object>; observeActivity?: b
   const listWorkspaces = vi.fn(async (_options: unknown) => ({ ...(await workspace.ready), subscription: workspace }));
   const subscribeTimeline = vi.fn((id: string, handler: (value: unknown) => void) => {
     timelineHandlers.set(id, handler);
-    const release = vi.fn(async () => { timelineHandlers.delete(id); });
+    const release = vi.fn(async () => { if (timelineHandlers.get(id) === handler) timelineHandlers.delete(id); });
     timelineReleases.set(id, release);
-    return Object.assign(() => { void release(); }, { ready: Promise.resolve(), release });
+    return Object.assign(() => { void release(); }, { ready: timelineReadiness.shift() ?? Promise.resolve(), release });
   });
   const api = {
     observeEvents: vi.fn(() => events),
@@ -76,7 +77,7 @@ function setup(options: { acknowledgement?: Promise<object>; observeActivity?: b
     onChange: changed, onError: failed, observeActivity: options.observeActivity,
   });
   disposals.push(() => store.dispose());
-  return { store, api, events, directory, workspace, listAgents, listWorkspaces, readRoster, readIcon, changed, failed, mutations, timelineHandlers, timelineReleases, subscribeTimeline, observations };
+  return { store, api, events, directory, workspace, listAgents, listWorkspaces, readRoster, readIcon, changed, failed, mutations, timelineHandlers, timelineReleases, timelineReadiness, subscribeTimeline, observations };
 }
 
 beforeEach(() => { vi.useFakeTimers(); });
@@ -160,6 +161,42 @@ describe("Overview observations", () => {
     expect(test.directory.release).toHaveBeenCalledOnce();
     expect(test.subscribeTimeline).not.toHaveBeenCalled();
     expect(test.readRoster).not.toHaveBeenCalled();
+  });
+
+  it("releases rejected timeline subscriptions and retries only on a later agent update", async () => {
+    const test = setup(), ready = deferred<void>();
+    test.timelineReadiness.push(ready.promise);
+    await test.store.start(); await flush();
+    const release = test.timelineReleases.get("parent");
+    ready.reject(new Error("Temporary timeline failure")); await flush();
+    expect(release).toHaveBeenCalledOnce();
+    expect(test.failed).toHaveBeenCalledWith("Temporary timeline failure");
+    expect(test.subscribeTimeline).toHaveBeenCalledOnce();
+    test.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: parent } });
+    await flush();
+    expect(test.subscribeTimeline).toHaveBeenCalledTimes(2);
+    test.timelineHandlers.get("parent")?.({ agentId: "parent", timestamp: "fresh", event: { type: "turn_started", turnId: "new" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events).toHaveLength(1);
+  });
+
+  it("does not let a late rejection or callback release a newer timeline subscription", async () => {
+    const test = setup(), ready = deferred<void>();
+    test.timelineReadiness.push(ready.promise);
+    await test.store.start(); await flush();
+    const oldHandler = test.timelineHandlers.get("parent")!, oldRelease = test.timelineReleases.get("parent")!;
+    oldHandler({ agentId: "parent", event: { type: "error", error: "Observation failed" } });
+    expect(oldRelease).toHaveBeenCalledOnce();
+    expect(test.subscribeTimeline).toHaveBeenCalledOnce();
+    test.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: parent } }); await flush();
+    const newHandler = test.timelineHandlers.get("parent"), newRelease = test.timelineReleases.get("parent")!;
+    expect(test.subscribeTimeline).toHaveBeenCalledTimes(2);
+    ready.reject(new Error("Late readiness rejection")); await flush();
+    oldHandler({ agentId: "parent", event: { type: "error", error: "Late callback" } });
+    expect(oldRelease).toHaveBeenCalledOnce();
+    expect(newRelease).not.toHaveBeenCalled();
+    expect(test.timelineHandlers.get("parent")).toBe(newHandler);
+    expect(test.failed).toHaveBeenCalledTimes(1);
   });
 
   it("discards activity on disconnect and starts fresh observations on reconnect", async () => {
