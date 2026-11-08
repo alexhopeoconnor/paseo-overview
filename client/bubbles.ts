@@ -1,10 +1,13 @@
-import type { OverviewEvent, OverviewNode } from "../shared/model";
+import type { EventPreview, OverviewEvent, OverviewNode } from "../shared/model";
+import { previewSummary, previewText } from "./event-preview";
 
 export interface ActivityBubble {
   eventId: string;
   nodeId: string;
   workspaceId: string | null;
   text: string;
+  preview?: EventPreview;
+  sourceKey?: string;
   kind: OverviewEvent["kind"];
   timestamp: number;
   expiresAt: number;
@@ -12,9 +15,7 @@ export interface ActivityBubble {
 }
 
 export function bubbleText(text: string): string {
-  const compact = text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  const characters = Array.from(compact);
-  return characters.length <= 160 ? compact : `${characters.slice(0, 159).join("")}…`;
+  return previewText(text, 240).text;
 }
 
 function priority(event: OverviewEvent): number {
@@ -28,6 +29,7 @@ export class BubbleStore {
   private readonly bubbles = new Map<string, ActivityBubble>();
   private readonly held = new Set<string>();
   private readonly seen = new Map<string, number>();
+  private readonly previews = new Map<string, { text: string; at: number }>();
 
   /** Hidden/disconnected observations must not become a backlog on re-entry. */
   discard(events: readonly OverviewEvent[], now: number): void {
@@ -42,12 +44,30 @@ export class BubbleStore {
     this.expire(now);
     for (const event of events) {
       const node = nodes.get(event.nodeId);
-      if (!node || !event.text || event.kind === "activity") continue;
-      const text = bubbleText(event.text);
+      if (!node || (!event.text && !event.preview) || event.kind === "activity") continue;
+      if (node.freshness && node.freshness !== "current") { this.seen.set(event.id, now); continue; }
+      const title = event.preview && previewText(event.preview.title, 60);
+      const detail = event.preview && previewText(event.preview.detail, 240);
+      const preview = event.preview && {
+        title: title!.text,
+        detail: detail!.text || undefined,
+        truncated: event.preview.truncated || title!.truncated || detail!.truncated,
+      };
+      const text = preview ? previewSummary(preview) : bubbleText(event.text!);
       if (!text || !Number.isFinite(event.timestamp) || event.timestamp < now - 10_000 || event.timestamp > now + 5_000) continue;
       const previous = this.bubbles.get(node.id);
       if (this.seen.has(event.id) && previous?.eventId !== event.id) continue;
       if (previous && event.timestamp < previous.timestamp) continue;
+      if (event.sourceKey) {
+        const last = this.previews.get(event.sourceKey);
+        if (last?.text === text) {
+          // Keep suppressing a long-lived stream while it is still arriving;
+          // touching this small dedup record must not renew the visible bubble.
+          last.at = now;
+          this.seen.set(event.id, now);
+          continue;
+        }
+      }
       const rank = priority(event);
       if (previous && previous.eventId !== event.id && (this.held.has(node.id) || previous.priority > rank)) continue;
 
@@ -55,11 +75,14 @@ export class BubbleStore {
       const updated = previous?.eventId === event.id && (previous.text !== text || event.timestamp > previous.timestamp);
       if (previous?.eventId === event.id && !updated) continue;
       this.seen.set(event.id, now);
+      if (event.sourceKey) this.previews.set(event.sourceKey, { text, at: now });
       this.bubbles.set(node.id, {
         eventId: event.id,
         nodeId: node.id,
         workspaceId: node.workspaceId,
         text,
+        preview,
+        sourceKey: event.sourceKey,
         kind: event.kind,
         timestamp: event.timestamp,
         expiresAt: now + 6000,
@@ -70,6 +93,9 @@ export class BubbleStore {
     for (const [id, at] of this.seen) {
       if (now - at > 120_000 || this.seen.size > 4096) this.seen.delete(id);
       else break;
+    }
+    for (const [id, value] of this.previews) {
+      if (now - value.at > 120_000 || this.previews.size > 512) this.previews.delete(id);
     }
   }
 

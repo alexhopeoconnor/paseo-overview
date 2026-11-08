@@ -9,9 +9,9 @@ const snapshot = (revision = 1, subagents = [child]): RosterSnapshot => ({
   parentAgentId: "parent", availability: "resident", cursor: { generation: "first", revision }, subagents,
 });
 function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(accept => { resolve = accept; });
-  return { promise, resolve };
+  let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function flush() { for (let index = 0; index < 12; index++) await Promise.resolve(); }
 
@@ -47,7 +47,7 @@ describe("passive provider rosters", () => {
     tracker.setParents([{ ...parent, status: "closed" }]);
     first.resolve(snapshot()); await flush();
     expect(read).toHaveBeenCalledTimes(2);
-    expect(tracker.states.get(parent.id)).toEqual({ availability: "not_resident", subagents: [] });
+    expect(tracker.states.get(parent.id)).toEqual({ availability: "not_resident", freshness: "current", subagents: [] });
     tracker.dispose();
   });
 
@@ -70,7 +70,7 @@ describe("passive provider rosters", () => {
     const tracker = new RosterTracker({ queue: new ReadQueue(), read, changed: vi.fn(), failed: vi.fn(), activity });
     tracker.setParents([parent]); await flush();
     tracker.receive({ kind: "remove", parentAgentId: parent.id, subagentId: child.id }); await flush();
-    expect(tracker.states.get(parent.id)?.availability).toBe("unknown");
+    expect(tracker.states.get(parent.id)).toEqual({ availability: "resident", freshness: "refreshing", subagents: [child] });
     next.resolve(snapshot(2, [])); await flush();
     expect(tracker.states.get(parent.id)?.subagents).toEqual([]);
     expect(activity).not.toHaveBeenCalled(); tracker.dispose();
@@ -93,5 +93,36 @@ describe("passive provider rosters", () => {
     tracker.setParents([parent]); tracker.setParents([]); tracker.dispose();
     changed.mockClear(); pending.resolve(snapshot()); await flush();
     expect(tracker.states.size).toBe(0); expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("preserves last-known members through generation refresh failure and authoritative unavailability", async () => {
+    const failed = deferred<RosterSnapshot>(), changed = vi.fn();
+    const read = vi.fn().mockResolvedValueOnce(snapshot()).mockReturnValueOnce(failed.promise)
+      .mockResolvedValueOnce({ ...snapshot(4, []), availability: "not_resident" });
+    const tracker = new RosterTracker({ queue: new ReadQueue(), read, changed, failed: vi.fn() });
+    tracker.setParents([parent]); await flush();
+    tracker.receive({ kind: "remove", parentAgentId: parent.id, subagentId: child.id, cursor: { generation: "second", revision: 2 } });
+    expect(tracker.state(parent.id)).toEqual({ availability: "resident", freshness: "refreshing", subagents: [child] });
+    failed.reject(new Error("Disconnected")); await flush();
+    expect(tracker.state(parent.id)).toEqual({ availability: "resident", freshness: "stale", subagents: [child] });
+    tracker.invalidate(parent.id); await flush();
+    expect(tracker.state(parent.id)).toEqual({ availability: "not_resident", freshness: "current", subagents: [] });
+    tracker.dispose();
+  });
+
+  it("ignores old in-flight responses after suspension while retaining current identities", async () => {
+    const old = deferred<RosterSnapshot>(), resumed = deferred<RosterSnapshot>();
+    const read = vi.fn().mockResolvedValueOnce(snapshot()).mockReturnValueOnce(old.promise).mockReturnValueOnce(resumed.promise);
+    const tracker = new RosterTracker({ queue: new ReadQueue(), read, changed: vi.fn(), failed: vi.fn() });
+    tracker.setParents([parent]); await flush();
+    tracker.invalidate(parent.id); await flush();
+    tracker.suspend(); tracker.resume(new ReadQueue()); tracker.setParents([parent]); await flush();
+    old.resolve(snapshot(20, [])); await flush();
+    expect(tracker.state(parent.id)?.subagents).toEqual([child]);
+    expect(tracker.state(parent.id)?.freshness).toBe("refreshing");
+    resumed.resolve(snapshot(21, [{ ...child, title: "Current title" }])); await flush();
+    expect(tracker.state(parent.id)?.subagents[0].title).toBe("Current title");
+    expect(tracker.state(parent.id)?.freshness).toBe("current");
+    tracker.dispose();
   });
 });

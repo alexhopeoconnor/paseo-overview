@@ -12,6 +12,24 @@ async function flush() { for (let index = 0; index < 12; index++) await Promise.
 const project = (revision: string) => ({ projectId: "project", projectDisplayName: "Project", projectIconRevision: revision });
 
 describe("project icons", () => {
+  it("preserves icons across suspension and ignores cancelled reads while refreshing", async () => {
+    const cancelled = deferred<ProjectIcon | null>(), resumed = deferred<ProjectIcon | null>();
+    const read = vi.fn().mockResolvedValueOnce({ mimeType: "image/png", data: "b2xk" })
+      .mockReturnValueOnce(cancelled.promise).mockReturnValueOnce(resumed.promise);
+    const icons = new ProjectIcons({ queue: new ReadQueue(), read, changed: vi.fn(), failed: vi.fn() });
+    icons.sync([project("one")], []); await flush();
+    icons.suspend(); icons.resume(new ReadQueue()); icons.sync([project("one")], []); await flush();
+    expect(read).toHaveBeenCalledOnce();
+    icons.sync([project("two")], []); await flush();
+    icons.suspend(); icons.resume(new ReadQueue()); icons.sync([project("two")], []); await flush();
+    expect(read).toHaveBeenCalledTimes(3);
+    cancelled.resolve(null); await flush();
+    expect(icons.urls.get("project")).toBe("data:image/png;base64,b2xk");
+    resumed.resolve({ mimeType: "image/png", data: "bmV3" }); await flush();
+    expect(icons.urls.get("project")).toBe("data:image/png;base64,bmV3");
+    icons.dispose();
+  });
+
   it("uses the newest revision despite out-of-order responses and handles automatic removal", async () => {
     const old = deferred<ProjectIcon | null>(), current = deferred<ProjectIcon | null>();
     const read = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise).mockResolvedValue(null);

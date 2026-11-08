@@ -1,14 +1,20 @@
 import type { OverviewModel, OverviewNode } from "../shared/model";
 import { buildOwnershipIndex } from "./normalize";
 import { hasError, needsInput } from "./status";
+import { UNASSIGNED_SCOPE_ID, type OverviewScope } from "../shared/presentation";
+import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
+import { agentRole, type AgentRole } from "./identity";
+import { nodeAppearance } from "./appearance";
 
-export const NATIVE_UNASSIGNED = "overview:native:unassigned";
-export type NativeFocus = null | { kind: "project" | "workspace" | "unassigned"; id: string };
+export const NATIVE_UNASSIGNED = UNASSIGNED_SCOPE_ID;
+export type NativeFocus = OverviewScope;
 export interface NativeRect { x: number; y: number; width: number; height: number }
 export interface NativeGraphNode {
   id: string; kind: "project" | "workspace" | "agent" | "provider-subagent" | "completed-group" | "unassigned";
   label: string; iconUrl?: string; projectId?: string; workspaceId?: string; parentId?: string;
   memberIds?: readonly string[];
+  role?: AgentRole;
+  inactiveGroup?: InactiveGroup;
   /** Original owned sources, never already-aggregated activity. */
   activityIds: readonly string[];
   body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect;
@@ -20,14 +26,34 @@ export interface NativeGraphEdge {
 export interface NativeGraphLayout {
   width: number; height: number; focus: NativeFocus;
   nodes: readonly NativeGraphNode[]; edges: readonly NativeGraphEdge[];
+  groups: readonly InactiveGroup[];
 }
 export interface NativeSummary { working: number; waiting: number; errors: number; unread: number; managed: number; native: number }
+
+/** Initially show the workspace together with its busiest direct agent. */
+export function nativeInitialScrollX(layout: NativeGraphLayout, viewport: number, agents: ReadonlyMap<string, OverviewNode>): number {
+  let centre = layout.width / 2;
+  if (layout.focus?.kind === "workspace") {
+    const workspace = layout.nodes.find(node => node.id === layout.focus!.id);
+    const children = layout.nodes.filter(node => node.parentId === workspace?.id && (node.kind === "agent" || node.kind === "provider-subagent"));
+    const primary = children.sort((a, b) => nativeSummary(b, agents).working - nativeSummary(a, agents).working || a.id.localeCompare(b.id))[0];
+    if (workspace && primary) {
+      const left = Math.min(workspace.body.x, primary.body.x);
+      const right = Math.max(workspace.body.x + workspace.body.width, primary.body.x + primary.body.width);
+      centre = right - left + 24 <= viewport
+        ? (left + right) / 2
+        : primary.body.x + primary.body.width / 2;
+    }
+  }
+  return Math.max(0, Math.min(layout.width - viewport, centre - viewport / 2));
+}
 
 export function nativeSummary(node: NativeGraphNode, agents: ReadonlyMap<string, OverviewNode>): NativeSummary {
   const total: NativeSummary = { working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 };
   for (const id of new Set(node.activityIds)) {
     const agent = agents.get(id); if (!agent) continue;
     if (agent.kind === "agent") total.managed++; else total.native++;
+    if (agent.freshness && agent.freshness !== "current") continue;
     if (hasError(agent)) total.errors++;
     else if (needsInput(agent)) total.waiting++;
     else if (agent.state === "working") total.working++;
@@ -42,7 +68,7 @@ const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
 interface TreeEntry { definition: Definition; children: TreeEntry[] }
 interface Footprint { body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect }
 
-function footprint(kind: NativeGraphNode["kind"]): Footprint {
+function footprint(kind: NativeGraphNode["kind"], role?: AgentRole): Footprint {
   if (kind === "project" || kind === "unassigned") return {
     body: { x: -36, y: 0, width: 72, height: 72 },
     labelBounds: { x: -76, y: 80, width: 152, height: 64 },
@@ -57,7 +83,8 @@ function footprint(kind: NativeGraphNode["kind"]): Footprint {
     body: { x: -64, y: 5, width: 128, height: 34 },
     bounds: { x: -64, y: 0, width: 128, height: 44 },
   };
-  const size = kind === "agent" ? 32 : 24;
+  const subordinate = role ? role === "subagent" : kind === "provider-subagent";
+  const size = subordinate ? nodeAppearance.subagent.outerSize : nodeAppearance.agent.size;
   return {
     body: { x: -size / 2, y: (44 - size) / 2, width: size, height: size },
     labelBounds: { x: -62, y: 50, width: 124, height: 60 },
@@ -66,14 +93,16 @@ function footprint(kind: NativeGraphNode["kind"]): Footprint {
 }
 
 function positioned(definition: Definition, centreX: number, y: number): NativeGraphNode {
-  const metric = footprint(definition.kind);
+  const metric = footprint(definition.kind, definition.role);
   const translate = (rect: NativeRect): NativeRect => ({ ...rect, x: rect.x + centreX, y: rect.y + y });
   return { ...definition, body: translate(metric.body), bounds: translate(metric.bounds),
     ...(metric.labelBounds ? { labelBounds: translate(metric.labelBounds) } : {}) };
 }
 
 /** Spatial touch graph with readable glyphs, separate labels and clear branch lanes. */
-export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, viewportWidth: number, expanded: ReadonlySet<string> = new Set()): NativeGraphLayout {
+export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, viewportWidth: number, input: CollapseOptions | ReadonlySet<string> = {}): NativeGraphLayout {
+  const options: CollapseOptions = "has" in input ? { groups: new Map([...input].map(id => [id, "expanded" as const])) } : input;
+  const groups: InactiveGroup[] = [];
   const viewport = Math.max(240, Math.floor(viewportWidth || 360));
   const ownership = buildOwnershipIndex(model);
   const agents = new Map(model.nodes.map(node => [node.id, node]));
@@ -108,28 +137,25 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
       if (visited.has(id)) return [];
       visited.add(id); return [id, ...(children.get(id) ?? []).flatMap(child => collect(child.id, visited))];
     };
-    const eligible = (node: OverviewNode): boolean => collect(node.id).every(id => {
-      const member = agents.get(id)!;
-      return member.kind === "provider-subagent" && member.state === "finished" && !member.attention && !hasError(member) && !needsInput(member);
-    });
+    const parents = new Map([...children].flatMap(([owner, values]) => values.map(node => [node.id, owner] as const)));
+    const collapsed = inactiveGroups(model, parents, options);
+    groups.push(...collapsed.groups);
+    const byParent = new Map(collapsed.groups.map(group => [group.parentId, group]));
     const visited = new Set<string>();
     const visit = (owner: Definition): TreeEntry[] => {
       const siblings = children.get(owner.id) ?? [];
-      const finished = candidates.length >= 12 ? siblings.filter(eligible) : [];
-      const members = [...new Set(finished.flatMap(node => collect(node.id)))].sort();
-      const groupId = `overview:native:completed:${encodeURIComponent(owner.id)}`;
-      const folded = members.length >= 4 && !expanded.has(groupId);
-      const hidden = new Set(folded ? finished.map(node => node.id) : []);
       const result: TreeEntry[] = [];
       for (const child of siblings) {
-        if (visited.has(child.id) || hidden.has(child.id)) continue;
+        if (visited.has(child.id) || collapsed.hidden.has(child.id)) continue;
         visited.add(child.id);
         const definition: Definition = { id: child.id, kind: child.kind, label: child.label, parentId: owner.id,
+          role: agentRole(child.id, ownership, agents), inactiveGroup: byParent.get(child.id),
           projectId: owner.projectId, workspaceId: child.workspaceId ?? undefined, activityIds: collect(child.id).sort() };
         result.push({ definition, children: visit(definition) });
       }
-      if (folded) result.push({ definition: { id: groupId, kind: "completed-group", label: `${members.length} completed`, parentId: owner.id,
-        projectId: owner.projectId, workspaceId: owner.workspaceId, memberIds: members, activityIds: members }, children: [] });
+      const group = byParent.get(owner.id);
+      if (group && !group.expanded) result.push({ definition: { id: group.id, kind: "completed-group", label: `${group.memberIds.length} inactive`, parentId: owner.id,
+        projectId: owner.projectId, workspaceId: owner.workspaceId, memberIds: group.memberIds, inactiveGroup: group, activityIds: group.memberIds }, children: [] });
       return result.sort((a, b) => a.definition.id.localeCompare(b.definition.id));
     };
     return visit(parent);
@@ -141,7 +167,7 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
     const columns = Math.max(1, Math.min(4, Math.floor(viewport / 172)));
     const cell = viewport / columns;
     const nodes = definitions.map((definition, index) => positioned(definition, cell * (index % columns + 0.5), 24 + Math.floor(index / columns) * 174));
-    return { width: viewport, height: Math.max(210, 30 + Math.ceil(definitions.length / columns) * 174), focus, nodes, edges: [] };
+    return { width: viewport, height: Math.max(210, 30 + Math.ceil(definitions.length / columns) * 174), focus, nodes, groups, edges: [] };
   }
 
   const projectId = focus.kind === "project" ? focus.id : focus.kind === "workspace" ? ownership.projectByNode.get(focus.id) : undefined;
@@ -161,7 +187,7 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
       return { id: `${root.id}>${child.id}`, source: root.id, target: child.id,
         points: [from, { x: rail, y: from.y }, { x: rail, y: to.y }, to] };
     });
-    return { focus, nodes, edges, width: contentWidth, height: Math.max(240, ...nodes.map(node => node.bounds.y + node.bounds.height + 24)) };
+    return { focus, nodes, groups, edges, width: contentWidth, height: Math.max(240, ...nodes.map(node => node.bounds.y + node.bounds.height + 24)) };
   }
 
   const root: TreeEntry = { definition, children: [] };
@@ -174,7 +200,7 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
   }
   const spans = new Map<string, number>(), heights: number[] = [];
   const measure = (entry: TreeEntry, depth: number): number => {
-    heights[depth] = Math.max(heights[depth] ?? 0, footprint(entry.definition.kind).bounds.height);
+    heights[depth] = Math.max(heights[depth] ?? 0, footprint(entry.definition.kind, entry.definition.role).bounds.height);
     const span = Math.max(180, entry.children.reduce((total, child) => total + measure(child, depth + 1), 0));
     spans.set(entry.definition.id, span); return span;
   };
@@ -197,5 +223,5 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
     for (const child of entry.children) { place(child, cursor, depth + 1, node); cursor += spans.get(child.definition.id)!; }
   };
   place(root, (width - span) / 2, 0);
-  return { focus, nodes, edges, width, height: Math.max(280, ...nodes.map(node => node.bounds.y + node.bounds.height + 24)) };
+  return { focus, nodes, groups, edges, width, height: Math.max(280, ...nodes.map(node => node.bounds.y + node.bounds.height + 24)) };
 }

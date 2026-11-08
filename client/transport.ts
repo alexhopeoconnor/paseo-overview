@@ -1,4 +1,5 @@
 import type { getPaseoClient } from "@getpaseo/plugin/client";
+import type { ObservationFreshness } from "../shared/model";
 
 export type OverviewApi = ReturnType<typeof getPaseoClient>;
 export interface Observation<T> {
@@ -56,10 +57,14 @@ export async function observeDirectory<T>(options: {
   version?(value: T): number | undefined;
   change(message: unknown): DirectoryChange<T> | null;
   changed(values: readonly T[]): void;
+  freshness?(state: ObservationFreshness): void;
   failed(error: unknown): void;
   alive(): boolean;
 }): Promise<() => void> {
-  const first = await options.read(undefined, true);
+  options.freshness?.("refreshing");
+  let first: DirectoryPage<T>;
+  try { first = await options.read(undefined, true); }
+  catch (error) { if (options.alive()) options.freshness?.("stale"); throw error; }
   const observation = first.subscription;
   if (!observation) throw new Error("This Paseo client cannot observe workspace directories.");
   let closed = !options.alive();
@@ -70,7 +75,12 @@ export async function observeDirectory<T>(options: {
   let generation: string | undefined, head = 0;
   let removeListener: (() => void) | undefined;
   const alive = () => !closed && options.alive();
-  const fail = (error: unknown) => { if (alive()) options.failed(error); };
+  const fail = (error: unknown) => {
+    if (!alive()) return;
+    needsRefresh = true;
+    options.freshness?.("stale");
+    options.failed(error);
+  };
   const publish = () => { if (alive()) options.changed([...values.values()]); };
   const apply = (change: DirectoryChange<T>) => {
     if (change.seq !== undefined && change.seq <= (versions.get(change.id) ?? head)) return;
@@ -85,6 +95,7 @@ export async function observeDirectory<T>(options: {
     const collection: Collection = { buffered: seed, overflow: false };
     collecting = collection;
     needsRefresh = false;
+    options.freshness?.("refreshing");
     void collect(collection, page);
   }
   async function collect(collection: Collection, firstPage?: DirectoryPage<T>) {
@@ -117,7 +128,9 @@ export async function observeDirectory<T>(options: {
       }
       values = next; versions = nextVersions; generation = snapshotGeneration; head = snapshotHead;
       for (const change of collection.buffered) apply(change);
-      collecting = null; publish();
+      collecting = null;
+      options.freshness?.("current");
+      publish();
     } catch (error) {
       if (!current()) return;
       // Keep the last complete view. A later event or owned snapshot retries;

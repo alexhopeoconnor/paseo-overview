@@ -1,17 +1,29 @@
 {
   "name": "paseo-overview",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A live, read-only spatial overview of Paseo projects, workspaces and agents.",
   "type": "module",
   "license": "MIT",
   "repository": "github:alexhopeoconnor/paseo-overview",
-  "files": ["paseo-plugin.json", "OVERVIEW.md", "index.client.tsx", "index.server.ts", "client/", "server/", "shared/"],
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.server.json",
     "test": "vitest run"
   },
-  "dependencies": { "three": "0.187.0", "d3-hierarchy": "3.1.2" },
+  "dependencies": {
+    "@floating-ui/dom": "1.8.0",
+    "d3-hierarchy": "3.1.2",
+    "three": "0.187.0"
+  },
   "devDependencies": {
     "@getpaseo/plugin": "0.15.0",
     "@types/d3-hierarchy": "3.1.7",

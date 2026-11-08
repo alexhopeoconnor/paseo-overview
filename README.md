@@ -12,27 +12,41 @@ selection. Ownership routes avoid unrelated nodes and labels. Cross-workspace
 delegation has a separate dashed route. Activity produces bounded heartbeats,
 travelling pulses and short-lived text bubbles.
 
-Click a project or workspace to bring its graph or branch forward. Selecting an
-agent opens its details alongside the graph. Hover or keyboard focus highlights
-its ownership path; arrow keys move between parents, children and siblings.
-Escape or the empty background returns to the full view. The graph has no wheel zoom or orbit
-controls; browser zoom remains available. **Pause motion** and the operating
-system's reduced-motion preference stop animated effects. Finished unread results
-have a separate indicator from permission requests and errors.
+Click a project or workspace to bring its graph or branch forward. Each agent's
+animal emoji is its node, assigned consistently from its host-qualified ID.
+Workspace-level agents use rounded tiles; subordinate agents use smaller diamond
+backings. Their identity stays the same when their title or status changes.
+A delegated agent stays in its owning workspace and has a separate link.
+
+Selecting an agent opens a compact floating details card without resizing the
+graph. Its node, ancestors and ownership path receive a blue selection treatment,
+separate from green working activity. Hover or keyboard focus previews the path;
+arrow keys move between parents, children and siblings. Escape or a background
+click closes details first; another returns to the full view. The graph has no
+wheel zoom or orbit controls; browser zoom remains available.
+
+Quiet subordinate branches appear as **N inactive**. Click the count to expand;
+use the owner's collapse control to fold them again. Preferences survive focus,
+tab suspension and reopening Overview during the same plugin session. Working,
+waiting, failed, unknown and attention-bearing agents remain visible, as do
+selected nodes and delegation endpoints. Groups explain their finished/idle
+composition and preserve original membership and activity totals.
+
+Fresh observed events produce bounded light trails along ownership connections.
+Their arrival highlights each ancestor once. A quiet heartbeat also indicates
+reported working state; it is not a claim that new output arrived. Events are
+coalesced to keep bursts readable. Short nearby bubbles show bounded commands,
+paths or message excerpts with explicit truncation. These limits are independent
+of Paseo's long-response chat setting. Selection does not create activity.
 
 Phones open a touch graph of collapsed project roots with live icons and activity
 halos. Tap a project, then a workspace, to reveal its connected branches. The
-native graph uses React Native views and animation, without WebGL or speech
-bubbles. Back navigation restores the previous level. The same touch graph is
-available if browser graphics are unavailable.
-Completed phone branches may fold as work finishes; explicitly expanded groups
-stay open until navigating to another level.
-
-When a dense full view would make labels too small, completed native subagent
-branches use explicit **N completed** nodes. Working, waiting, failed and
-attention-bearing agents stay individual. Click a count, project or workspace to
-reveal its completed children; Escape restores the full-view arrangement. Counts
-and activity totals always include the represented agents.
+header follows the current scope, with Back navigation and scoped counts. Agent
+identity, selection and explicit inactive groups match desktop; details open in
+the host modal. The native graph uses React Native views and animation, without
+WebGL or speech bubbles. The same touch graph is available if browser graphics
+are unavailable. **Pause motion**, backgrounding and reduced-motion preferences
+stop animations while status remains readable.
 
 ## Observation and coverage
 
@@ -46,8 +60,11 @@ Native subagent coverage is the daemon's known resident roster. An unloaded
 parent is labelled unavailable, rather than shown as an empty known roster.
 Overview never creates, resumes or loads a provider session to fill that gap.
 Quiet working agents retain their reported status; elapsed silence is not a
-failure signal. Reconnection reconciles current state without replaying old
-activity bubbles.
+failure signal. Suspension retains the last coherent children, icons, selection
+and expansion. Resumption reconciles fresh passive snapshots without briefly
+removing branches or replaying old activity. Pending reads say **Updating**;
+failed reads retain **Last known** information. Confirmed empty/nonresident
+snapshots and removals still replace the prior state truthfully.
 
 ## Host requirements
 
@@ -69,7 +86,7 @@ as coverage errors; there is no fallback to an operation that loads an agent.
 
 ## Development and packaging
 
-Three.js and D3 hierarchy are ordinary locked production dependencies. Paseo's
+Three.js, D3 hierarchy and Floating UI DOM are locked production dependencies. Paseo's
 existing compiler bundles them; the host supplies React, React Native, Zod and
 the plugin SDK. The browser renderer loads behind a platform guard. There is no
 separate website, renderer build step or native companion.
@@ -78,7 +95,8 @@ Run `npm ci --ignore-scripts`, `npm run typecheck` and `npm test` in the reviewe
 plugin Docker builder. The TypeScript configurations separately check the
 cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
-empty-to-populated loading, branch layout and routed geometry. Activity and icon
+empty-to-populated loading, suspension, stable identity, explicit grouping,
+branch layout, routed geometry, preview bounds and once-only pulse arrivals. Activity and icon
 updates keep positions stable; structural changes may expand an affected branch.
 
 Managed workstation packaging uses lock schema 5 and recipe 1: signed source,
@@ -93,14 +111,21 @@ Retain the previous artifact for rollback and use the ordinary application backu
 schedule. They do not require a host/Codium cutover or additional full backups.
 Artifact integrity and visual acceptance are verified separately.
 
+Reusable compiled browser, native-component and exact-package checks live in
+[`acceptance/`](acceptance/README.md). Run them in the pinned build environment;
+fixtures are sanitised and evidence stays outside Git. A native JavaScript or
+Hermes check does not replace acceptance on an actual paired phone.
+
 ## Source layout
 
 - `index.client.tsx`, `client/screen.tsx`, `client/native.tsx`: contributed UI.
-- `client/native-layout.ts`: touch graph geometry and collapsed branch membership.
+- `client/header.tsx`, `agent-details.tsx`, `presentation.ts`: shared interaction state.
+- `client/native-layout.ts`, `native-node.tsx`, `native-motion.ts`: touch graph.
+- `client/identity.ts`, `appearance.ts`, `collapse.ts`: shared visual policies.
 - `client/transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: passive observation.
 - `client/normalize.ts`: ownership and display model.
 - `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.
-- `client/activity.ts`, `bubbles.ts`, `status.ts`: bounded effects and status semantics.
+- `client/activity.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: activity and status.
 - `client/web.ts`, `client/scene/`: browser rendering and accessible overlays.
 - `index.server.ts`, `server/api.ts`, `shared/rpc.ts`: read-only host bridge.
 

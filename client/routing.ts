@@ -18,7 +18,7 @@ export interface RoutedEdge {
   unroutable?: true;
 }
 
-export interface RouteNode { id: string; position: Point; body: Rect; bounds: Rect; labelBounds?: Rect }
+export interface RouteNode { id: string; position: Point; body: Rect; bounds: Rect; labelBounds?: Rect; controlBounds?: Rect }
 export interface RouteConflict { edgeId: string; nodeId?: string; otherEdgeId?: string }
 
 function pointLineDistance(point: Point, a: Point, b: Point): number {
@@ -64,31 +64,95 @@ export function pointAlongRoute(route: Pick<RoutedEdge, "points" | "length">, pr
   return { ...route.points[route.points.length - 1]! };
 }
 
-/** Radial handles remain inside the allocated parent/child annular sector. */
-export function routeOwnership(source: RouteNode, target: RouteNode, projectId: string): RoutedEdge {
-  const sourceRadius = Math.hypot(source.position.x, source.position.y);
-  const targetRadius = Math.hypot(target.position.x, target.position.y);
-  const sourceAngle = sourceRadius < 1 ? Math.atan2(target.position.y, target.position.x) : Math.atan2(source.position.y, source.position.x);
-  const targetAngle = Math.atan2(target.position.y, target.position.x);
-  const middleRadius = sourceRadius + (targetRadius - sourceRadius) * 0.5;
-  const radialControl = { x: Math.cos(sourceAngle) * middleRadius, y: Math.sin(sourceAngle) * middleRadius };
-  // Distinct fan ports avoid near-coincident sibling tangents, which are ambiguous
-  // visually and can cross when curves are flattened at different subdivisions.
-  const control1 = lerp(radialControl, target.position, sourceRadius < 1 ? 0 : 0.22);
-  const control2 = { x: Math.cos(targetAngle) * middleRadius, y: Math.sin(targetAngle) * middleRadius };
-  const from = boundaryPoint(source.body, control1, 2);
-  const to = boundaryPoint(target.body, control2, 2);
-  return routedEdge({
-    id: `member:${target.id}`, source: source.id, target: target.id, kind: "membership", projectId,
-    segments: [{ kind: "cubic", from, control1, control2, to }],
+export interface OwnershipRoutingContext {
+  nodes?: readonly RouteNode[];
+  edges?: readonly RoutedEdge[];
+  clearance?: number;
+}
+
+/** Prefer a direct connection; bend only far enough to clear a real obstacle. */
+export function routeOwnership(source: RouteNode, target: RouteNode, projectId: string, context: OwnershipRoutingContext = {}): RoutedEdge {
+  const endpoint = (node: RouteNode, toward: Point): Point => {
+    const direct = boundaryPoint(node.body, toward, 2);
+    if (!node.controlBounds || !pointInRect(direct, inflateRect(node.controlBounds, 2))) return direct;
+    const centre = node.position;
+    return [{ x: centre.x - 1000, y: centre.y }, { x: centre.x + 1000, y: centre.y },
+      { x: centre.x, y: centre.y - 1000 }, { x: centre.x, y: centre.y + 1000 }]
+      .map(point => boundaryPoint(node.body, point, 2))
+      .filter(point => !pointInRect(point, inflateRect(node.controlBounds!, 2)))
+      .sort((a, b) => distance(a, toward) - distance(b, toward))[0] ?? direct;
+  };
+  const from = endpoint(source, target.position);
+  const to = endpoint(target, source.position);
+  const make = (segments: readonly PathSegment[]) => routedEdge({
+    id: `member:${target.id}`, source: source.id, target: target.id,
+    kind: "membership", projectId, segments,
   });
+  const straight = make([{ kind: "line", from, to }]);
+  const obstacles = (context.nodes ?? []).flatMap(node => {
+    if (node.id === source.id || node.id === target.id) return [inflateRect(node.body, 0.5),
+      ...[node.labelBounds, node.controlBounds].filter((rect): rect is Rect => !!rect).map(rect => inflateRect(rect, 2))];
+    return [node.body, ...[node.labelBounds, node.controlBounds].filter((rect): rect is Rect => !!rect)].map(rect => inflateRect(rect, context.clearance ?? 3));
+  });
+  const clear = (route: RoutedEdge) => !route.points.slice(1).some((point, index) =>
+    obstacles.some(rect => segmentIntersectsRect(route.points[index]!, point, rect))) &&
+    !(context.edges ?? []).some(edge => findOwnershipCrossings([route, edge]).length > 0);
+  if (clear(straight)) return straight;
+  const length = distance(from, to);
+  if (length < 1) return straight;
+  const normal = { x: -(to.y - from.y) / length, y: (to.x - from.x) / length };
+  const candidates: RoutedEdge[] = [];
+  for (const bend of [Math.min(12, length * 0.08), Math.min(24, length * 0.16)]) for (const sign of [-1, 1]) {
+    const one = lerp(from, to, 1 / 3), two = lerp(from, to, 2 / 3);
+    candidates.push(make([{ kind: "cubic", from, to,
+      control1: { x: one.x + normal.x * bend * sign, y: one.y + normal.y * bend * sign },
+      control2: { x: two.x + normal.x * bend * sign, y: two.y + normal.y * bend * sign },
+    }]));
+  }
+  const curved = candidates.filter(clear).sort((a, b) => a.length - b.length)[0];
+  if (curved) return curved;
+  // Try short rounded detours around the obstacles on this corridor. Larger
+  // conflicts remain explicit for the layout to resolve by expanding the branch.
+  const blocking = obstacles.filter(rect => segmentIntersectsRect(from, to, rect));
+  for (const obstacle of blocking.slice(0, 6)) {
+    const rect = inflateRect(obstacle, 5);
+    const paths = Math.abs(to.x - from.x) > Math.abs(to.y - from.y)
+      ? [rect.y, rect.y + rect.height].map(y => [from, { x: from.x, y }, { x: to.x, y }, to])
+      : [rect.x, rect.x + rect.width].map(x => [from, { x, y: from.y }, { x, y: to.y }, to]);
+    for (const path of paths) {
+      const route = make(roundedPath(path, 6));
+      if (route.length <= length * 1.6 && clear(route)) candidates.push(route);
+    }
+  }
+  return candidates.filter(clear).sort((a, b) => a.length - b.length)[0] ?? straight;
+}
+
+/** Round polyline corners within their original corridor. The result is revalidated. */
+function roundedPath(points: readonly Point[], radius: number): PathSegment[] {
+  const segments: PathSegment[] = [];
+  let current = points[0]!;
+  for (let index = 1; index < points.length - 1; index++) {
+    const previous = points[index - 1]!, corner = points[index]!, next = points[index + 1]!;
+    const before = Math.min(radius, distance(previous, corner) / 3);
+    const after = Math.min(radius, distance(corner, next) / 3);
+    if (!before || !after) continue;
+    const enter = lerp(corner, previous, before / distance(previous, corner));
+    const leave = lerp(corner, next, after / distance(corner, next));
+    segments.push({ kind: "line", from: current, to: enter });
+    segments.push({ kind: "cubic", from: enter, control1: lerp(enter, corner, 2 / 3),
+      control2: lerp(leave, corner, 2 / 3), to: leave });
+    current = leave;
+  }
+  segments.push({ kind: "line", from: current, to: points[points.length - 1]! });
+  return segments;
 }
 
 export function findUnrelatedNodeIntersections(edges: readonly RoutedEdge[], nodes: readonly RouteNode[], clearance = 1): RouteConflict[] {
   const conflicts: RouteConflict[] = [];
   for (const edge of edges) for (const node of nodes) {
-    if (node.id === edge.source || node.id === edge.target) continue;
-    const obstacles = [node.body, ...(node.labelBounds ? [node.labelBounds] : [])].map(bounds => inflateRect(bounds, clearance + 0.2));
+    const related = node.id === edge.source || node.id === edge.target;
+    const obstacles = (related ? node.controlBounds ? [node.controlBounds] : []
+      : [node.body, ...[node.labelBounds, node.controlBounds].filter((rect): rect is Rect => !!rect)]).map(bounds => inflateRect(bounds, clearance + 0.2));
     if (edge.points.slice(1).some((point, index) => obstacles.some(bounds => segmentIntersectsRect(edge.points[index]!, point, bounds)))) {
       conflicts.push({ edgeId: edge.id, nodeId: node.id });
     }

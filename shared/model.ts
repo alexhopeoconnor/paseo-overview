@@ -2,6 +2,13 @@
 export type OverviewState = "working" | "waiting" | "idle" | "finished" | "error" | "unknown";
 export type RosterAvailability = "resident" | "not_resident" | "unknown";
 export type AttentionReason = "finished" | "permission" | "error" | null;
+export type ObservationFreshness = "current" | "refreshing" | "stale";
+
+export interface EventPreview {
+  title: string;
+  detail?: string;
+  truncated: boolean;
+}
 
 export interface OverviewProject {
   id: string;
@@ -40,6 +47,10 @@ export interface OverviewNode {
   provider?: string;
   detail?: string;
   rosterAvailability?: RosterAvailability;
+  /** Coverage is refreshed independently of the managed agent directory. */
+  rosterFreshness?: ObservationFreshness;
+  /** Last-known status remains useful during a passive refresh, but is not live activity. */
+  freshness?: ObservationFreshness;
 }
 
 export interface OverviewEdge {
@@ -54,6 +65,9 @@ export interface OverviewEvent {
   nodeId: string;
   kind: "activity" | "message" | "tool" | "finished" | "error" | "attention";
   text?: string;
+  preview?: EventPreview;
+  /** Stable source identity for coalescing successive updates to the same preview. */
+  sourceKey?: string;
   /** Unix time in milliseconds, established at observation rather than history import. */
   timestamp: number;
 }
@@ -67,6 +81,7 @@ export interface OverviewModel {
   events: readonly OverviewEvent[];
   readiness: OverviewReadiness;
   connection: "connected" | "connecting" | "disconnected";
+  freshness?: ObservationFreshness;
   revision: number;
 }
 

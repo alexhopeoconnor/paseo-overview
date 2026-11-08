@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { nativeGraphLayout, nativeSummary, NATIVE_UNASSIGNED, type NativeGraphLayout } from "../client/native-layout";
+import { nativeGraphLayout, nativeInitialScrollX, nativeSummary, NATIVE_UNASSIGNED, type NativeGraphLayout } from "../client/native-layout";
+import { StableLayout } from "../client/layout";
 import { rectsOverlap, segmentIntersectsRect, segmentsCross } from "../client/geometry";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 
 const agent = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
-  id, workspaceId, parentId, managedAgentId: native ? "a0" : id, kind: native ? "provider-subagent" : "agent", label: id, state: "idle", attention: false,
+  id, workspaceId, parentId, managedAgentId: native ? "a0" : id, kind: native ? "provider-subagent" : "agent", label: id, state: native ? "working" : "idle", attention: false,
 });
 function fixture(): OverviewModel {
   const workspaces = Array.from({ length: 4 }, (_, index) => ({ id: `w${index}`, projectId: "raw", name: `Workspace ${index}`, projectName: "Project", agentIds: [`a${index}`] }));
@@ -35,6 +36,21 @@ function valid(layout: NativeGraphLayout) {
 }
 
 describe("native spatial ownership graph", () => {
+  it("initially frames a visible primary agent and its workspace when both fit", () => {
+    const model = fixture();
+    model.nodes = [...model.nodes, ...Array.from({ length: 5 }, (_, index) => agent(`child${index}`, "w0", "a0", true)),
+      agent("second", "w0"), agent("third", "w0")];
+    const layout = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 390);
+    const scroll = nativeInitialScrollX(layout, 390, new Map(model.nodes.map(node => [node.id, node])));
+    const primary = layout.nodes.find(node => node.id === "a0")!, workspace = layout.nodes.find(node => node.id === "w0")!;
+    expect(primary.body.x - scroll).toBeGreaterThanOrEqual(0);
+    expect(primary.body.x + primary.body.width - scroll).toBeLessThanOrEqual(390);
+    const unionWidth = Math.max(workspace.body.x + workspace.body.width, primary.body.x + primary.body.width) - Math.min(workspace.body.x, primary.body.x);
+    if (unionWidth + 24 <= 390) {
+      expect(workspace.body.x - scroll).toBeGreaterThanOrEqual(0);
+      expect(workspace.body.x + workspace.body.width - scroll).toBeLessThanOrEqual(390);
+    }
+  });
   it("shows every live root including empty projects and uses connected spatial workspace nodes", () => {
     const model = fixture();
     const full = nativeGraphLayout(model, null, 360);
@@ -45,14 +61,14 @@ describe("native spatial ownership graph", () => {
     expect(focused.nodes.filter(node => node.kind === "workspace").every(node => node.body.width === 148 && node.body.height === 48)).toBe(true);
     valid(focused);
   });
-  it("uses circles and reserved branch lanes for a deep multi-agent tree", () => {
+  it("uses role-aware tile footprints and reserved branch lanes for a deep multi-agent tree", () => {
     const model = fixture();
     model.nodes = [...model.nodes, agent("another", "w0"), agent("native-a", "w0", "a0", true), agent("native-b", "w0", "a0", true),
       agent("native-deep", "w0", "native-a", true), agent("native-deeper", "w0", "native-deep", true), agent("other-child", "w0", "another", true)];
     const layout = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360);
     expect(layout.width).toBeGreaterThan(360);
     expect(layout.nodes.find(node => node.id === "a0")!.body.width).toBe(32);
-    expect(layout.nodes.find(node => node.id === "native-a")!.body.width).toBe(24);
+    expect(layout.nodes.find(node => node.id === "native-a")!.body.width).toBe(34);
     expect(layout.nodes.find(node => node.id === "native-a")!.labelBounds!.height).toBe(60);
     expect(layout.nodes.filter(node => node.kind === "agent").map(node => node.body.y)).toEqual([layout.nodes.find(node => node.id === "a0")!.body.y, layout.nodes.find(node => node.id === "another")!.body.y]);
     valid(layout);
@@ -68,7 +84,9 @@ describe("native spatial ownership graph", () => {
     const represented = layout.nodes.flatMap(node => node.memberIds ?? (model.nodes.some(agent => agent.id === node.id) ? [node.id] : []));
     expect(represented.sort()).toEqual(model.nodes.filter(node => node.workspaceId === "w0").map(node => node.id).sort());
     expect(new Set(represented).size).toBe(represented.length); valid(layout);
-    const expanded = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360, new Set([group.id]));
+    const desktop = new StableLayout().update(model, 1200, 900);
+    expect(desktop.groups.find(item => item.id === group.id)?.memberIds).toEqual(group.memberIds);
+    const expanded = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360, { groups: new Map([[group.id, "expanded"]]) });
     expect(expanded.nodes.some(node => node.kind === "completed-group")).toBe(false);
     expect(expanded.nodes.filter(node => node.kind === "provider-subagent")).toHaveLength(18); valid(expanded);
   });
@@ -94,5 +112,16 @@ describe("native spatial ownership graph", () => {
     expect(next.edges).toEqual(first.edges);
     const summary = nativeSummary(first.nodes.find(node => node.id === "a0")!, new Map(model.nodes.map(node => [node.id, node])));
     expect(summary.managed).toBe(1); expect(summary.native).toBe(2);
+  });
+  it("does not announce cached working statuses as current activity while preserving roster counts", () => {
+    const model = fixture();
+    model.nodes = [...model.nodes, { ...agent("fresh", "w0", "a0", true), state: "working" },
+      { ...agent("refreshing", "w0", "a0", true), state: "working", freshness: "refreshing" },
+      { ...agent("stale", "w0", "a0", true), state: "working", freshness: "stale" }];
+    const full = nativeGraphLayout(model, null, 360);
+    const summary = nativeSummary(full.nodes.find(node => node.id === "p")!, new Map(model.nodes.map(node => [node.id, node])));
+    expect(summary.working).toBe(1);
+    expect(summary.native).toBe(3);
+    expect(summary.managed).toBe(4);
   });
 });

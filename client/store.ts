@@ -1,8 +1,9 @@
-import type { OverviewEvent, OverviewModel, OverviewReadiness } from "../shared/model";
+import type { EventPreview, ObservationFreshness, OverviewEvent, OverviewModel, OverviewReadiness } from "../shared/model";
 import type { AgentRecord, NativeRecord, ProjectIcon, ProjectRecord, RosterSnapshot, RosterUpdate, WorkspaceRecord } from "../shared/observation";
 import { ProjectIcons } from "./icons";
 import { displayId, normalise } from "./normalize";
 import { RosterTracker } from "./rosters";
+import { previewSummary, previewText, timelinePreview } from "./event-preview";
 import { ReadQueue, errorText, observeDirectory, record, type DirectoryChange, type DirectoryPage, type OverviewApi } from "./transport";
 
 interface Options {
@@ -27,8 +28,7 @@ function fingerprint(text: string): string {
   return (hash >>> 0).toString(36);
 }
 function excerpt(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  return Array.from(value.replace(/\s+/g, " ").trim()).slice(0, 160).join("") || undefined;
+  return previewText(value).text || undefined;
 }
 
 export function createOverviewStore(options: Options) {
@@ -36,6 +36,9 @@ export function createOverviewStore(options: Options) {
   let visible = true, started = false, disposed = false, generation = 0, revision = 0, eventSequence = 0;
   let agents: AgentRecord[] = [], workspaces: WorkspaceRecord[] = [], projects: ProjectRecord[] = [];
   let readiness: OverviewReadiness = { projects: false, workspaces: false, agents: false };
+  let directoryFreshness: Record<keyof OverviewReadiness, ObservationFreshness> = {
+    projects: "refreshing", workspaces: "refreshing", agents: "refreshing",
+  };
   let events: OverviewEvent[] = [];
   let current: OverviewModel = { hostId: options.hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { ...readiness }, connection, revision };
   let lastComplete: OverviewModel | undefined;
@@ -46,6 +49,9 @@ export function createOverviewStore(options: Options) {
   const timelines = new Map<string, () => void>();
   const seen = new Map<string, number>();
   const timelinePositions = new Map<string, { epoch: string; seq: number }>();
+  const turnSources = new Map<string, string>();
+
+  const active = () => !disposed && visible && connection === "connected";
 
   function publish() {
     if (disposed) return;
@@ -53,13 +59,17 @@ export function createOverviewStore(options: Options) {
     const now = Date.now();
     events = events.filter(event => now - event.timestamp < 8000).slice(-64);
     const complete = readiness.projects && readiness.workspaces && readiness.agents;
+    const freshness: ObservationFreshness = !active() || Object.values(directoryFreshness).includes("stale")
+      ? "stale" : complete ? "current" : "refreshing";
     current = !complete && lastComplete ? {
-      ...lastComplete, readiness: { ...readiness }, events: [...events], connection, revision: ++revision,
+      ...lastComplete,
+      nodes: lastComplete.nodes.map(node => ({ ...node, freshness, ...(node.kind === "agent" ? { rosterFreshness: freshness } : {}) })),
+      readiness: { ...readiness }, events: [...events], connection, freshness, revision: ++revision,
     } : rosters && icons ? normalise({
       hostId: options.hostId, agents, workspaces, projects,
       rosters: rosters.states, icons: icons.urls,
-      events: [...events], readiness, connection, revision: ++revision,
-    }) : { ...current, readiness: { ...readiness }, events: [...events], connection, revision: ++revision };
+      events: [...events], readiness, connection, freshness, revision: ++revision,
+    }) : { ...current, readiness: { ...readiness }, events: [...events], connection, freshness, revision: ++revision };
     if (complete) lastComplete = current;
     options.onChange(current);
     if (events.length && expiryTimer === undefined) expiryTimer = setTimeout(() => {
@@ -70,30 +80,38 @@ export function createOverviewStore(options: Options) {
     if (disposed || publishTimer !== undefined) return;
     publishTimer = setTimeout(publish, 40);
   }
+  function setDirectoryFreshness(key: keyof OverviewReadiness, state: ObservationFreshness) {
+    directoryFreshness[key] = state;
+    readiness[key] = state === "current";
+    schedule();
+  }
   function report(error: unknown) { if (!disposed && visible && connection === "connected") options.onError(errorText(error)); }
-  function addEvent(nodeId: string, kind: OverviewEvent["kind"], text: string | undefined, key: string) {
+  function addEvent(nodeId: string, kind: OverviewEvent["kind"], text: string | undefined, key: string, preview?: EventPreview, sourceKey?: string) {
     if (disposed || !visible || connection !== "connected" || options.observeActivity === false) return;
     const now = Date.now();
     if (seen.has(key)) return;
     seen.set(key, now);
     for (const [id, at] of seen) if (now - at > 30000 || seen.size > 1024) seen.delete(id);
-    events.push({ id: `${generation}:${++eventSequence}`, nodeId, kind, text, timestamp: now });
+    events.push({ id: `${generation}:${++eventSequence}`, nodeId, kind, text, preview, sourceKey, timestamp: now });
     events = events.slice(-64); schedule();
   }
-  function timelineItem(nodeId: string, item: unknown, key: string, parentId?: string) {
+  function timelineItem(nodeId: string, item: unknown, key: string, parentId?: string, sourceNamespace = nodeId) {
     const value = record(item);
     if (!value) return;
     if (value.type === "tool_call") {
       // The parent tool row often mirrors the provider's separate native child.
       if (parentId && rosters?.state(parentId)?.subagents.some(child => child.toolCallId && child.toolCallId === value.callId)) return;
-      const text = `${excerpt(value.name) || "Tool"} · ${excerpt(value.status) || "updated"}`;
-      addEvent(nodeId, value.status === "failed" ? "error" : "tool", text, `${key}:${value.callId}:${value.status}`);
+      const preview = timelinePreview(value)!;
+      addEvent(nodeId, value.status === "failed" ? "error" : "tool", previewSummary(preview), `${key}:${value.callId}:${value.status}`,
+        preview, `${sourceNamespace}:tool:${value.callId ?? key}`);
     } else if (value.type === "assistant_message") {
-      const text = excerpt(value.text);
-      if (text) addEvent(nodeId, "message", text, `${key}:${fingerprint(text)}:${typeof value.text === "string" ? value.text.length : 0}`);
+      const preview = timelinePreview(value)!;
+      const text = preview.detail;
+      if (text) addEvent(nodeId, "message", text, `${key}:${fingerprint(text)}:${typeof value.text === "string" ? value.text.length : 0}`,
+        preview, `${sourceNamespace}:message:${value.messageId ?? turnSources.get(nodeId) ?? "current"}`);
     } else if (value.type === "error" || (value.type === "notification" && value.level === "error")) {
       const text = excerpt(value.message);
-      addEvent(nodeId, "error", text, `${key}:${fingerprint(text || "")}`);
+      addEvent(nodeId, "error", text, `${key}:${fingerprint(text || "")}`, timelinePreview(value));
     } else if (value.type === "reasoning") {
       // Show the occurrence, not private reasoning text or a fabricated summary.
       addEvent(nodeId, "activity", undefined, `${key}:reasoning`);
@@ -119,8 +137,11 @@ export function createOverviewStore(options: Options) {
     if (event.type === "error") { report(event.error); return; }
     if (!acceptPosition(nodeId, data.epoch, data.seq)) return;
     const key = `${nodeId}:${data.epoch ?? "live"}:${data.seq ?? event.turnId ?? "turn"}:${event.type}`;
-    if (event.type === "timeline") timelineItem(nodeId, event.item, key, parentId);
-    else if (event.type === "turn_started") addEvent(nodeId, "activity", "Turn started", `${key}:${data.timestamp}`);
+    if (event.type === "timeline") timelineItem(nodeId, event.item, key, parentId, `${nodeId}:${data.epoch ?? "live"}`);
+    else if (event.type === "turn_started") {
+      turnSources.set(nodeId, String(event.turnId ?? data.timestamp ?? key));
+      addEvent(nodeId, "activity", "Turn started", `${key}:${data.timestamp}`);
+    }
     else if (event.type === "turn_completed" || event.type === "turn_canceled") addEvent(nodeId, "finished", event.type === "turn_completed" ? "Turn finished" : "Turn canceled", `${key}:${data.timestamp}`);
     else if (event.type === "turn_failed") addEvent(nodeId, "error", excerpt(event.error), `${key}:${data.timestamp}`);
     else if (event.type === "permission_requested") addEvent(nodeId, "attention", "Waiting for permission", `${key}:${record(event.request)?.id ?? data.timestamp}`);
@@ -128,11 +149,11 @@ export function createOverviewStore(options: Options) {
   function nativeUpdate(update: RosterUpdate) {
     if (update.kind !== "timeline") { rosters?.receive(update); return; }
     const roster = rosters?.state(update.parentAgentId);
-    if (options.observeActivity === false || update.replayed || roster?.availability !== "resident") return;
+    if (options.observeActivity === false || update.replayed || roster?.availability !== "resident" || roster.freshness !== "current") return;
     if (!roster.subagents.some(child => child.id === update.subagentId)) return;
     const nodeId = displayId(options.hostId, "native", update.parentAgentId, update.subagentId);
     if (!acceptPosition(nodeId, update.epoch, update.seq)) return;
-    timelineItem(nodeId, update.item, `${nodeId}:${update.epoch}:${update.seq}`);
+    timelineItem(nodeId, update.item, `${nodeId}:${update.epoch}:${update.seq}`, undefined, `${nodeId}:${update.epoch}`);
   }
   function reconcileAgents(alive: () => boolean) {
     if (!alive()) return;
@@ -173,12 +194,13 @@ export function createOverviewStore(options: Options) {
   function halt() {
     generation++;
     readiness = { projects: false, workspaces: false, agents: false };
+    directoryFreshness = { projects: "stale", workspaces: "stale", agents: "stale" };
     for (const cleanup of cleanups.splice(0)) cleanup();
     for (const cleanup of timelines.values()) cleanup();
     timelines.clear();
-    rosters?.dispose(); icons?.dispose(); queue?.dispose();
-    rosters = undefined; icons = undefined; queue = undefined;
-    events = []; seen.clear(); timelinePositions.clear();
+    rosters?.suspend(); icons?.suspend(); queue?.dispose();
+    queue = undefined;
+    events = []; timelinePositions.clear(); turnSources.clear();
     if (expiryTimer !== undefined) { clearTimeout(expiryTimer); expiryTimer = undefined; }
     if (publishTimer !== undefined) { clearTimeout(publishTimer); publishTimer = undefined; }
     starting = undefined;
@@ -189,21 +211,24 @@ export function createOverviewStore(options: Options) {
     if (starting) return starting;
     const run = ++generation;
     readiness = { projects: false, workspaces: false, agents: false };
+    directoryFreshness = { projects: "refreshing", workspaces: "refreshing", agents: "refreshing" };
     const alive = () => !disposed && visible && connection === "connected" && generation === run;
     const ownedQueue = new ReadQueue(4); queue = ownedQueue;
     const failed = (error: unknown) => { if (alive()) report(error); };
-    rosters = new RosterTracker({
+    rosters ??= new RosterTracker({
       queue: ownedQueue, read: options.readRoster,
-      changed: () => { if (alive()) schedule(); }, failed,
+      changed: () => { if (active()) schedule(); }, failed: report,
       activity: (parentId: string, child: NativeRecord) => {
-        if (!alive()) return;
+        if (!active()) return;
         const kind = child.status === "failed" ? "error" : child.status === "running" ? "activity" : "finished";
         addEvent(displayId(options.hostId, "native", parentId, child.id), kind,
           child.status === "running" ? "Subagent started" : child.status === "failed" ? "Subagent failed" : "Subagent finished",
           `${parentId}:${child.id}:${child.updatedAt}:${child.status}`);
       },
     });
-    icons = new ProjectIcons({ queue: ownedQueue, read: options.readIcon, changed: () => { if (alive()) schedule(); }, failed });
+    icons ??= new ProjectIcons({ queue: ownedQueue, read: options.readIcon, changed: () => { if (active()) schedule(); }, failed: report });
+    rosters.suspend();
+    icons.suspend();
     const observeTask = async () => {
       const eventObservation = options.paseo.observeEvents(["project.update", "agent.provider_subagents.update"]);
       cleanups.push(() => { void eventObservation.release().catch(() => {}); });
@@ -226,7 +251,7 @@ export function createOverviewStore(options: Options) {
       }
       async function loadProjects(seed: ProjectChange[] = []) {
         const token = ++projectToken;
-        readiness.projects = false;
+        setDirectoryFreshness("projects", "refreshing");
         loadingProjects = true; projectOverflow = false; projectBuffer = seed;
         try {
           const response = await options.paseo.projects.list({ sync: {} });
@@ -239,14 +264,20 @@ export function createOverviewStore(options: Options) {
           projectVersions.clear();
           for (const project of response.projects) if (project.syncSeq !== undefined) projectVersions.set(project.projectId, project.syncSeq);
           for (const change of projectBuffer) applyProject(change);
-          loadingProjects = false; projectNeedsRefresh = false; projectBuffer = []; readiness.projects = true; syncIcons();
-        } catch (error) { if (token === projectToken) { loadingProjects = false; projectNeedsRefresh = true; failed(error); } }
+          loadingProjects = false; projectNeedsRefresh = false; projectBuffer = [];
+          setDirectoryFreshness("projects", "current"); syncIcons();
+        } catch (error) {
+          if (alive() && token === projectToken) {
+            loadingProjects = false; projectNeedsRefresh = true;
+            setDirectoryFreshness("projects", "stale"); failed(error);
+          }
+        }
       }
       let eventSnapshots = 0;
       eventObservation.subscribe({
         snapshot: () => {
           if (++eventSnapshots > 1 && alive()) {
-            events = []; seen.clear(); timelinePositions.clear();
+            events = []; timelinePositions.clear(); turnSources.clear();
             for (const agent of agents) rosters?.invalidate(agent.id);
             void loadProjects();
           }
@@ -265,6 +296,8 @@ export function createOverviewStore(options: Options) {
       });
       await eventObservation.ready;
       if (!alive()) return;
+      rosters?.resume(ownedQueue);
+      icons?.resume(ownedQueue);
       const register = async (promise: Promise<() => void>) => {
         const cleanup = await promise;
         if (alive()) cleanups.push(cleanup); else cleanup();
@@ -291,7 +324,7 @@ export function createOverviewStore(options: Options) {
             agents = values.map(entry => entry.agent);
             readiness.agents = true;
             reconcileAgents(alive);
-          }, failed, alive,
+          }, freshness: state => setDirectoryFreshness("agents", state), failed, alive,
         })),
         register(observeDirectory<WorkspaceRecord & { syncSeq?: number }>({
           read: async (cursor, subscribe) => await options.paseo.workspaces.list({
@@ -308,7 +341,8 @@ export function createOverviewStore(options: Options) {
               generation: data.generation, seq: data.seq,
             } as DirectoryChange<WorkspaceRecord>;
           },
-          changed: values => { workspaces = [...values]; readiness.workspaces = true; syncIcons(); }, failed, alive,
+          changed: values => { workspaces = [...values]; readiness.workspaces = true; syncIcons(); },
+          freshness: state => setDirectoryFreshness("workspaces", state), failed, alive,
         })),
       ]);
       if (alive()) publish();
@@ -333,6 +367,22 @@ export function createOverviewStore(options: Options) {
       visible = next; halt(); publish();
       if (next && started && connection === "connected") void observe().catch(() => {});
     },
-    dispose(): void { if (!disposed) { disposed = true; halt(); } },
+    suspend(): void {
+      if (disposed || !visible) return;
+      visible = false; halt(); publish();
+    },
+    async resume(): Promise<void> {
+      if (disposed) return;
+      if (!visible) { visible = true; halt(); publish(); }
+      if (started && connection === "connected") await observe();
+    },
+    dispose(): void {
+      if (!disposed) {
+        disposed = true;
+        halt(); rosters?.dispose(); icons?.dispose();
+        rosters = undefined; icons = undefined;
+        seen.clear();
+      }
+    },
   };
 }

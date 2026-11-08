@@ -2,26 +2,35 @@ import type { OverviewModel } from "../../shared/model";
 import type { OverviewTheme } from "../../shared/renderer";
 import type { PositionedNode, SceneLayout } from "../layout";
 import type { ActivityBubble } from "../bubbles";
-import { hasError, needsInput, statusColour, statusLabel } from "../status";
-import { segmentIntersectsRect, type Rect } from "../geometry";
+import { hasError, needsInput, statusLabel } from "../status";
+import { boundaryPoint, type Rect, type Point } from "../geometry";
+import { agentIdentity } from "../identity";
+import { identityAccent, nodeAppearance, selectionColour } from "../appearance";
+import { placeNearby, type NearbyPlacement } from "../placement";
 import { graphMetrics } from "./metrics";
 
 interface Element {
-  button: HTMLButtonElement; glyph: HTMLSpanElement; image: HTMLImageElement;
+  button: HTMLButtonElement; glyph: HTMLSpanElement; avatar: HTMLSpanElement; image: HTMLImageElement; activity: HTMLSpanElement;
   label: HTMLSpanElement; badge: HTMLSpanElement; node: PositionedNode;
   failedIcon?: string;
   summary: string;
+  badgeTone: "muted" | "error" | "waiting" | "working" | "accent";
 }
-interface Bubble { button: HTMLButtonElement; text: HTMLSpanElement }
-interface Callbacks { activate(id: string): void; hover(id: string | null): void; hold(id: string, held: boolean): void }
+interface Bubble {
+  button: HTMLButtonElement; title: HTMLSpanElement; text: HTMLSpanElement;
+  pointer: HTMLDivElement; placement?: NearbyPlacement; anchor?: Rect;
+  size?: { key: string; width: number; height: number };
+}
+interface Callbacks { activate(id: string): void; hover(id: string | null): void; hold(id: string, held: boolean): void; collapse(id: string): void }
 const css = (element: HTMLElement, values: Partial<CSSStyleDeclaration>) => Object.assign(element.style, values);
-const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 
 /** Permanent elements use the exact layout bounds; transient text uses free screen space. */
 export class GraphOverlay {
   readonly element: HTMLDivElement;
   private readonly nodes = new Map<string, Element>();
   private readonly bubbles = new Map<string, Bubble>();
+  private readonly collapseControls = new Map<string, { button: HTMLButtonElement; parentId: string; count: number }>();
+  private readonly bodies = new Map<string, Rect>();
   private readonly positions = new Map<string, Rect>();
   private readonly bubbleHeld = new Set<string>();
   private readonly delegationDescriptions = new Map<string, string[]>();
@@ -30,14 +39,14 @@ export class GraphOverlay {
   private model: OverviewModel | undefined;
   private hovered: string | null = null;
   private occupied: Rect[] = [];
-  private edges: readonly { points: readonly { x: number; y: number }[]; bounds: Rect }[] = [];
+  private edges: readonly (readonly Point[])[] = [];
 
   constructor(parent: HTMLElement, private theme: OverviewTheme, private readonly callbacks: Callbacks) {
     this.element = document.createElement("div");
     css(this.element, { position: "absolute", inset: "0", pointerEvents: "none", overflow: "hidden", zIndex: "2", fontFamily: "inherit" });
     this.element.setAttribute("aria-label", "Project activity graphs");
     this.tooltip.setAttribute("role", "tooltip");
-    css(this.tooltip, { position: "absolute", padding: "10px 13px", borderRadius: "10px", border: `1px solid ${theme.border}`, fontSize: "12px", lineHeight: "1.5", whiteSpace: "pre-line", overflowWrap: "anywhere", overflow: "hidden", boxShadow: "0 8px 28px #00000018", display: "none", zIndex: "12", boxSizing: "border-box" });
+    css(this.tooltip, { position: "absolute", padding: "7px 9px", borderRadius: "10px", border: `1px solid ${theme.border}`, fontSize: "12px", lineHeight: "1.5", whiteSpace: "pre-line", overflowWrap: "anywhere", overflow: "hidden", boxShadow: "0 8px 28px #00000018", display: "none", zIndex: "12", boxSizing: "border-box" });
     this.element.appendChild(this.tooltip); parent.appendChild(this.element);
   }
 
@@ -54,6 +63,23 @@ export class GraphOverlay {
       for (const id of [edge.source, edge.target]) this.delegationDescriptions.set(id, [...(this.delegationDescriptions.get(id) ?? []), description]);
     }
     const agents = new Map(model.nodes.map(node => [node.id, node]));
+    const expandedGroups = new Map((layout.groups ?? []).filter(group => group.expanded).map(group => [group.id, group]));
+    for (const [id, control] of this.collapseControls) if (!expandedGroups.has(id)) { control.button.remove(); this.collapseControls.delete(id); }
+    for (const [id, group] of expandedGroups) {
+      let control = this.collapseControls.get(id);
+      if (!control) {
+        const button = document.createElement("button"); button.type = "button";
+        css(button, { position: "absolute", width: "36px", height: "24px", padding: "1px 5px", borderRadius: "8px", font: "inherit", fontSize: "11px", fontWeight: "600", pointerEvents: "auto", cursor: "pointer", zIndex: "8", boxSizing: "border-box", transformOrigin: "top left" });
+        button.dataset.overviewCollapse = id;
+        button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.collapse(id); });
+        this.element.appendChild(button);
+        control = { button, parentId: group.parentId, count: group.memberIds.length }; this.collapseControls.set(id, control);
+      }
+      control.parentId = group.parentId; control.count = group.memberIds.length;
+      control.button.textContent = `−${control.count}`;
+      control.button.setAttribute("aria-label", `Collapse ${control.count} inactive subagents`);
+      control.button.setAttribute("aria-expanded", "true");
+    }
     for (const node of layout.nodes.values()) {
       let item = this.nodes.get(node.id);
       if (!item) {
@@ -61,6 +87,10 @@ export class GraphOverlay {
         css(button, { position: "absolute", display: "grid", placeItems: "center", padding: "0", margin: "0", border: "0", background: "transparent", cursor: "pointer", pointerEvents: "auto", transformOrigin: "center", outlineOffset: "5px", font: "inherit", touchAction: "manipulation" });
         const glyph = document.createElement("span");
         css(glyph, { position: "absolute", display: "grid", placeItems: "center", boxSizing: "border-box", pointerEvents: "none" });
+        const avatar = document.createElement("span");
+        css(avatar, { position: "absolute", display: "grid", placeItems: "center", pointerEvents: "none", fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif', lineHeight: "1" });
+        const activity = document.createElement("span");
+        css(activity, { position: "absolute", left: "-3px", bottom: "-3px", width: "6px", height: "6px", borderRadius: "50%", display: "none", pointerEvents: "none" });
         const image = document.createElement("img"); image.alt = ""; image.draggable = false;
         css(image, { objectFit: "contain", pointerEvents: "none", borderRadius: "9px", position: "absolute" });
         image.addEventListener("error", () => {
@@ -72,7 +102,7 @@ export class GraphOverlay {
         css(label, { position: "absolute", fontWeight: "600", lineHeight: "1.3", textAlign: "center", overflow: "hidden", display: "-webkit-box", webkitBoxOrient: "vertical", webkitLineClamp: "2", overflowWrap: "anywhere", pointerEvents: "none" });
         const badge = document.createElement("span");
         css(badge, { position: "absolute", top: "-4px", right: "-4px", minWidth: "15px", height: "15px", padding: "0 3px", boxSizing: "border-box", borderRadius: "8px", fontSize: "9px", fontWeight: "700", lineHeight: "15px", pointerEvents: "none" });
-        button.append(glyph, image, label, badge);
+        button.append(glyph, avatar, image, label, badge, activity);
         button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.activate(node.id); });
         button.addEventListener("pointerenter", () => this.hover(node.id));
         button.addEventListener("pointerleave", () => { if (document.activeElement !== button) this.hover(null); });
@@ -80,21 +110,27 @@ export class GraphOverlay {
         button.addEventListener("blur", () => { if (!button.matches(":hover")) this.hover(null); });
         button.addEventListener("keydown", event => this.onKey(event, node.id));
         this.element.appendChild(button);
-        item = { button, glyph, image, label, badge, node, summary: "" }; this.nodes.set(node.id, item);
+        item = { button, glyph, avatar, image, label, badge, activity, node, summary: "", badgeTone: "accent" }; this.nodes.set(node.id, item);
       }
       item.node = node;
       const agent = agents.get(node.id), w = node.body.width, h = node.body.height;
       const completedGroup = node.kind === "completed-group";
       const members = completedGroup ? (node.memberIds ?? []).flatMap(id => { const member = agents.get(id); return member ? [member] : []; }) : [];
-      const hitW = Math.max(28, w), hitH = Math.max(28, h);
-      css(item.button, { width: `${hitW}px`, height: `${hitH}px`, borderRadius: completedGroup ? "15px" : node.kind === "workspace" ? "12px" : "50%" });
-      css(item.glyph, { width: `${w}px`, height: `${h}px`, borderRadius: completedGroup ? "15px" : node.kind === "workspace" ? "11px" : node.kind === "project" ? "18px" : "50%", fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650" });
+      const subordinate = node.role === "subagent";
+      const hitW = Math.max(nodeAppearance.desktopHitTarget, w), hitH = Math.max(nodeAppearance.desktopHitTarget, h);
+      css(item.button, { width: `${hitW}px`, height: `${hitH}px`, borderRadius: node.kind === "workspace" || completedGroup ? "12px" : "10px" });
+      const glyphWidth = subordinate ? nodeAppearance.subagent.backingSize : w, glyphHeight = subordinate ? nodeAppearance.subagent.backingSize : h;
+      css(item.glyph, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: completedGroup ? "10px" : node.kind === "workspace" ? "11px" : node.kind === "project" ? "16px" : subordinate ? "6px" : "10px", fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650", transform: subordinate ? "rotate(45deg)" : "none" });
+      css(item.avatar, { fontSize: `${subordinate ? nodeAppearance.subagent.emojiSize : nodeAppearance.agent.emojiSize}px`, width: `${w}px`, height: `${h}px` });
+      item.avatar.textContent = agent ? agentIdentity(agent.id).emoji : "";
+      item.button.dataset.overviewRole = node.role ?? "";
+      item.button.dataset.overviewAvatar = item.avatar.textContent;
       Object.assign(item.button.dataset, { overviewKind: node.kind, overviewId: node.id, overviewProject: node.projectId, overviewWorkspace: node.workspaceId ?? "", overviewStatus: agent?.state ?? (completedGroup && members.length && members.every(member => member.state === "finished") ? "finished" : ""), overviewAttention: agent?.attentionReason ?? "" });
       if (completedGroup) {
         item.button.dataset.overviewMembers = JSON.stringify(members.map(member => member.id));
         item.button.setAttribute("aria-expanded", "false");
       } else { delete item.button.dataset.overviewMembers; item.button.removeAttribute("aria-expanded"); }
-      item.label.textContent = completedGroup ? `${members.length} completed` : node.label;
+      item.label.textContent = completedGroup ? `${members.length} inactive` : node.label;
       item.label.style.fontSize = `${node.kind === "project" ? graphMetrics.project.fontSize : node.kind === "workspace" ? graphMetrics.workspace.fontSize : completedGroup ? graphMetrics.completedGroup.fontSize : graphMetrics.agent.fontSize}px`;
       item.label.style.lineHeight = node.kind === "project" ? "22px" : node.kind === "workspace" ? "20px" : completedGroup ? "18px" : "1.3";
       item.label.style.webkitLineClamp = completedGroup ? "1" : "2";
@@ -102,7 +138,7 @@ export class GraphOverlay {
       else if (node.kind === "workspace") css(item.label, { left: `${(hitW - w) / 2 + 10}px`, top: `${(hitH - h) / 2 + 3}px`, width: `${w - 20}px`, height: "40px", display: "-webkit-box" });
       else if (completedGroup) css(item.label, { left: `${(hitW - w) / 2 + 6}px`, top: `${hitH / 2 - 9}px`, width: `${w - 12}px`, height: "18px", display: "-webkit-box" });
       else item.label.style.display = "none";
-      item.glyph.textContent = node.kind === "project" ? node.label.slice(0, 1).toUpperCase() : node.kind === "agent" ? (agent?.provider ?? "A").slice(0, 1).toUpperCase() : "";
+      item.glyph.textContent = node.kind === "project" ? node.label.slice(0, 1).toUpperCase() : "";
       if (node.kind === "project" && node.iconUrl) {
         if (item.image.getAttribute("src") !== node.iconUrl) { item.failedIcon = undefined; item.image.src = node.iconUrl; }
         const available = item.failedIcon !== node.iconUrl;
@@ -112,15 +148,18 @@ export class GraphOverlay {
       const project = model.projects.find(project => project.id === node.id);
       const descendants = node.kind === "project" ? model.nodes.filter(child => model.workspaces.some(workspace => workspace.id === child.workspaceId && workspace.projectId === project?.projectId)) : node.kind === "workspace" ? model.nodes.filter(child => child.workspaceId === node.id) : completedGroup ? members : agent ? [agent] : [];
       const waiting = descendants.filter(child => !hasError(child) && needsInput(child)).length, errors = descendants.filter(hasError).length;
-      const active = descendants.filter(child => child.state === "working" && !hasError(child) && !needsInput(child)).length;
+      const active = descendants.filter(child => (!child.freshness || child.freshness === "current") && child.state === "working" && !hasError(child) && !needsInput(child)).length;
       const unread = descendants.filter(child => child.attention && child.attentionReason === "finished" && child.state !== "working" && !hasError(child) && !needsInput(child)).length;
-      item.badge.textContent = errors ? "!" : waiting ? "◆" : node.kind === "project" && active ? String(active) : unread ? "•" : "";
+      const stale = agent?.freshness && agent.freshness !== "current";
+      item.badge.textContent = stale ? "◌" : errors ? "!" : waiting ? "◆" : node.kind === "project" && active ? String(active) : unread ? "•" : subordinate ? "↳" : active ? "•" : "";
       item.badge.style.display = item.badge.textContent ? "block" : "none";
-      item.badge.style.background = errors ? this.theme.error : waiting ? this.theme.waiting : active ? this.theme.working : this.theme.accent;
-      const summary = agent ? statusLabel(agent) : `${active} working · ${waiting} waiting · ${errors} errors · ${unread} unread`;
+      item.badgeTone = stale ? "muted" : errors ? "error" : waiting ? "waiting" : active ? "working" : "accent";
+      const summary = agent ? statusLabel(agent) : completedGroup
+        ? `${members.filter(member => member.state === "finished").length} finished · ${members.filter(member => member.state === "idle").length} idle`
+        : `${active} working · ${waiting} waiting · ${errors} errors · ${unread} unread`;
       item.summary = summary;
       const delegations = this.delegationDescriptions.get(node.id)?.join(". ");
-      item.button.setAttribute("aria-label", completedGroup ? `${members.length} completed subagents; ${summary}. Click to expand and show individual subagents.` : `${node.label}, ${node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
+      item.button.setAttribute("aria-label", completedGroup ? `${members.length} inactive subagents; ${summary}. Expand this group.` : `${node.label}, ${node.role ?? node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
     }
     this.updateTheme(this.theme);
   }
@@ -166,66 +205,64 @@ export class GraphOverlay {
     this.theme = theme;
     const agents = new Map(this.model?.nodes.map(node => [node.id, node]));
     for (const [id, item] of this.nodes) {
-      const agent = agents.get(id), colour = agent ? statusColour(agent, theme) : theme.accent;
+      const agent = agents.get(id);
       const completedGroup = item.node.kind === "completed-group";
       const structural = item.node.kind === "project" || item.node.kind === "workspace";
-      css(item.glyph, { background: structural || completedGroup ? theme.surface : colour, color: structural || completedGroup ? theme.foreground : theme.background, border: `1px ${completedGroup ? "dashed" : "solid"} ${structural || completedGroup ? theme.border : colour}`, boxShadow: structural ? "0 3px 12px #0000000b, inset 0 1px 0 #ffffff12" : "none" });
-      item.label.style.color = completedGroup ? theme.muted : theme.foreground; item.badge.style.color = theme.background;
+      const identityColour = agent ? identityAccent(agentIdentity(agent.id).accentIndex, theme) : theme.border;
+      css(item.glyph, { background: theme.surface, color: theme.foreground,
+        border: `1px ${completedGroup ? "dashed" : "solid"} ${structural || completedGroup ? theme.border : identityColour}`,
+        boxShadow: structural ? "0 2px 8px #0000000b, inset 0 1px 0 #ffffff12" : completedGroup ? "2px 2px 0 #00000008" : `0 2px 5px #00000010, inset 0 0 0 2px ${identityColour}16` });
+      item.label.style.color = completedGroup ? theme.muted : theme.foreground;
+      item.badge.style.color = theme.background;
+      item.badge.style.background = theme[item.badgeTone];
+      item.activity.style.background = theme.accent;
     }
+    for (const control of this.collapseControls.values()) css(control.button, { background: theme.surface, color: theme.selection ?? selectionColour(theme), border: `1px solid ${theme.border}` });
     css(this.tooltip, { color: theme.foreground, background: theme.surface, borderColor: theme.border });
-    for (const item of this.bubbles.values()) css(item.button, { background: theme.surface, color: theme.foreground, borderColor: theme.border });
+    for (const item of this.bubbles.values()) {
+      css(item.button, { background: theme.surface, color: theme.foreground, borderColor: theme.border });
+      item.pointer.style.background = theme.border;
+    }
   }
 
-  beginPositions(): void { this.occupied = []; this.positions.clear(); }
+  beginPositions(): void { this.occupied = []; this.positions.clear(); this.bodies.clear(); }
+  anchor(id: string): Rect | null { return this.bodies.get(id) ?? null; }
   positionNode(id: string, x: number, y: number, scale: number, opacity: number, selected: boolean, focused: boolean, highlighted: boolean, foreground = false): void {
     const item = this.nodes.get(id); if (!item) return;
-    css(item.button, { left: `${x}px`, top: `${y}px`, transform: `translate(-50%, -50%) scale(${scale})`, opacity: String(opacity), zIndex: selected ? "6" : focused ? "5" : foreground ? "4" : "2", outline: selected || focused ? `2px solid ${this.theme.accent}` : highlighted ? `1px solid ${this.theme.accent}` : "", pointerEvents: opacity < 0.08 ? "none" : "auto" });
+    css(item.button, { left: `${x}px`, top: `${y}px`, transform: `translate(-50%, -50%) scale(${scale})`, opacity: String(opacity), zIndex: selected ? "6" : focused ? "5" : foreground ? "4" : "2", outline: "none", pointerEvents: opacity < 0.08 ? "none" : "auto" });
+    const emphasis = this.theme.selection ?? selectionColour(this.theme);
+    item.glyph.style.outline = selected ? `2px solid ${emphasis}` : focused || highlighted ? `1.5px solid ${emphasis}` : "none";
+    item.glyph.style.outlineOffset = selected ? "3px" : "2px";
+    item.glyph.style.filter = selected ? `drop-shadow(0 2px 4px ${emphasis}55)` : "none";
+    item.button.dataset.overviewHighlighted = String(highlighted || selected || focused);
     if (item.node.kind === "completed-group") item.button.removeAttribute("aria-pressed");
     else item.button.setAttribute("aria-pressed", String(selected || focused));
     const b = item.node.bounds;
     const rect = { x: x + (b.x - item.node.position.x) * scale, y: y + (b.y - item.node.position.y) * scale, width: b.width * scale, height: b.height * scale };
     this.positions.set(id, rect); if (opacity > 0.25) this.occupied.push(rect);
+    const body = item.node.body;
+    this.bodies.set(id, { x: x + (body.x - item.node.position.x) * scale, y: y + (body.y - item.node.position.y) * scale, width: body.width * scale, height: body.height * scale });
+    for (const control of this.collapseControls.values()) if (control.parentId === id) {
+      const controlBounds = item.node.controlBounds;
+      if (!controlBounds) { control.button.style.display = "none"; continue; }
+      const box = { x: x + (controlBounds.x - item.node.position.x) * scale, y: y + (controlBounds.y - item.node.position.y) * scale, width: controlBounds.width * scale, height: controlBounds.height * scale };
+      css(control.button, { left: `${box.x}px`, top: `${box.y}px`, width: `${controlBounds.width}px`, height: `${controlBounds.height}px`, transform: `scale(${scale})`, opacity: String(opacity), display: opacity > 0.25 ? "block" : "none" });
+      if (opacity > 0.25) this.occupied.push(box);
+    }
   }
-  setRoutes(routes: readonly (readonly { x: number; y: number }[])[]): void {
-    this.edges = routes.filter(points => points.length > 1).map(points => {
-      let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-      for (const point of points) { left = Math.min(left, point.x); top = Math.min(top, point.y); right = Math.max(right, point.x); bottom = Math.max(bottom, point.y); }
-      return { points, bounds: { x: left, y: top, width: right - left, height: bottom - top } };
-    });
+  setRoutes(routes: readonly (readonly Point[])[]): void {
+    this.edges = routes.filter(points => points.length > 1);
   }
 
-  private place(anchor: Rect, width: number, height: number, viewportWidth: number, viewportHeight: number): Rect | undefined {
-    if (width <= 0 || height <= 0) return undefined;
-    const candidates = [
-      { x: anchor.x + anchor.width + 14, y: anchor.y + anchor.height / 2 - height / 2 },
-      { x: anchor.x - width - 14, y: anchor.y + anchor.height / 2 - height / 2 },
-      { x: anchor.x + anchor.width / 2 - width / 2, y: anchor.y - height - 14 },
-      { x: anchor.x + anchor.width / 2 - width / 2, y: anchor.y + anchor.height + 14 },
-    ];
-    const centreX = anchor.x + anchor.width / 2, centreY = anchor.y + anchor.height / 2;
-    // Prefer nearby text, then search outward and the remaining viewport without
-    // crossing another label, node or the actual segments of a routed link.
-    for (let ring = 0; ring < 4; ring++) {
-      const dx = (anchor.width + width) / 2 + 14 + ring * 64;
-      const dy = (anchor.height + height) / 2 + 14 + ring * 48;
-      for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-        candidates.push({ x: centreX + sx! * dx - width / 2, y: centreY + sy! * dy - height / 2 });
-      }
-    }
-    const grid = [];
-    for (let row = 0; row <= 5; row++) for (let column = 0; column <= 5; column++) grid.push({
-      x: 8 + (viewportWidth - width - 16) * column / 5,
-      y: 8 + (viewportHeight - height - 16) * row / 5,
-    });
-    grid.sort((a, b) => Math.hypot(a.x + width / 2 - centreX, a.y + height / 2 - centreY) - Math.hypot(b.x + width / 2 - centreX, b.y + height / 2 - centreY));
-    candidates.push(...grid);
-    return candidates.map(point => ({ ...point, width, height })).find(box => box.x >= 8 && box.y >= 8 && box.x + width <= viewportWidth - 8 && box.y + height <= viewportHeight - 8 && !this.occupied.some(rect => overlaps(rect, box)) && !this.edges.some(route => overlaps(route.bounds, box) && route.points.slice(1).some((point, index) => segmentIntersectsRect(route.points[index]!, point, box))));
+  private place(anchor: Rect, width: number, height: number, viewportWidth: number, viewportHeight: number, previous?: NearbyPlacement): NearbyPlacement | undefined {
+    return placeNearby({ anchor, width, height, viewport: { x: 0, y: 0, width: viewportWidth, height: viewportHeight }, occupied: this.occupied, routes: this.edges, previous });
   }
 
   finishPositions(bubbles: readonly ActivityBubble[], width: number, height: number): void {
     const ids = new Set(bubbles.map(bubble => bubble.nodeId));
-    for (const [id, item] of this.bubbles) if (!ids.has(id)) { this.holdBubble(id, false); item.button.remove(); this.bubbles.delete(id); }
+    for (const [id, item] of this.bubbles) if (!ids.has(id)) { this.holdBubble(id, false); item.button.remove(); item.pointer.remove(); this.bubbles.delete(id); }
     this.tooltip.style.display = "none";
+    for (const item of this.nodes.values()) item.activity.style.display = "none";
     if (this.hovered) {
       const item = this.nodes.get(this.hovered), anchor = this.positions.get(this.hovered);
       const agent = this.model?.nodes.find(node => node.id === this.hovered);
@@ -240,7 +277,7 @@ export class GraphOverlay {
           css(this.tooltip, { display: "block", visibility: "hidden", width: `${tooltipWidth}px`, height: "auto", maxHeight: `${maxHeight}px` });
           this.tooltipSize = { key, width: tooltipWidth, height: Math.min(maxHeight, this.tooltip.offsetHeight) };
         }
-        const box = this.place(anchor, this.tooltipSize.width, this.tooltipSize.height, width, height);
+        const box = this.place(anchor, this.tooltipSize.width, this.tooltipSize.height, width, height)?.box;
         css(this.tooltip, { display: box ? "block" : "none", visibility: "visible" });
         if (box) { css(this.tooltip, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.width}px`, height: `${box.height}px` }); this.occupied.push(box); }
       }
@@ -249,25 +286,59 @@ export class GraphOverlay {
       let item = this.bubbles.get(bubble.nodeId);
       if (!item) {
         const button = document.createElement("button"); button.type = "button";
-        css(button, { position: "absolute", padding: "10px 12px", height: "62px", overflow: "hidden", border: `1px solid ${this.theme.border}`, borderRadius: "13px 13px 13px 3px", background: this.theme.surface, color: this.theme.foreground, font: "inherit", fontSize: "12px", lineHeight: "1.45", textAlign: "left", boxShadow: "0 8px 26px #00000016", zIndex: "10", pointerEvents: "auto", cursor: "pointer", boxSizing: "border-box" });
+        css(button, { position: "absolute", padding: "6px 8px", overflow: "hidden", border: `1px solid ${this.theme.border}`, borderRadius: "10px", background: this.theme.surface, color: this.theme.foreground, font: "inherit", fontSize: "13px", lineHeight: "1.35", textAlign: "left", boxShadow: "0 3px 12px #00000014", zIndex: "10", pointerEvents: "auto", cursor: "pointer", boxSizing: "border-box" });
         button.dataset.overviewBubble = bubble.nodeId;
-        const text = document.createElement("span"); css(text, { display: "-webkit-box", webkitLineClamp: "2", webkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" }); button.appendChild(text);
+        const title = document.createElement("span"), text = document.createElement("span");
+        css(title, { display: "block", fontSize: "11px", fontWeight: "650", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: "2px" });
+        css(text, { display: "-webkit-box", webkitLineClamp: "2", webkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" });
+        const pointer = document.createElement("div");
+        css(pointer, { position: "absolute", height: "1px", background: this.theme.border, transformOrigin: "left center", pointerEvents: "none", zIndex: "9" });
+        button.append(title, text);
         button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.activate(bubble.nodeId); });
         for (const event of ["pointerenter", "focus"]) button.addEventListener(event, () => this.holdBubble(bubble.nodeId, true));
         button.addEventListener("pointerleave", () => { if (document.activeElement !== button) this.holdBubble(bubble.nodeId, false); });
         button.addEventListener("blur", () => { if (!button.matches(":hover")) this.holdBubble(bubble.nodeId, false); });
-        this.element.appendChild(button); item = { button, text }; this.bubbles.set(bubble.nodeId, item);
+        this.element.append(pointer, button); item = { button, title, text, pointer }; this.bubbles.set(bubble.nodeId, item);
       }
-      item.text.textContent = bubble.text; item.button.setAttribute("aria-label", `${bubble.kind}: ${bubble.text}`);
-      const anchor = this.positions.get(bubble.nodeId), box = anchor && this.place(anchor, Math.min(220, width - 24), 62, width, height);
-      item.button.style.display = box ? "block" : "none";
-      if (!box) this.holdBubble(bubble.nodeId, false);
-      if (box) { css(item.button, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.width}px` }); this.occupied.push(box); }
+      const agent = this.model?.nodes.find(node => node.id === bubble.nodeId);
+      const avatar = agent ? agentIdentity(agent.id).emoji : "▥";
+      const title = bubble.preview?.title ?? bubble.kind;
+      const text = bubble.preview?.detail ?? bubble.text;
+      item.title.textContent = `${avatar} ${title}`; item.text.textContent = text === title ? "" : text;
+      item.text.style.display = item.text.textContent ? "-webkit-box" : "none";
+      item.title.style.marginBottom = item.text.textContent ? "2px" : "0";
+      item.button.setAttribute("aria-label", `${agent?.label ?? "Agent"}: ${title}. ${text}`);
+      const bubbleWidth = Math.min(width - 24, Math.max(145, Math.min(260, Math.max(title.length * 6 + 38, (text?.length ?? 0) * 5.5 + 16))));
+      const sizeKey = `${bubbleWidth}:${title}:${text}`;
+      if (item.size?.key !== sizeKey) {
+        css(item.button, { display: "block", visibility: "hidden", width: `${bubbleWidth}px`, height: "auto" });
+        item.size = { key: sizeKey, width: bubbleWidth, height: item.button.offsetHeight };
+      }
+      const anchor = this.bodies.get(bubble.nodeId);
+      let previous = item.placement;
+      if (previous && item.anchor && anchor) previous = { ...previous, box: { ...previous.box, x: previous.box.x + anchor.x - item.anchor.x, y: previous.box.y + anchor.y - item.anchor.y } };
+      const placed = anchor && this.place(anchor, item.size.width, item.size.height, width, height, previous);
+      item.button.style.display = placed ? "block" : "none";
+      item.pointer.style.display = placed ? "block" : "none";
+      item.button.style.visibility = "visible";
+      if (!placed || !anchor) {
+        this.holdBubble(bubble.nodeId, false);
+        const source = this.nodes.get(bubble.nodeId); if (source) source.activity.style.display = "block";
+        continue;
+      }
+      item.placement = placed; item.anchor = anchor;
+      const box = placed.box;
+      css(item.button, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.width}px` }); this.occupied.push(box);
+      const sourceX = anchor.x + anchor.width / 2, sourceY = anchor.y + anchor.height / 2;
+      const toX = Math.max(box.x, Math.min(box.x + box.width, sourceX)), toY = Math.max(box.y, Math.min(box.y + box.height, sourceY));
+      const dx = toX - sourceX, dy = toY - sourceY, length = Math.hypot(dx, dy);
+      const from = boundaryPoint(anchor, { x: toX, y: toY }, 2);
+      css(item.pointer, { left: `${from.x}px`, top: `${from.y}px`, width: `${Math.hypot(toX - from.x, toY - from.y)}px`, transform: `rotate(${Math.atan2(dy, dx)}rad)` });
     }
   }
   dispose(): void {
     for (const id of new Set([...this.bubbleHeld, ...(this.hovered ? [this.hovered] : [])])) this.callbacks.hold(id, false);
     this.bubbleHeld.clear(); this.hovered = null; this.callbacks.hover(null);
-    this.element.remove(); this.nodes.clear(); this.bubbles.clear(); this.positions.clear(); this.delegationDescriptions.clear();
+    this.element.remove(); this.nodes.clear(); this.bubbles.clear(); this.collapseControls.clear(); this.positions.clear(); this.bodies.clear(); this.delegationDescriptions.clear();
   }
 }

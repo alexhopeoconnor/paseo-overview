@@ -88,7 +88,10 @@ export function aggregateOwnedActivity(
   for (const node of sources.values()) {
     const error = hasError(node);
     const waiting = !error && needsInput(node);
-    const working = !error && !waiting && node.state === "working";
+    // Retained descriptors keep geometry and last-known status useful during a
+    // passive refresh; they do not claim that an unconfirmed agent is working.
+    const current = !node.freshness || node.freshness === "current";
+    const working = current && !error && !waiting && node.state === "working";
     const contribution: OwnedActivity = {
       score: tracker.score(node.id, now),
       working: Number(working), waiting: Number(waiting), errors: Number(error),

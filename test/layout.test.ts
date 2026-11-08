@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import { BACKGROUND_GROUP, StableLayout, canvasNode, nodeCollisionBounds, parentMap, type SceneLayout } from "../client/layout";
 import { distance, rectsOverlap } from "../client/geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections } from "../client/routing";
+import { inactiveGroupId } from "../client/collapse";
 import { graphMetrics } from "../client/scene/metrics";
+import { nodeAppearance } from "../client/appearance";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 
 const node = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
-  id, workspaceId, parentId, managedAgentId: native ? parentId! : id, kind: native ? "provider-subagent" : "agent", label: id, state: "idle", attention: false,
+  id, workspaceId, parentId, managedAgentId: native ? parentId! : id, kind: native ? "provider-subagent" : "agent", label: id, state: native ? "working" : "idle", attention: false,
 });
 function model(projectCounts = [2, 1, 0], children = 0): OverviewModel {
   const workspaces = projectCounts.flatMap((count, project) => Array.from({ length: count }, (_, index) => ({
@@ -33,7 +35,7 @@ function valid(layout: SceneLayout) {
     }
     for (let a = 0; a < nodes.length; a++) for (let b = a + 1; b < nodes.length; b++) {
       const first = nodes[a]!, second = nodes[b]!;
-      if ((first.kind === "agent" || first.kind === "provider-subagent") && (second.kind === "agent" || second.kind === "provider-subagent")) {
+      if (!first.controlBounds && !second.controlBounds && (first.kind === "agent" || first.kind === "provider-subagent") && (second.kind === "agent" || second.kind === "provider-subagent")) {
         expect(distance(first.position, second.position)).toBeGreaterThanOrEqual((first.bounds.width + second.bounds.width) / 2);
       } else expect(nodeCollisionBounds(first).some(a => nodeCollisionBounds(second).some(b => rectsOverlap(a, b)))).toBe(false);
     }
@@ -44,6 +46,17 @@ function valid(layout: SceneLayout) {
 }
 
 describe("project-root layout", () => {
+  it("restores full-view framing after an inactive branch expands and collapses", () => {
+    const engine = new StableLayout(), value = model([3, 2, 1, 0], 20);
+    value.nodes = value.nodes.map(node => node.kind === "provider-subagent" ? { ...node, state: "finished" as const } : node);
+    const before = engine.update(value, 1100, 820);
+    const group = before.groups[0]!;
+    engine.update(value, 1100, 820, { kind: "workspace", id: "w0:0" }, { groups: new Map([[group.id, "expanded"]]) });
+    const restored = engine.update(value, 1100, 820, null, { groups: new Map([[group.id, "collapsed"]]) });
+    expect(restored.projects.map(project => ({ id: project.id, position: project.position, scale: project.scale })))
+      .toEqual(before.projects.map(project => ({ id: project.id, position: project.position, scale: project.scale })));
+    valid(restored);
+  });
   it("lays out asynchronously loaded projects without a resize", () => {
     const engine = new StableLayout(), complete = model([4, 0, 0, 3, 2, 4, 1], 29);
     engine.update({ ...complete, projects: [], nodes: [], workspaces: [] }, 1196, 1173);
@@ -53,7 +66,11 @@ describe("project-root layout", () => {
     expect(result.nodes.size).toBe(complete.projects.length + complete.workspaces.length + complete.nodes.length);
     expect(new Set(result.projects.map(project => Math.round(project.position.x))).size).toBeGreaterThan(1);
     valid(result);
-    expect(result.projects[0]!.scale, JSON.stringify(result.projects.map(project => ({ id: project.id, bounds: project.bounds })))).toBeGreaterThanOrEqual(0.75);
+    // The denser active fixture has larger avatars than the old circle nodes.
+    // Assert readable output dimensions instead of its previous arbitrary scale.
+    const scale = result.projects[0]!.scale;
+    expect(scale * nodeAppearance.agent.emojiSize).toBeGreaterThanOrEqual(16);
+    expect(scale * graphMetrics.workspace.fontSize).toBeGreaterThanOrEqual(13);
   });
   it("preserves positions on status, name and icon updates", () => {
     const engine = new StableLayout(), initial = model();
@@ -151,7 +168,7 @@ describe("project-root layout", () => {
     expect(result.nodes.size).toBe(value.projects.length + value.workspaces.length + value.nodes.length);
     valid(result);
   });
-  it("collapses only finished native subtrees when density requires it, preserving every original identity", () => {
+  it("collapses quiet subordinate subtrees without a density threshold, preserving every original identity", () => {
     const value = model([4, 0, 0, 3, 2, 4, 1], 43);
     value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
     value.nodes = [...value.nodes, { ...node("active-grandchild", "w0:0", "native:0", true), state: "working" },
@@ -170,37 +187,59 @@ describe("project-root layout", () => {
     for (const group of groups) for (const id of group.memberIds!) expect(result.memberToDisplay.get(id)).toBe(group.id);
     valid(result);
   });
-  it("expands focused completed groups and restores the identical full-view anchors", () => {
-    const value = model([4, 0, 0, 3, 2, 4, 1], 43);
+  it("keeps explicit groups independent of focus and remembers expansion across membership changes", () => {
+    const value = model([2, 1], 8);
     value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
-    value.nodes = [...value.nodes, ...Array.from({ length: 6 }, (_, index) => ({ ...node(`other-completed:${index}`, "w0:1", "a:w0:1", true), state: "finished" as const }))];
-    const engine = new StableLayout(), base = engine.update(value, 930, 761);
-    expect([...base.nodes.values()].some(item => item.kind === "completed-group")).toBe(true);
-    expect(base.projects[0]!.scale * graphMetrics.workspace.fontSize).toBeGreaterThanOrEqual(10.75);
-    const focused = engine.update(value, 930, 761, { kind: "workspace", id: "w0:0" });
-    expect(value.nodes.filter(item => item.workspaceId === "w0:0").every(item => focused.nodes.has(item.id))).toBe(true);
-    expect([...focused.nodes.values()].some(item => item.kind === "completed-group" && item.workspaceId === "w0:1")).toBe(true);
-    expect(focused.projects.map(project => [project.id, project.position, project.scale])).toEqual(base.projects.map(project => [project.id, project.position, project.scale]));
-    const restored = engine.update(value, 930, 761);
-    expect(restored.projects.map(project => [project.id, project.position, project.scale])).toEqual(base.projects.map(project => [project.id, project.position, project.scale]));
-    expect([...restored.nodes.keys()]).toEqual([...base.nodes.keys()]);
-    valid(restored);
-    const projectFocused = engine.update(value, 930, 761, { kind: "project", id: "p0" });
-    expect(value.nodes.every(item => projectFocused.nodes.has(item.id))).toBe(true);
+    const engine = new StableLayout(), base = engine.update(value, 1200, 900);
+    const group = base.groups.find(group => group.parentId === "a:w0:0")!;
+    expect(group.memberIds).toHaveLength(8);
+    expect(group.expanded).toBe(false);
+    const focused = engine.update(value, 1200, 900, { kind: "workspace", id: "w0:0" });
+    expect([...focused.nodes.keys()]).toEqual([...base.nodes.keys()]);
+    expect(focused.projects.map(project => project.position)).toEqual(base.projects.map(project => project.position));
+    const options = { groups: new Map([[group.id, "expanded" as const]]) };
+    const expanded = engine.update(value, 1200, 900, { kind: "workspace", id: "w0:0" }, options);
+    expect(group.memberIds.every(id => expanded.nodes.has(id))).toBe(true);
+    expect(expanded.nodes.get("a:w0:0")!.inactiveGroup?.expanded).toBe(true);
+    const returned = engine.update(value, 1200, 900, null, options);
+    expect([...returned.nodes.keys()]).toEqual([...expanded.nodes.keys()]);
+    const grown = { ...value, nodes: [...value.nodes, { ...node("new-finished", "w0:0", "a:w0:0", true), state: "finished" as const }] };
+    expect(engine.update(grown, 1200, 900, null, options).nodes.has("new-finished")).toBe(true);
+    const collapsed = engine.update(grown, 1200, 900, null, { groups: new Map([[group.id, "collapsed"]]) });
+    expect(collapsed.nodes.get(group.id)!.memberIds).toHaveLength(9);
+    valid(collapsed);
   });
-  it("keeps newly finished nodes visible and immediately reveals a grouped node needing attention", () => {
-    const value = model([4, 0, 0, 3, 2, 4, 1], 43);
-    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: item.id === "native:0" ? "working" as const : "finished" as const } : item);
-    const engine = new StableLayout(), initial = engine.update(value, 1196, 1157);
-    const allFinished = { ...value, nodes: value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item) };
-    const finished = engine.update(allFinished, 1196, 1157);
-    expect(finished.nodes.has("native:0")).toBe(true);
-    expect([...finished.nodes.keys()]).toEqual([...initial.nodes.keys()]);
-    expect(finished.projects.map(project => project.position)).toEqual(initial.projects.map(project => project.position));
-    const needsAttention = { ...allFinished, nodes: allFinished.nodes.map(item => item.id === "native:1" ? { ...item, state: "waiting" as const, attention: true } : item) };
-    const revealed = engine.update(needsAttention, 1196, 1157);
+  it("protects inspected descendants and immediately reveals a grouped node needing attention", () => {
+    const value = model([2, 1], 8);
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
+    const engine = new StableLayout();
+    const inspected = engine.update(value, 1200, 900, null, { protectedIds: new Set(["native:0"]) });
+    expect(inspected.nodes.has("native:0")).toBe(true);
+    expect(inspected.nodes.get(inactiveGroupId("a:w0:0"))!.memberIds).toHaveLength(7);
+    const waiting = { ...value, nodes: value.nodes.map(item => item.id === "native:1" ? { ...item, state: "waiting" as const, attention: true } : item) };
+    const revealed = engine.update(waiting, 1200, 900);
     expect(revealed.nodes.has("native:1")).toBe(true);
     expect(revealed.memberToDisplay.get("native:1")).toBe("native:1");
-    expect(engine.update(allFinished, 1196, 1157).nodes.has("native:1")).toBe(true);
+    valid(revealed);
+  });
+  it("retains grouped geometry during roster refresh and reuses unchanged edge instances", () => {
+    const value = model([2, 1], 5);
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
+    const engine = new StableLayout(), first = engine.update(value, 1200, 900);
+    const refreshing = engine.update({ ...value, nodes: value.nodes.map(node => ({ ...node, freshness: "refreshing" as const })) }, 1200, 900);
+    expect([...refreshing.nodes.keys()]).toEqual([...first.nodes.keys()]);
+    expect(refreshing.projects.map(project => project.position)).toEqual(first.projects.map(project => project.position));
+    expect(refreshing.projects[0]!.edges).toBe(first.projects[0]!.edges);
+  });
+  it("sizes managed children by their ownership role instead of their provider kind", () => {
+    const value = model([1, 1]);
+    value.nodes = [...value.nodes, { ...node("managed-child", "w0:0", "a:w0:0"), state: "working" }, node("remote-child", "w1:0", "a:w0:0")];
+    value.edges = [{ id: "delegation", source: "a:w0:0", target: "remote-child", kind: "delegation" }];
+    const result = new StableLayout().update(value, 1200, 900);
+    expect(result.nodes.get("managed-child")!.role).toBe("subagent");
+    expect(result.nodes.get("managed-child")!.body.width).toBe(34);
+    expect(result.nodes.get("remote-child")!.role).toBe("agent");
+    expect(result.nodes.get("remote-child")!.body.width).toBe(32);
+    valid(result);
   });
 });

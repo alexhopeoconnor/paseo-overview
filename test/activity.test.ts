@@ -29,6 +29,23 @@ describe("activity", () => {
     expect(decay(2, -1)).toBe(2);
   });
 
+  it("retains decaying activity through refresh without claiming cached agents are working", () => {
+    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+      projects: [], workspaces: [], agents: [{ id: "a", title: "A", provider: "codex", status: "running" }],
+    });
+    const tracker = new ActivityTracker(), id = "h:agent:a";
+    const event: OverviewEvent = { id: "live", nodeId: id, kind: "tool", timestamp: 1000 };
+    tracker.ingest([event], 1000);
+    for (const freshness of ["refreshing", "stale"] as const) {
+      const retained = { ...model, nodes: model.nodes.map(node => ({ ...node, freshness })) };
+      expect(aggregateOwnedActivity(retained, buildOwnershipIndex(retained), tracker, 6000).get(id))
+        .toMatchObject({ managed: 1, working: 0, score: 0.5 });
+    }
+    expect(tracker.ingest([event], 6000)).toEqual([]);
+    expect(aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 6000).get(id))
+      .toMatchObject({ managed: 1, working: 1, score: 0.5 });
+  });
+
   it("drops burst pulses instead of building a backlog", () => {
     const limiter = new PulseLimiter();
     expect(limiter.admit("a", "w1", 1000)).toBe(true);

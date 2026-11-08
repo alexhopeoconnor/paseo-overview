@@ -1,13 +1,18 @@
 import { usePaseo, useRpc, useHosts, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { Modal } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AppState, Platform, Pressable, ScrollView, Text, View } from "react-native";
+import { AppState, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import type { OverviewModel } from "../shared/model";
-import type { OverviewFocus, OverviewRenderer, OverviewTheme } from "../shared/renderer";
+import type { OverviewPresentation, PresentationAction } from "../shared/presentation";
+import type { FloatingCardPositioner, OverviewAnchor, OverviewRenderer, OverviewTheme } from "../shared/renderer";
 import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
-import { createOverviewStore } from "./store";
+import { AgentDetails } from "./agent-details";
+import { selectionColour } from "./appearance";
+import { OverviewHeader } from "./header";
 import { NativeOverview } from "./native";
-import { mountOverview } from "./web";
-import { hasError, needsInput, statusColour, statusLabel } from "./status";
+import { parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation } from "./presentation";
+import { createOverviewStore } from "./store";
+import { mountFloatingCard, mountOverview } from "./web";
 
 function emptyModel(hostId: string): OverviewModel {
   return { hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { projects: false, workspaces: false, agents: false }, connection: "connecting", revision: 0 };
@@ -17,35 +22,56 @@ export function OverviewScreen(props: PluginScreenProps) {
   const paseo = usePaseo();
   const hosts = useHosts();
   const getRoster = useRpc(getRosterRpc), getIcon = useRpc(getProjectIconRpc);
-  const [model, setModel] = useState<OverviewModel>(() => emptyModel(props.host.id));
+  const [observedModel, setModel] = useState<OverviewModel>(() => emptyModel(props.host.id));
+  // A reused screen can render once with the preceding host's store before its
+  // effect is replaced. Never validate the new host's saved selection against it.
+  const model = useMemo(() => observedModel.hostId === props.host.id ? observedModel : emptyModel(props.host.id), [observedModel, props.host.id]);
   const [error, setError] = useState("");
   const [renderError, setRenderError] = useState("");
-  const [motion, setMotion] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [focus, setFocus] = useState<OverviewFocus>(null);
+  const [owned, setOwned] = useState(() => ({ hostId: props.host.id, value: recallPresentation(props.host.id) }));
+  const presentation: OverviewPresentation = owned.hostId === props.host.id ? owned.value : recallPresentation(props.host.id);
+  if (owned.hostId !== props.host.id) setOwned({ hostId: props.host.id, value: presentation });
+  const dispatch = useCallback((action: PresentationAction) => {
+    setOwned(previous => {
+      const value = reducePresentation(previous.hostId === props.host.id ? previous.value : recallPresentation(props.host.id), action);
+      rememberPresentation(props.host.id, value);
+      return previous.hostId === props.host.id && previous.value === value ? previous : { hostId: props.host.id, value };
+    });
+  }, [props.host.id]);
+
   const panel = useRef<View | null>(null);
+  const card = useRef<View | null>(null);
   const renderer = useRef<OverviewRenderer | null>(null);
+  const floating = useRef<FloatingCardPositioner | null>(null);
+  const anchor = useRef<OverviewAnchor | null>(null);
   const store = useRef<ReturnType<typeof createOverviewStore> | null>(null);
-  const theme = useMemo<OverviewTheme>(() => ({
-    background: props.theme.colors.surface0, surface: props.theme.colors.surface1,
-    foreground: props.theme.colors.foreground, muted: props.theme.colors.foregroundMuted,
-    border: props.theme.colors.border, accent: props.theme.colors.accent,
-    working: props.theme.colors.statusSuccess, waiting: props.theme.colors.statusWarning,
-    error: props.theme.colors.statusDanger,
-  }), [props.theme]);
-  const navigation = (props as PluginScreenProps & {
-    navigation?: { openAgent(input: { agentId: string; serverId: string }): void };
-  }).navigation;
+  const theme = useMemo<OverviewTheme>(() => {
+    const colors = props.theme.colors;
+    const base = {
+      background: colors.surface0, surface: colors.surface1,
+      foreground: colors.foreground, muted: colors.foregroundMuted,
+      border: colors.border, accent: colors.accent,
+      working: colors.statusSuccess, waiting: colors.statusWarning, error: colors.statusDanger,
+    };
+    return { ...base, selection: selectionColour(base) };
+  }, [props.theme]);
+  const navigation = (props as PluginScreenProps & { navigation?: { openAgent(input: { agentId: string; serverId: string }): void } }).navigation;
   const openAgent = useCallback((agentId: string) => navigation?.openAgent({ agentId, serverId: props.host.id }), [navigation, props.host.id]);
-  const current = useRef({ model, theme, motion, openAgent });
-  current.current = { model, theme, motion, openAgent };
+  const current = useRef({ model, theme, presentation, openAgent, dispatch });
+  current.current = { model, theme, presentation, openAgent, dispatch };
   const browser = Platform.OS === "web" && !renderError;
   const hostStatus = hosts.find(host => host.serverId === props.host.id)?.status;
   const initialHostStatus = useRef(hostStatus);
   initialHostStatus.current = hostStatus;
+  const selected = model.nodes.find(node => node.id === presentation.selectedId);
+  const closeDetails = useCallback(() => {
+    const id = current.current.presentation.selectedId;
+    current.current.dispatch({ type: "select", id: null });
+    if (id) renderer.current?.focusNode(id);
+  }, []);
 
   useEffect(() => {
-    setError(""); setSelectedId(null); setFocus(null); setModel(emptyModel(props.host.id));
+    setError(""); setModel(emptyModel(props.host.id));
     const observation = createOverviewStore({
       hostId: props.host.id, paseo, observeActivity: Platform.OS === "web",
       readRoster: parentAgentId => getRoster({ parentAgentId }),
@@ -59,16 +85,17 @@ export function OverviewScreen(props: PluginScreenProps) {
     observation.setVisible(AppState.currentState == null || AppState.currentState === "active");
     void observation.start().catch(cause => { if (mounted) setError(String(cause)); });
     const visibility = AppState.addEventListener("change", state => {
-      const visible = state === "active";
-      observation.setVisible(visible);
-      renderer.current?.setVisible(visible);
+      observation.setVisible(state === "active");
+      renderer.current?.setVisible(state === "active");
     });
-    return () => { mounted = false; visibility.remove(); observation.dispose(); if (store.current === observation) store.current = null; };
+    return () => {
+      mounted = false; visibility.remove(); observation.dispose();
+      if (store.current === observation) store.current = null;
+    };
   }, [paseo, props.host.id, getRoster, getIcon]);
 
   useEffect(() => {
-    if (!hostStatus) return;
-    store.current?.setConnection(hostStatus === "online" ? "connected" : hostStatus === "connecting" ? "connecting" : "disconnected");
+    if (hostStatus) store.current?.setConnection(hostStatus === "online" ? "connected" : hostStatus === "connecting" ? "connecting" : "disconnected");
   }, [hostStatus]);
 
   useEffect(() => {
@@ -76,8 +103,11 @@ export function OverviewScreen(props: PluginScreenProps) {
     try {
       const initial = current.current;
       const mounted = mountOverview(panel.current, {
-        model: initial.model, theme: initial.theme, motion: initial.motion,
-        onSelect: setSelectedId, onFocus: setFocus,
+        model: initial.model, theme: initial.theme, presentation: initial.presentation, motion: initial.presentation.motion,
+        onSelect: id => current.current.dispatch({ type: "select", id }),
+        onFocus: scope => current.current.dispatch({ type: "focus", scope }),
+        onGroupChange: (id, expanded) => current.current.dispatch({ type: expanded ? "expand-group" : "collapse-group", id }),
+        onSelectionAnchor: value => { anchor.current = value; floating.current?.update(value); },
         onOpenAgent: id => current.current.openAgent(id), onError: setRenderError,
       });
       if (!mounted) { setRenderError("Graph rendering is unavailable on this client."); return; }
@@ -88,70 +118,56 @@ export function OverviewScreen(props: PluginScreenProps) {
 
   useEffect(() => { renderer.current?.update(model); }, [model]);
   useEffect(() => { renderer.current?.updateTheme(theme); }, [theme]);
-  useEffect(() => { renderer.current?.setMotion(motion); }, [motion]);
-  useEffect(() => { renderer.current?.setSelection(selectedId); }, [selectedId]);
-  useEffect(() => { if (selectedId && !model.nodes.some(node => node.id === selectedId)) setSelectedId(null); }, [model, selectedId]);
-  const selected = model.nodes.find(node => node.id === selectedId);
-  const focused = focus?.kind === "project" ? model.projects.find(project => project.id === focus.id)
-    : model.workspaces.find(workspace => workspace.id === focus?.id);
-  const selectedWorkspace = model.workspaces.find(workspace => workspace.id === selected?.workspaceId);
-  const selectedProject = model.projects.find(project => project.projectId === selectedWorkspace?.projectId);
-  const selectedDelegations = selected ? model.edges.filter(edge => edge.kind === "delegation" && (edge.source === selected.id || edge.target === selected.id)).map(edge => ({
-    id: edge.id,
-    source: model.nodes.find(node => node.id === edge.source)?.label ?? "Unavailable agent",
-    target: model.nodes.find(node => node.id === edge.target)?.label ?? "Unavailable agent",
-  })) : [];
-  const selectedActivity = selected ? model.events.filter(event => event.nodeId === selected.id && event.text).slice(-2).reverse() : [];
-  const managed = model.nodes.filter(node => node.kind === "agent").length;
-  const native = model.nodes.length - managed;
-  const working = model.nodes.filter(node => node.state === "working" && !hasError(node) && !needsInput(node)).length;
-  const waiting = model.nodes.filter(node => !hasError(node) && needsInput(node)).length;
-  const errors = model.nodes.filter(hasError).length;
-  const unread = model.nodes.filter(node => node.attention && node.attentionReason === "finished" && node.state !== "working" && !hasError(node) && !needsInput(node)).length;
-  const ready = Object.values(model.readiness).every(Boolean);
-  const returnToFull = () => { renderer.current?.setFocus(null); setFocus(null); setSelectedId(null); };
+  useEffect(() => { renderer.current?.setMotion(presentation.motion); }, [presentation.motion]);
+  useEffect(() => { renderer.current?.setGroups(presentation.groups); }, [presentation.groups]);
+  useEffect(() => { renderer.current?.setFocus(presentation.scope); }, [presentation.scope]);
+  useEffect(() => { renderer.current?.setSelection(presentation.selectedId); }, [presentation.selectedId]);
+  useEffect(() => {
+    setOwned(previous => {
+      if (previous.hostId !== model.hostId) return previous;
+      const value = reconcilePresentation(previous.value, model);
+      if (value === previous.value) return previous;
+      rememberPresentation(previous.hostId, value);
+      return { ...previous, value };
+    });
+  }, [model]);
+  useEffect(() => {
+    if (!browser || !selected) return;
+    const positioned = mountFloatingCard(panel.current, card.current, closeDetails);
+    floating.current = positioned;
+    positioned?.update(anchor.current);
+    return () => { positioned?.dispose(); if (floating.current === positioned) floating.current = null; };
+  }, [browser, selected?.id, closeDetails]);
 
-  return <View testID="overview-screen" style={{ flex: 1, minWidth: 0, minHeight: 0, backgroundColor: theme.background }}>
-    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: props.layout.compact ? 14 : 24, paddingVertical: props.layout.compact ? 10 : 16, gap: props.layout.compact ? 10 : 16, borderBottomWidth: 1, borderBottomColor: theme.border }}>
-      <View style={{ flex: 1, minWidth: 200, gap: 5 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 9 }}>
-          <Text style={{ color: theme.foreground, fontSize: 16, fontWeight: "600" }}>{focused?.name || "All projects"}</Text>
-          <Text style={{ color: theme.muted, fontSize: 11 }}>{props.host.label}</Text>
-        </View>
-        <Text style={{ color: theme.muted, fontSize: 12 }}>{model.projects.length} projects · {model.workspaces.length} workspaces · {managed} agents{native ? ` · ${native} subagents` : ""}</Text>
-      </View>
-      <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
-        <Text style={{ color: working ? theme.working : theme.muted, fontSize: 12 }}>● {working} working</Text>
-        {waiting ? <Text style={{ color: theme.waiting, fontSize: 12 }}>◆ {waiting} waiting</Text> : null}
-        {errors ? <Text style={{ color: theme.error, fontSize: 12 }}>! {errors} error{errors === 1 ? "" : "s"}</Text> : null}
-        {unread ? <Text style={{ color: theme.accent, fontSize: 12 }}>○ {unread} unread</Text> : null}
-      </View>
-      {model.connection !== "connected" ? <Text accessibilityLiveRegion="polite" style={{ color: theme.waiting, fontSize: 12 }}>{model.connection === "connecting" ? "Connecting…" : "Disconnected · showing last state"}</Text> : null}
-      {focus ? <Pressable accessibilityRole="button" onPress={returnToFull} style={{ paddingVertical: 7, paddingHorizontal: 10 }}><Text style={{ color: theme.accent, fontSize: 12 }}>All projects ↗</Text></Pressable> : null}
-      <Pressable testID="overview-motion" accessibilityRole="button" accessibilityLabel={motion ? "Pause animation" : "Resume animation"} onPress={() => setMotion(value => !value)} style={{ paddingVertical: 7, paddingHorizontal: 10, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.muted, fontSize: 12 }}>{motion ? "Pause motion" : "Resume motion"}</Text></Pressable>
+  const ready = Object.values(model.readiness).every(Boolean);
+  const details = selected ? <AgentDetails model={model} node={selected} theme={theme} onClose={closeDetails} onOpenAgent={navigation ? openAgent : undefined} /> : null;
+  return <View testID="overview-screen" style={[styles.screen, { backgroundColor: theme.background }]}>
+    <OverviewHeader model={model} presentation={presentation} hostLabel={props.host.label} theme={theme} compact={props.layout.compact}
+      onBack={() => dispatch({ type: "focus", scope: parentScope(presentation.scope, model) })}
+      onAllProjects={() => dispatch({ type: "focus", scope: null })}
+      onMotion={() => dispatch({ type: "set-motion", enabled: !presentation.motion })} />
+    {error ? <View style={styles.notice}><Text selectable style={{ color: theme.waiting, fontSize: 12 }}>{error}</Text></View> : null}
+    {renderError ? <View style={styles.notice}><Text style={{ color: theme.muted, fontSize: 12 }}>Using the touch graph. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => setRenderError("")}><Text style={{ color: theme.selection, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
+    <View style={styles.canvasArea}>
+      {browser ? <>
+        <View ref={panel} testID="overview-canvas-host" style={styles.canvas} />
+        {!ready ? <View pointerEvents="none" style={styles.loading}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading project activity…</Text></View> : null}
+        {ready && !model.projects.length && !model.nodes.length ? <View pointerEvents="none" style={styles.empty}><Text style={{ color: theme.foreground, fontSize: 17 }}>Your projects will appear here</Text></View> : null}
+        {selected ? <View ref={card} testID="overview-details-popover" style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>{details}</View> : null}
+      </> : <NativeOverview model={model} theme={theme} presentation={presentation} onAction={dispatch} />}
     </View>
-    {error ? <View style={{ paddingHorizontal: 18, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: theme.border }}><Text selectable style={{ color: theme.waiting, fontSize: 12 }}>{error}</Text></View> : null}
-    {renderError ? <View style={{ paddingHorizontal: 18, paddingVertical: 8, gap: 8, flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}><Text style={{ color: theme.muted, fontSize: 12, flex: 1 }}>Using the touch graph. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => { setFocus(null); setSelectedId(null); setRenderError(""); }} style={{ paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.accent, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
-    <View style={{ flex: 1, minHeight: 0, flexDirection: props.layout.compact ? "column" : "row" }}>
-    {browser ? <View style={{ flex: 1, minWidth: 0, minHeight: props.layout.compact && selected ? 180 : 250 }}>
-      <View ref={panel} testID="overview-canvas-host" style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }} />
-      {!ready ? <View pointerEvents="none" style={{ position: "absolute", top: 14, left: 24 }}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading project activity…</Text></View> : null}
-      {ready && !model.projects.length && !model.nodes.length ? <View pointerEvents="none" style={{ position: "absolute", top: "40%", left: 24, right: 24, alignItems: "center", gap: 8 }}><Text style={{ color: theme.foreground, fontSize: 18, fontWeight: "600" }}>Your projects will appear here</Text><Text style={{ color: theme.muted, fontSize: 13 }}>Overview follows the projects and workspaces on this host.</Text></View> : null}
-    </View> : <NativeOverview model={model} theme={theme} motion={motion} onSelect={setSelectedId} onOpenAgent={navigation ? openAgent : undefined} />}
-    {selected ? <ScrollView testID="overview-selection" style={{ width: props.layout.compact ? undefined : 288, minHeight: 0, flexGrow: 0, flexShrink: 1, maxHeight: props.layout.compact ? "45%" : "100%", borderLeftWidth: props.layout.compact ? 0 : 1, borderTopWidth: props.layout.compact ? 1 : 0, borderColor: theme.border, backgroundColor: theme.surface }} contentContainerStyle={{ padding: 20, gap: 12 }}>
-      <Text style={{ color: theme.muted, fontSize: 10, letterSpacing: 1.2, fontWeight: "600" }}>{selected.kind === "provider-subagent" ? "SUBAGENT" : "AGENT"}</Text>
-      <View style={{ flexDirection: "row", gap: 12 }}><Text selectable style={{ flex: 1, color: theme.foreground, fontWeight: "600" }}>{selected.label}</Text><Pressable accessibilityRole="button" accessibilityLabel="Close agent details" onPress={() => setSelectedId(null)}><Text style={{ color: theme.muted }}>×</Text></Pressable></View>
-      <Text style={{ color: statusColour(selected, theme), fontSize: 12 }}>{statusLabel(selected)}{selected.provider ? ` · ${selected.provider}` : ""}</Text>
-      <View style={{ gap: 4, paddingVertical: 10 }}><Text style={{ color: theme.muted, fontSize: 10 }}>PROJECT / WORKSPACE</Text><Text style={{ color: theme.foreground, fontSize: 12 }}>{selectedProject?.name ?? (selectedWorkspace?.projectId ? "Project information unavailable" : "Unassigned")}</Text><Text style={{ color: theme.muted, fontSize: 12 }}>{selectedWorkspace?.name ?? "No workspace"}</Text></View>
-      {selectedDelegations.length ? <View style={{ gap: 6 }}><Text style={{ color: theme.muted, fontSize: 10 }}>DELEGATION</Text>{selectedDelegations.map(edge => <Text key={edge.id} selectable style={{ color: theme.foreground, fontSize: 12 }}>{edge.source} → {edge.target}</Text>)}</View> : null}
-      {selectedActivity.length ? <View style={{ gap: 8 }}><Text style={{ color: theme.muted, fontSize: 10 }}>CURRENT ACTIVITY</Text>{selectedActivity.map(event => <Text key={event.id} selectable numberOfLines={3} style={{ color: theme.foreground, fontSize: 12 }}>{event.text}</Text>)}</View> : null}
-      {selected.detail ? <Text selectable numberOfLines={4} style={{ color: theme.muted, fontSize: 12 }}>{selected.detail}</Text> : null}
-      {selected.rosterAvailability === "not_resident" ? <Text style={{ color: theme.muted, fontSize: 12 }}>Native subagents are unavailable while this agent is unloaded.</Text> : selected.rosterAvailability === "unknown" ? <Text style={{ color: theme.muted, fontSize: 12 }}>Native subagent coverage is not yet available.</Text> : selected.rosterAvailability === "resident" ? <Text style={{ color: theme.muted, fontSize: 12 }}>{model.nodes.filter(node => node.kind === "provider-subagent" && node.managedAgentId === selected.managedAgentId).length} known native subagents</Text> : null}
-      {navigation ? <Pressable accessibilityRole="button" onPress={() => openAgent(selected.managedAgentId)}><Text style={{ color: theme.accent, fontSize: 13 }}>Open chat →</Text></Pressable> : null}
-    </ScrollView> : null}
-    </View>
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 16, paddingHorizontal: 24, paddingVertical: 10, borderTopWidth: 1, borderTopColor: theme.border }}>
-      <Text style={{ color: theme.muted, fontSize: 11 }}>— Ownership</Text><Text style={{ color: theme.accent, fontSize: 11 }}>{browser ? "┄ Delegation" : "↗ Delegation"}</Text><Text style={{ color: theme.muted, fontSize: 11, flex: 1, textAlign: "right" }}>{browser ? focus ? "Esc or click the background to return" : "Click a project or workspace to explore" : "Tap a node to explore its branches"}</Text>
-    </View>
+    {!browser ? <Modal title="Agent details" open={!!selected} onOpenChange={open => { if (!open) closeDetails(); }}>
+      <Modal.Content scrollable={false} contentContainerStyle={{ padding: 0, gap: 0 }}>{details}</Modal.Content>
+    </Modal> : null}
   </View>;
 }
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, minWidth: 0, minHeight: 0 },
+  notice: { paddingHorizontal: 16, paddingVertical: 7, gap: 6 },
+  canvasArea: { flex: 1, minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden" },
+  canvas: { flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" },
+  loading: { position: "absolute", top: 12, left: 20 },
+  empty: { position: "absolute", top: "40%", left: 20, right: 20, alignItems: "center" },
+  card: { position: "absolute", top: 8, left: 8, width: 304, maxWidth: "94%", maxHeight: "85%", borderWidth: 1, borderRadius: 16, overflow: "hidden", zIndex: 20, boxShadow: "0 12px 36px #0000001c" },
+});

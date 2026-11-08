@@ -1,4 +1,6 @@
 import type { Rect } from "../geometry";
+import { nodeAppearance } from "../appearance";
+import type { AgentRole } from "../identity";
 
 export type LayoutNodeKind = "project" | "workspace" | "agent" | "provider-subagent" | "completed-group";
 
@@ -6,10 +8,10 @@ export type LayoutNodeKind = "project" | "workspace" | "agent" | "provider-subag
 export const graphMetrics = {
   project: { glyph: 52, labelWidth: 156, labelHeight: 48, fontSize: 20 },
   workspace: { width: 148, height: 46, fontSize: 18 },
-  agent: { glyph: 18, fontSize: 11 },
-  subagent: { glyph: 12, fontSize: 11 },
+  agent: { glyph: nodeAppearance.agent.size, fontSize: 11 },
+  subagent: { glyph: nodeAppearance.subagent.size, fontSize: 11 },
   completedGroup: { width: 128, height: 34, fontSize: 16 },
-  minimumHitTarget: 28,
+  minimumHitTarget: nodeAppearance.desktopHitTarget,
   edgeClearance: 7,
   branchGap: 18,
   projectGap: 28,
@@ -18,7 +20,7 @@ export const graphMetrics = {
 
 export interface NodeFootprint { body: Rect; bounds: Rect; labelBounds?: Rect }
 
-export function nodeFootprint(kind: LayoutNodeKind): NodeFootprint {
+export function nodeFootprint(kind: LayoutNodeKind, role?: AgentRole): NodeFootprint {
   if (kind === "project") {
     const body = { x: -26, y: -26, width: 52, height: 52 };
     const labelBounds = { x: -78, y: 34, width: 156, height: 48 };
@@ -31,33 +33,12 @@ export function nodeFootprint(kind: LayoutNodeKind): NodeFootprint {
   if (kind === "completed-group") {
     return { body: { x: -64, y: -17, width: 128, height: 34 }, bounds: { x: -68, y: -21, width: 136, height: 42 } };
   }
-  const size = kind === "agent" ? graphMetrics.agent.glyph : graphMetrics.subagent.glyph;
+  const subordinate = role ? role === "subagent" : kind === "provider-subagent";
+  // The rotated backing has a larger outer footprint than its upright emoji.
+  const size = subordinate ? nodeAppearance.subagent.outerSize : nodeAppearance.agent.size;
+  const hit = Math.max(graphMetrics.minimumHitTarget, size + 8);
   return {
     body: { x: -size / 2, y: -size / 2, width: size, height: size },
-    bounds: { x: -14, y: -14, width: 28, height: 28 },
+    bounds: { x: -hit / 2, y: -hit / 2, width: hit, height: hit },
   };
-}
-
-/** Supply the screen's actual font measurement when wrapping overlay labels. */
-export function labelLines(text: string, width: number, measure: (value: string) => number, maxLines = 2): string[] {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let line = "";
-  for (let index = 0; index < words.length; index++) {
-    const word = words[index]!;
-    const candidate = line ? `${line} ${word}` : word;
-    if (line && measure(candidate) > width) { lines.push(line); line = word; }
-    else line = candidate;
-    if (lines.length === maxLines - 1) {
-      line = [line, ...words.slice(index + 1)].join(" ");
-      break;
-    }
-  }
-  if (line || !lines.length) lines.push(line);
-  return lines.slice(0, maxLines).map(value => {
-    if (measure(value) <= width) return value;
-    const characters = Array.from(value);
-    while (characters.length && measure(`${characters.join("")}…`) > width) characters.pop();
-    return `${characters.join("")}…`;
-  });
 }

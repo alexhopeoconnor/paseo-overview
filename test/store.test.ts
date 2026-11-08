@@ -159,7 +159,7 @@ describe("Overview observations", () => {
     await flush(); await vi.advanceTimersByTimeAsync(50);
     expect(test.store.model.projects).toBe(before.projects);
     expect(test.store.model.workspaces).toBe(before.workspaces);
-    expect(test.store.model.nodes).toBe(before.nodes);
+    expect(test.store.model.nodes).toEqual(before.nodes.map(node => ({ ...node, freshness: "refreshing", ...(node.kind === "agent" ? { rosterFreshness: "refreshing" } : {}) })));
     expect(test.store.model.readiness.projects).toBe(false);
     nextProjects.resolve({ projects: [{ projectId: "project", projectDisplayName: "Fresh name", projectIconRevision: "two" }] });
     await flush(); await vi.advanceTimersByTimeAsync(50);
@@ -285,7 +285,7 @@ describe("Overview observations", () => {
     expect(before.nodes.filter(node => node.kind === "provider-subagent")).toHaveLength(1);
     expect(before.workspaces[0].iconUrl).toBe("data:image/png;base64,aWNvbg==");
     test.store.setConnection("disconnected");
-    expect(test.store.model.nodes).toBe(before.nodes);
+    expect(test.store.model.nodes).toEqual(before.nodes.map(node => ({ ...node, freshness: "stale", ...(node.kind === "agent" ? { rosterFreshness: "stale" } : {}) })));
     expect(test.store.model.workspaces).toBe(before.workspaces);
     expect(test.store.model.connection).toBe("disconnected");
     expect(test.store.model.events).toEqual([]);
@@ -305,6 +305,104 @@ describe("Overview observations", () => {
     await vi.advanceTimersByTimeAsync(50); expect(test.store.model.events).toEqual([]);
     expect(test.store.model.nodes.find(node => node.kind === "provider-subagent")?.state).toBe("finished");
   });
+
+  it("retains every intermediate identity and icon while resumed passive reads lag directories", async () => {
+    const test = setup();
+    const oldIcon = { mimeType: "image/png", data: "b2xk" };
+    test.readIcon.mockResolvedValue(oldIcon);
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const ids = test.store.model.nodes.map(node => node.id);
+    const publication = test.changed.mock.calls.length;
+    test.store.suspend();
+    const nextRoster = deferred<RosterSnapshot>(), nextIcon = deferred<ProjectIcon | null>();
+    test.readRoster.mockReturnValue(nextRoster.promise);
+    test.readIcon.mockReturnValue(nextIcon.promise);
+    test.api.projects.list.mockResolvedValue({ projects: [{ projectId: "project", projectDisplayName: "Project", projectIconRevision: "two" }] });
+    await test.store.resume(); await flush(); await vi.advanceTimersByTimeAsync(50);
+
+    expect(test.store.model.readiness).toEqual({ projects: true, workspaces: true, agents: true });
+    expect(test.store.model.nodes.find(node => node.kind === "provider-subagent")?.freshness).toBe("refreshing");
+    for (const [model] of test.changed.mock.calls.slice(publication)) {
+      expect(model.nodes.map((node: { id: string }) => node.id)).toEqual(ids);
+      expect(model.projects[0].iconUrl).toBe("data:image/png;base64,b2xk");
+      expect(model.events).toEqual([]);
+    }
+
+    nextRoster.resolve(roster);
+    nextIcon.resolve({ mimeType: "image/png", data: "bmV3" });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.nodes.map(node => node.id)).toEqual(ids);
+    expect(test.store.model.nodes.every(node => node.freshness === "current")).toBe(true);
+    expect(test.store.model.projects[0].iconUrl).toBe("data:image/png;base64,bmV3");
+    for (const forbidden of Object.values(test.mutations)) expect(forbidden).not.toHaveBeenCalled();
+  });
+
+  it("retains cached rosters on failed invalidation and ignores activity until coverage is current", async () => {
+    const test = setup();
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    test.readRoster.mockRejectedValue(new Error("Temporary roster failure"));
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "remove", parentAgentId: "parent", subagentId: "child",
+    } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.nodes.find(node => node.kind === "provider-subagent")).toMatchObject({
+      id: "host:native:parent:child", state: "working", freshness: "stale",
+    });
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "new", seq: 4,
+      item: { type: "assistant_message", text: "Unverified old child" }, timestamp: "now",
+    } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events).toEqual([]);
+  });
+
+  it("waits for resume acknowledgement and does not reload an unchanged icon", async () => {
+    const test = setup();
+    test.readIcon.mockResolvedValue({ mimeType: "image/png", data: "aWNvbg==" });
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    test.store.suspend();
+    const ack = deferred<object>(), resumedEvents = new FakeObservation(ack.promise);
+    test.api.observeEvents.mockReturnValue(resumedEvents);
+    const pending = test.store.resume();
+    resumedEvents.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "remove", parentAgentId: "parent", subagentId: "child",
+    } });
+    await flush();
+    expect(test.readRoster).toHaveBeenCalledOnce();
+    ack.resolve({}); await pending; await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.readRoster).toHaveBeenCalledTimes(2);
+    expect(test.readIcon).toHaveBeenCalledOnce();
+    expect(test.store.model.projects[0].iconUrl).toBe("data:image/png;base64,aWNvbg==");
+  });
+
+  it("applies confirmed parent removal without resurrecting a delayed cached roster", async () => {
+    const test = setup();
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    test.store.suspend();
+    const delayed = deferred<RosterSnapshot>();
+    test.readRoster.mockReturnValue(delayed.promise);
+    await test.store.resume(); await flush();
+    test.directory.emit({ type: "agent_update", payload: { kind: "remove", agentId: "parent" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.nodes).toEqual([]);
+    delayed.resolve(roster); await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.nodes).toEqual([]);
+  });
+
+  it("retains useful structured tool detail and stable streaming source identities", async () => {
+    const test = setup();
+    await test.store.start(); await flush();
+    const emit = (seq: number, item: unknown) => test.timelineHandlers.get("parent")?.({ epoch: "e", seq, event: { type: "timeline", item } });
+    emit(1, { type: "tool_call", callId: "shell1", name: "shell", status: "completed", detail: { type: "shell", command: "npm test", exitCode: 0 } });
+    emit(2, { type: "assistant_message", messageId: "message1", text: "a".repeat(300) });
+    emit(3, { type: "assistant_message", messageId: "message1", text: "a".repeat(400) });
+    await vi.advanceTimersByTimeAsync(50);
+    const [tool, first, second] = test.store.model.events;
+    expect(tool.preview).toEqual({ title: "Command finished", detail: "npm test · exit 0", truncated: false });
+    expect(first.sourceKey).toBe(second.sourceKey);
+    expect(first.preview?.truncated).toBe(true);
+    expect(first.preview?.detail?.endsWith("…")).toBe(true);
+  });
 });
 
 describe("directory resynchronization", () => {
@@ -313,15 +411,15 @@ describe("directory resynchronization", () => {
     entries: [{ id: "item", name }], pageInfo, sync: { generation, headSeq },
   });
   async function directory(first: DirectoryPage<Value>, readNext: () => Promise<DirectoryPage<Value>>) {
-    const observation = new FakeObservation(first), changed = vi.fn(), failed = vi.fn();
+    const observation = new FakeObservation(first), changed = vi.fn(), failed = vi.fn(), freshness = vi.fn();
     const read = vi.fn(async (_cursor?: string, subscribe?: boolean) => subscribe
       ? { ...first, subscription: observation } : readNext());
     const cleanup = await observeDirectory<Value>({
       read, id: value => value.id, version: value => value.seq,
-      change: value => value as DirectoryChange<Value>, changed, failed, alive: () => true,
+      change: value => value as DirectoryChange<Value>, changed, freshness, failed, alive: () => true,
     });
     disposals.push(cleanup); await flush();
-    return { observation, changed, failed, read };
+    return { observation, changed, failed, freshness, read };
   }
 
   it("replays updates arriving during a generation-change snapshot request", async () => {
@@ -350,12 +448,17 @@ describe("directory resynchronization", () => {
     const failedRead = deferred<DirectoryPage<Value>>(), retry = deferred<DirectoryPage<Value>>();
     const readNext = vi.fn().mockReturnValueOnce(failedRead.promise).mockReturnValueOnce(retry.promise);
     const test = await directory(snapshot("old", "old", 1), readNext);
+    expect(test.freshness).toHaveBeenLastCalledWith("current");
     test.observation.emit({ id: "item", value: { id: "item", name: "new" }, generation: "new", seq: 1 });
+    expect(test.freshness).toHaveBeenLastCalledWith("refreshing");
     failedRead.reject(new Error("temporary read failure")); await flush();
     expect(test.failed).toHaveBeenCalledOnce();
+    expect(test.freshness).toHaveBeenLastCalledWith("stale");
+    expect(test.changed).toHaveBeenLastCalledWith([{ id: "item", name: "old" }]);
     test.observation.emit({ id: "item", value: { id: "item", name: "recovered" }, generation: "new", seq: 2 });
     expect(readNext).toHaveBeenCalledTimes(2);
     retry.resolve(snapshot("recovered", "new", 2)); await flush();
     expect(test.changed).toHaveBeenLastCalledWith([{ id: "item", name: "recovered" }]);
+    expect(test.freshness).toHaveBeenLastCalledWith("current");
   });
 });

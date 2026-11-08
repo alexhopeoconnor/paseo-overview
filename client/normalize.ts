@@ -26,6 +26,7 @@ export function normalise(input: {
   projects: readonly ProjectRecord[]; rosters: ReadonlyMap<string, RosterState>;
   icons: ReadonlyMap<string, string>; events: OverviewModel["events"];
   connection: OverviewModel["connection"]; revision: number; readiness?: OverviewReadiness;
+  freshness?: OverviewModel["freshness"];
 }): OverviewModel {
   const { hostId } = input;
   const projects = new Map(input.projects.map(project => [project.projectId, project]));
@@ -43,6 +44,9 @@ export function normalise(input: {
       attentionReason: attentionReason(agent),
       provider: agent.provider, detail: agent.lastError,
       rosterAvailability: input.rosters.get(agent.id)?.availability ?? "unknown",
+      rosterFreshness: input.freshness && input.freshness !== "current" ? input.freshness
+        : input.rosters.get(agent.id)?.freshness ?? (input.rosters.has(agent.id) ? "current" : "refreshing"),
+      freshness: input.freshness ?? "current",
     };
   });
   const agentNodes = new Map(nodes.map(node => [node.managedAgentId, node]));
@@ -60,6 +64,7 @@ export function normalise(input: {
         state: child.status === "running" ? "working" : child.status === "failed" ? "error" : "finished",
         attention: child.status === "failed", attentionReason: child.status === "failed" ? "error" : null,
         detail: child.subtitle || child.description || undefined,
+        freshness: input.freshness && input.freshness !== "current" ? input.freshness : roster.freshness ?? "current",
       });
     }
   }
@@ -92,7 +97,8 @@ export function normalise(input: {
     }
   }
   return {
-    hostId, nodes, edges, events: input.events, connection: input.connection, revision: input.revision,
+    hostId, nodes, edges, events: input.events, connection: input.connection,
+    freshness: input.freshness ?? "current", revision: input.revision,
     readiness: input.readiness ? { ...input.readiness } : { projects: true, workspaces: true, agents: true },
     projects: [...projects.values()].map(project => ({
       id: displayId(hostId, "project", project.projectId), projectId: project.projectId,

@@ -1,13 +1,16 @@
 import { hierarchy } from "d3-hierarchy";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 import type { OverviewFocus } from "../shared/renderer";
+import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
+import { agentRole, type AgentRole } from "./identity";
 import { distance, inflateRect, rectsOverlap, translateRect, unionRects, type Point, type Rect } from "./geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections, routeDelegation, routeOwnership, type RoutedEdge } from "./routing";
 import { graphMetrics, nodeFootprint, type LayoutNodeKind } from "./scene/metrics";
 
 export type { Point, Rect } from "./geometry";
 export type { RoutedEdge, PathSegment } from "./routing";
-export const BACKGROUND_GROUP = "overview:unassigned";
+export const BACKGROUND_GROUP = UNASSIGNED_SCOPE_ID;
 
 export interface PositionedNode {
   id: string;
@@ -17,13 +20,16 @@ export interface PositionedNode {
   label: string;
   iconUrl?: string;
   parentId?: string;
-  /** Every original native descendant represented by a completed-group capsule. */
+  role?: AgentRole;
+  inactiveGroup?: InactiveGroup;
+  /** Every original descendant represented by an inactive-group capsule. */
   memberIds?: readonly string[];
   /** Project-local CSS coordinates: x rightwards, y downwards. */
   position: Point;
   body: Rect;
   bounds: Rect;
   labelBounds?: Rect;
+  controlBounds?: Rect;
 }
 export interface ProjectLayout {
   id: string; name: string; iconUrl?: string; background: boolean;
@@ -40,7 +46,8 @@ export interface SceneLayout {
   nodes: ReadonlyMap<string, PositionedNode>;
   ownershipEdges: readonly RoutedEdge[];
   delegationEdges: readonly RoutedEdge[];
-  /** Original agent IDs map to their visible node or completed-group capsule. */
+  groups: readonly InactiveGroup[];
+  /** Original agent IDs map to their visible node or inactive-group capsule. */
   memberToDisplay: ReadonlyMap<string, string>;
   width: number; height: number;
 }
@@ -73,11 +80,16 @@ export function nodeCollisionBounds(node: PositionedNode): readonly Rect[] {
   return node.kind === "project" ? [inflateRect(node.body, 4), ...(node.labelBounds ? [inflateRect(node.labelBounds, 2)] : [])] : [node.bounds];
 }
 function positioned(definition: Definition, position: Point): PositionedNode {
-  const metric = nodeFootprint(definition.kind);
-  return { ...definition, position, body: translateRect(metric.body, position), bounds: translateRect(metric.bounds, position),
+  const metric = nodeFootprint(definition.kind, definition.role);
+  const control = definition.inactiveGroup?.expanded ? { x: metric.body.x + metric.body.width - 2,
+    y: metric.body.y + metric.body.height - 2, width: 36, height: 24 } : undefined;
+  return { ...definition, position, body: translateRect(metric.body, position),
+    bounds: translateRect(control ? unionRects([metric.bounds, control]) : metric.bounds, position),
+    ...(control ? { controlBounds: translateRect(control, position) } : {}),
     ...(metric.labelBounds ? { labelBounds: translateRect(metric.labelBounds, position) } : {}) };
 }
 function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
+  const agents = new Map(model.nodes.map(node => [node.id, node]));
   const projects: ProjectDefinition[] = model.projects.map(project => ({
     id: project.id, name: project.name, iconUrl: project.iconUrl, background: false,
     definitions: [{ id: project.id, kind: "project", projectId: project.id, workspaceId: null, label: project.name, iconUrl: project.iconUrl }],
@@ -106,7 +118,8 @@ function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
     for (const node of nodes) {
       project.agentIds.push(node.id); project.parents.set(node.id, parents.get(node.id)!);
       project.definitions.push({ id: node.id, kind: node.kind, projectId: project.id, workspaceId: workspace.id,
-        label: node.label, parentId: parents.get(node.id) });
+        label: node.label, parentId: parents.get(node.id),
+        role: agentRole(node.id, { parentByNode: parents }, agents) });
     }
   }
   const orphans = model.nodes.filter(node => !node.workspaceId || !byWorkspace.has(node.workspaceId));
@@ -115,7 +128,8 @@ function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
     for (const node of orphans) {
       project.agentIds.push(node.id); project.parents.set(node.id, parents.get(node.id)!);
       project.definitions.push({ id: node.id, kind: node.kind, projectId: project.id, workspaceId: node.workspaceId,
-        label: node.label, parentId: parents.get(node.id) });
+        label: node.label, parentId: parents.get(node.id),
+        role: agentRole(node.id, { parentByNode: parents }, agents) });
     }
   }
   for (const project of projects) {
@@ -124,49 +138,26 @@ function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
   return projects.sort((a, b) => a.id.localeCompare(b.id));
 }
 function topologySignature(project: ProjectDefinition): string {
-  return project.definitions.map(node => `${node.kind}:${node.id}:${project.parents.get(node.id) ?? ""}`).join("\n");
+  return project.definitions.map(node => `${node.kind}:${node.role ?? ""}:${node.id}:${project.parents.get(node.id) ?? ""}:${node.inactiveGroup?.expanded ? "expanded" : ""}`).join("\n");
 }
 
-/** Only wholly finished native subtrees can disappear into an explicit count. */
-function quietFinishedNative(node: OverviewNode): boolean {
-  return node.kind === "provider-subagent" && node.state === "finished" && !node.attention && node.attentionReason !== "permission" && node.attentionReason !== "error";
-}
-function collapseCompleted(project: ProjectDefinition, modelNodes: ReadonlyMap<string, OverviewNode>, eligibleIds: ReadonlySet<string>, expandedWorkspaceId?: string): ProjectDefinition {
-  const children = new Map<string, string[]>();
-  for (const [child, parent] of project.parents) children.set(parent, [...children.get(parent) ?? [], child]);
-  const eligible = new Map<string, readonly string[] | null>();
-  const subtree = (id: string): readonly string[] | null => {
-    if (eligible.has(id)) return eligible.get(id)!;
-    const node = modelNodes.get(id);
-    if (!node || !quietFinishedNative(node) || !eligibleIds.has(id) || node.workspaceId === expandedWorkspaceId) {
-      eligible.set(id, null); return null;
-    }
-    const members = [id];
-    for (const child of children.get(id) ?? []) {
-      const descendants = subtree(child);
-      if (!descendants) { eligible.set(id, null); return null; }
-      members.push(...descendants);
-    }
-    eligible.set(id, members); return members;
-  };
-  const hidden = new Set<string>(), groups: Definition[] = [], queue = [project.id];
-  for (let index = 0; index < queue.length; index++) {
-    const parent = queue[index]!;
-    if (hidden.has(parent)) continue;
-    const descendants = children.get(parent) ?? [];
-    const members = descendants.flatMap(id => subtree(id) ?? []);
-    if (members.length >= 3) {
-      for (const id of members) hidden.add(id);
-      const definition = project.definitions.find(node => node.id === parent)!;
-      groups.push({ id: `overview:completed-group:${encodeURIComponent(parent)}`, kind: "completed-group", projectId: project.id,
-        workspaceId: definition.workspaceId, parentId: parent, memberIds: [...members].sort(), label: `${members.length} completed` });
-    }
-    queue.push(...descendants.filter(id => !hidden.has(id)));
+function collapseProject(project: ProjectDefinition, model: OverviewModel, options: CollapseOptions): { definition: ProjectDefinition; groups: readonly InactiveGroup[] } {
+  const state = inactiveGroups(model, project.parents, options);
+  const byParent = new Map(state.groups.map(group => [group.parentId, group]));
+  const definitions = project.definitions.filter(node => !state.hidden.has(node.id)).map(node => ({
+    ...node, ...(byParent.has(node.id) ? { inactiveGroup: byParent.get(node.id)! } : {}),
+  }));
+  const parents = new Map([...project.parents].filter(([child]) => !state.hidden.has(child)));
+  for (const group of state.groups) {
+    if (group.expanded) continue;
+    const parent = project.definitions.find(node => node.id === group.parentId)!;
+    definitions.push({ id: group.id, kind: "completed-group", projectId: project.id,
+      workspaceId: parent.workspaceId, parentId: parent.id, memberIds: group.memberIds,
+      label: `${group.memberIds.length} inactive` });
+    parents.set(group.id, group.parentId);
   }
-  if (!hidden.size) return project;
-  const parents = new Map([...project.parents].filter(([child]) => !hidden.has(child)));
-  for (const group of groups) parents.set(group.id, group.parentId!);
-  return { ...project, definitions: [...project.definitions.filter(node => !hidden.has(node.id)), ...groups].sort((a, b) => a.id.localeCompare(b.id)), parents };
+  definitions.sort((a, b) => a.id.localeCompare(b.id));
+  return { definition: { ...project, definitions, parents }, groups: state.groups };
 }
 
 /** Reserve nested angular sectors; the root leaves a clear corridor for its name. */
@@ -179,7 +170,9 @@ function localGeometry(project: ProjectDefinition): LocalGeometry {
   const sector = (node: typeof tree, start: number, end: number) => {
     if (node.depth > 0) {
       const middle = (start + end) / 2;
-      const spread = Math.min(end - start, Math.PI * (node.depth === 1 ? 0.85 : 0.7));
+      // Retain a dense branch's allocated sector through single-child tiers.
+      // Repeatedly narrowing it forces every satellite onto a very large ring.
+      const spread = Math.min(end - start, Math.PI * 0.95);
       start = middle - spread / 2; end = middle + spread / 2;
     }
     angles.set(node.data.id, (start + end) / 2); depths.set(node.data.id, node.depth);
@@ -205,11 +198,14 @@ function localGeometry(project: ProjectDefinition): LocalGeometry {
       return positioned(definition, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
     });
     const byId = new Map(nodes.map(node => [node.id, node]));
-    edges = [...project.parents].map(([target, source]) => routeOwnership(byId.get(source)!, byId.get(target)!, project.id));
+    edges = [];
+    for (const [target, source] of [...project.parents].sort(([a], [b]) => a.localeCompare(b))) {
+      edges.push(routeOwnership(byId.get(source)!, byId.get(target)!, project.id, { nodes, edges, clearance: 3 }));
+    }
     const expand = new Set<number>();
     for (let first = 0; first < nodes.length; first++) for (let second = first + 1; second < nodes.length; second++) {
       const a = nodes[first]!, b = nodes[second]!;
-      const circular = (node: PositionedNode) => node.kind === "agent" || node.kind === "provider-subagent";
+      const circular = (node: PositionedNode) => !node.controlBounds && (node.kind === "agent" || node.kind === "provider-subagent");
       const collides = circular(a) && circular(b)
         ? distance(a.position, b.position) < (a.bounds.width + b.bounds.width) / 2 + graphMetrics.edgeClearance
         : nodeCollisionBounds(a).some(firstBounds => nodeCollisionBounds(b).some(secondBounds => rectsOverlap(firstBounds, secondBounds, graphMetrics.edgeClearance)));
@@ -292,19 +288,20 @@ export function canvasNode(node: PositionedNode, project: ProjectLayout): Positi
   const transform = (rect: Rect): Rect => ({ x: project.position.x + rect.x * project.scale, y: project.position.y + rect.y * project.scale,
     width: rect.width * project.scale, height: rect.height * project.scale });
   return { ...node, position: { x: project.position.x + node.position.x * project.scale, y: project.position.y + node.position.y * project.scale },
-    body: transform(node.body), bounds: transform(node.bounds), ...(node.labelBounds ? { labelBounds: transform(node.labelBounds) } : {}) };
+    body: transform(node.body), bounds: transform(node.bounds), ...(node.labelBounds ? { labelBounds: transform(node.labelBounds) } : {}),
+    ...(node.controlBounds ? { controlBounds: transform(node.controlBounds) } : {}) };
 }
 
 /** Cached topology has no activity/status/icon inputs; initial loading can never freeze packing. */
 export class StableLayout {
   private readonly geometry = new Map<string, { signature: string; value: LocalGeometry }>();
-  private readonly fullGeometry = new Map<string, { signature: string; value: LocalGeometry }>();
-  private readonly expandedGeometry = new Map<string, { signature: string; value: LocalGeometry }>();
   private readonly fits = new Map<string, { scale: number; positions: Map<string, Point> }>();
-  private compactEligibility?: { signature: string; ids: Set<string> };
   private delegationGeometry?: { signature: string; edges: readonly RoutedEdge[] };
   private previous?: SceneLayout;
-  private previouslyAggregated = false;
+
+  private fitKey(projects: readonly ProjectLayout[], viewport: Rect): string {
+    return JSON.stringify([viewport, projects.map(project => [project.id, project.bounds])]);
+  }
 
   private projectLayouts(definitions: readonly ProjectDefinition[], geometry: Map<string, { signature: string; value: LocalGeometry }>): ProjectLayout[] {
     const ids = new Set(definitions.map(project => project.id));
@@ -322,7 +319,7 @@ export class StableLayout {
   }
 
   private fit(projects: readonly ProjectLayout[], viewport: Rect): { scale: number; positions: Map<string, Point> } {
-    const signature = JSON.stringify([viewport, projects.map(project => [project.id, project.bounds])]);
+    const signature = this.fitKey(projects, viewport);
     const cached = this.fits.get(signature);
     if (cached) return cached;
     let scale = 1, positions = pack(projects, viewport, 1);
@@ -337,35 +334,24 @@ export class StableLayout {
     if (!positions) throw new Error("This viewport is too small for the project graph. Use the simple view.");
     const result = { scale, positions };
     this.fits.set(signature, result);
-    if (this.fits.size > 4) this.fits.delete(this.fits.keys().next().value!);
+    if (this.fits.size > 32) this.fits.delete(this.fits.keys().next().value!);
     return result;
   }
 
-  update(model: OverviewModel, width: number, height: number, focus: OverviewFocus = null): SceneLayout {
+  update(model: OverviewModel, width: number, height: number, _focus: OverviewFocus = null, options: CollapseOptions = {}): SceneLayout {
     width = Math.max(1, width); height = Math.max(1, height);
     const definitions = projectDefinitions(model);
     const padding = Math.min(graphMetrics.viewportPadding, width / 12, height / 12);
     const viewport = { x: padding, y: padding, width: width - padding * 2, height: height - padding * 2 };
-    const fullProjects = this.projectLayouts(definitions, this.fullGeometry);
-    const fullFit = this.fit(fullProjects, viewport);
-    const modelNodes = new Map(model.nodes.map(node => [node.id, node]));
-    const eligibilitySignature = JSON.stringify([width, height, definitions.map(topologySignature)]);
-    if (this.compactEligibility?.signature !== eligibilitySignature) {
-      this.compactEligibility = { signature: eligibilitySignature, ids: new Set(model.nodes.filter(quietFinishedNative).map(node => node.id)) };
-    }
-    // Finishing a visible turn does not make its node disappear mid-observation.
-    // A grouped member needing attention always reappears and stays visible until
-    // the next structural/viewport reconciliation establishes a fresh grouping.
-    for (const id of this.compactEligibility.ids) {
-      const node = modelNodes.get(id);
-      if (!node || !quietFinishedNative(node)) this.compactEligibility.ids.delete(id);
-    }
-    const eligibleIds = this.compactEligibility.ids;
-    const compactDefinitions = fullFit.scale < 0.8 ? definitions.map(project => collapseCompleted(project, modelNodes, eligibleIds)) : definitions;
-    const aggregated = compactDefinitions.some((project, index) => project !== definitions[index]);
-    const baseProjects = aggregated ? this.projectLayouts(compactDefinitions, this.geometry) : fullProjects;
+    const collapsed = definitions.map(project => collapseProject(project, model, options));
+    const baseProjects = this.projectLayouts(collapsed.map(value => value.definition), this.geometry);
+    const groups = collapsed.flatMap(value => value.groups);
     let scale = 1, positions: Map<string, Point> | null = null;
-    if (aggregated === this.previouslyAggregated && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
+    // Returning to a previously rendered topology restores its framing. A
+    // collapsed branch must not inherit the reduced scale of its expanded tree.
+    const previousFit = this.fits.get(this.fitKey(baseProjects, viewport));
+    if (previousFit) { positions = previousFit.positions; scale = previousFit.scale; }
+    if (!positions && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
       const candidate = baseProjects.map(project => {
         const old = this.previous!.projects.find(item => item.id === project.id)!;
         return { project, old, bounds: { x: old.position.x + project.bounds.x * old.scale - graphMetrics.projectGap / 2,
@@ -377,23 +363,11 @@ export class StableLayout {
       }
     }
     if (!positions) {
-      const fitted = aggregated ? this.fit(baseProjects, viewport) : fullFit;
+      const fitted = this.fit(baseProjects, viewport);
       positions = fitted.positions; scale = fitted.scale;
     }
     for (const project of baseProjects) { project.position = positions.get(project.id)!; project.scale = scale; }
-    // Focus expansion changes only the focused project's local representation.
-    // Its full-view anchor, all background graphs and the return arrangement stay fixed.
-    let projects = baseProjects;
-    if (aggregated && focus) {
-      const focusedId = focus.kind === "project" ? focus.id : baseProjects.find(project => project.workspaceIds.includes(focus.id))?.id;
-      if (focusedId) {
-        const completeDefinition = definitions.find(project => project.id === focusedId)!;
-        const expandedDefinition = focus.kind === "project" ? completeDefinition : collapseCompleted(completeDefinition, modelNodes, eligibleIds, focus.id);
-        const expanded = topologySignature(expandedDefinition) === topologySignature(completeDefinition) ? fullProjects.find(project => project.id === focusedId) :
-          this.projectLayouts([expandedDefinition], this.expandedGeometry)[0];
-        if (expanded) projects = baseProjects.map(project => project.id === focusedId ? { ...expanded, position: project.position, scale: project.scale } : project);
-      }
-    }
+    const projects = baseProjects;
     const nodes = new Map(projects.flatMap(project => project.nodes.map(node => [node.id, node] as const)));
     const memberToDisplay = new Map(projects.flatMap(project => project.nodes.flatMap(node =>
       node.memberIds ? node.memberIds.map(id => [id, node.id] as const) : [[node.id, node.id] as const])));
@@ -418,9 +392,8 @@ export class StableLayout {
       this.delegationGeometry = { signature: delegationSignature, edges };
     }
     const delegationEdges = this.delegationGeometry.edges;
-    const result = { projects, nodes, ownershipEdges: projects.flatMap(project => [...project.edges]), delegationEdges, memberToDisplay, width, height };
+    const result = { projects, nodes, groups, ownershipEdges: projects.flatMap(project => [...project.edges]), delegationEdges, memberToDisplay, width, height };
     this.previous = { ...result, projects: baseProjects };
-    this.previouslyAggregated = aggregated;
     return result;
   }
 }

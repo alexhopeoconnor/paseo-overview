@@ -10,6 +10,10 @@ export function hasError(node: OverviewNode): boolean {
 }
 
 export function statusLabel(node: OverviewNode): string {
+  if (node.freshness && node.freshness !== "current") {
+    const label = statusLabel({ ...node, freshness: "current" });
+    return `${node.freshness === "refreshing" ? "Updating" : "Last known"} · ${label.toLowerCase()}`;
+  }
   if (hasError(node)) return "Error";
   if (needsInput(node)) return "Waiting for permission";
   if (node.state === "working") return "Working";
@@ -21,6 +25,7 @@ export function statusLabel(node: OverviewNode): string {
 }
 
 export function statusColour(node: OverviewNode, theme: OverviewTheme): string {
+  if (node.freshness && node.freshness !== "current") return theme.muted;
   if (hasError(node)) return theme.error;
   if (needsInput(node)) return theme.waiting;
   if (node.state === "working") return theme.working;

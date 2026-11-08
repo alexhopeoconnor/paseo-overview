@@ -1,0 +1,89 @@
+import { autoUpdate, computePosition, flip, limitShift, offset, shift, type Placement, type VirtualElement } from "@floating-ui/dom";
+import type { Rect } from "../geometry";
+
+export interface FloatingCardPositioner {
+  update(anchor: Rect | null): void;
+  dispose(): void;
+}
+
+/** Owns browser positioning only; React owns the card, its content and accessibility. */
+export function createFloatingCardPositioner(
+  parentValue: unknown,
+  cardValue: unknown,
+  options?: { onDismiss?: () => void },
+): FloatingCardPositioner {
+  const parent = parentValue as HTMLElement, card = cardValue as HTMLElement;
+  const previousRole = card.getAttribute("role"), previousLabel = card.getAttribute("aria-label");
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-label", "Agent details");
+  let anchor: Rect | null = null, disposed = false, generation = 0;
+  let preferred: Placement = "right";
+  const virtual: VirtualElement = {
+    contextElement: parent,
+    getBoundingClientRect() {
+      const bounds = parent.getBoundingClientRect(), current = anchor ?? { x: 0, y: 0, width: 0, height: 0 };
+      const sx = parent.clientWidth ? bounds.width / parent.clientWidth : 1;
+      const sy = parent.clientHeight ? bounds.height / parent.clientHeight : 1;
+      return new DOMRect(bounds.x + current.x * sx, bounds.y + current.y * sy, current.width * sx, current.height * sy);
+    },
+  };
+  const position = () => {
+    if (disposed || !anchor) return;
+    const token = ++generation;
+    const placements: Placement[] = [preferred, ...(["right", "left", "top", "bottom"] as Placement[]).filter(side => side !== preferred)];
+    void Promise.all(placements.map(placement => computePosition(virtual, card, {
+      strategy: "absolute", placement,
+      middleware: [offset(12), flip({ boundary: parent, padding: 12 }), shift({ boundary: parent, padding: 12, limiter: limitShift() })],
+    }))).then(results => {
+      if (disposed || token !== generation || !anchor) return;
+      const parentBounds = parent.getBoundingClientRect();
+      const offsetParent = card.offsetParent;
+      const origin = offsetParent instanceof HTMLElement ? offsetParent.getBoundingClientRect() : parentBounds;
+      const scaleX = parent.clientWidth ? parentBounds.width / parent.clientWidth : 1;
+      const scaleY = parent.clientHeight ? parentBounds.height / parent.clientHeight : 1;
+      const nodes = Array.from(parent.querySelectorAll<HTMLElement>("[data-overview-id]"))
+        .filter(node => Number(node.style.opacity || 1) > 0.25)
+        .map(node => ({ bounds: node.getBoundingClientRect(), weight: node.dataset.overviewHighlighted === "true" ? 4 : 1 }));
+      const obstruction = (result: typeof results[number]) => {
+        const left = origin.left + result.x * scaleX, top = origin.top + result.y * scaleY;
+        const right = left + card.offsetWidth * scaleX, bottom = top + card.offsetHeight * scaleY;
+        return nodes.reduce((score, node) => score + node.weight *
+          Math.max(0, Math.min(right, node.bounds.right) - Math.max(left, node.bounds.left)) *
+          Math.max(0, Math.min(bottom, node.bounds.bottom) - Math.max(top, node.bounds.top)), 0);
+      };
+      // Prefer retaining the current side, then the least obstructive bounded
+      // candidate. Dense graphs still get a usable card with explicit dismissal.
+      const result = results.reduce((best, next) => obstruction(next) < obstruction(best) ? next : best);
+      preferred = result.placement;
+      card.style.left = `${result.x}px`; card.style.top = `${result.y}px`;
+      card.style.visibility = "visible";
+      card.dataset.overviewPlacement = result.placement;
+    }).catch(() => {
+      // Layout can disappear during a host navigation. A later observed size
+      // or anchor update retries positioning; never strand an unhandled task.
+      if (!disposed && token === generation) card.style.visibility = "hidden";
+    });
+  };
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || event.defaultPrevented || !options?.onDismiss) return;
+    event.preventDefault(); event.stopPropagation(); options.onDismiss();
+  };
+  card.style.position = "absolute";
+  card.style.visibility = "hidden";
+  card.addEventListener("keydown", onKey);
+  const cleanup = autoUpdate(virtual, card, position, { animationFrame: false });
+  return {
+    update(next) {
+      if (disposed) return;
+      if (!next) { anchor = null; generation++; card.style.visibility = "hidden"; return; }
+      if (anchor && next.x === anchor.x && next.y === anchor.y && next.width === anchor.width && next.height === anchor.height) return;
+      anchor = { ...next }; position();
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true; generation++; cleanup(); card.removeEventListener("keydown", onKey);
+      if (previousRole === null) card.removeAttribute("role"); else card.setAttribute("role", previousRole);
+      if (previousLabel === null) card.removeAttribute("aria-label"); else card.setAttribute("aria-label", previousLabel);
+    },
+  };
+}

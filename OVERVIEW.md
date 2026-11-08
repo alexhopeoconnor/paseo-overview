@@ -1,29 +1,37 @@
 # Overview
 
-See where agents are working across your workspaces without leaving the stock
-Paseo workspace and chat experience behind.
+See where agents are working across your projects and workspaces.
 
-Open **Overview** in the sidebar. Every project is a graph with its live icon and
-name, including projects without workspaces. Workspaces branch from their actual
-project, followed by agents and available native subagents. Heartbeats and routed
-pulses reflect activity; dashed links show delegation between workspaces. Brief
-speech bubbles show new output, tool activity and attention events.
+Every live project is a root with its current icon, including empty projects.
+Actual workspaces, agents and available subagents branch beneath it. Dashed
+connections show delegation without changing ownership.
 
-Click a project or workspace to bring it forward. Hover a node to follow its
-ownership path. Click an agent to inspect its status alongside the graph and use
-**Open chat** to continue in Paseo. Press Escape or click the background to return
-to the full view. Use **Pause motion** when desired. Phones start with collapsed
-project roots that pulse while agents are working. Tap roots and workspaces to
-reveal their connected branches, and use Back to return. The phone graph omits
-speech bubbles. Unread results, permission requests and errors have distinct
-indicators.
+Click a project or workspace to focus its graph. Agents use stable animal emoji
+nodes: rounded tiles for workspace-level agents and smaller diamond backings for
+subagents. Select one for a floating details card and a highlighted ownership
+path. **Open chat** deliberately returns to the normal Paseo chat. Escape or a
+background click closes details first, then returns to the full view. Arrow keys
+navigate relationships; browser zoom works and the graph has no wheel zoom.
 
-Dense groups of completed subagents appear as **N completed**. Click the count
-or focus its project/workspace to expand them. Running agents and blockers remain
-individual nodes, and Escape returns to the full view.
+**N inactive** represents quiet subordinate branches. Click to expand and use
+the parent's collapse control to fold them again. The choice survives focus and
+refreshes. Running agents, blockers, errors and unread results remain visible.
+Counts include every represented agent.
 
-This page is read-only. Unloaded native subagent rosters are labelled unavailable;
-observing them never wakes their parent. Reconnection refreshes current state
-without playing historical activity. Project-icon changes appear automatically.
+Light trails follow fresh observed activity along ownership paths, with ancestor
+responses on arrival. Quiet heartbeats also indicate reported working state.
+Brief, nearby bubbles show bounded activity previews; long text has an ellipsis.
+Use **Pause motion** when desired. Reduced motion preserves static status.
 
-Requires a compatible host providing the passive subagent and project-icon APIs.
+Phones start with collapsed project roots. Tap into projects and workspaces,
+use Back to return, and tap an agent for details. The header follows the current
+scope. Animal identities, parent highlighting and group controls match desktop;
+the phone graph omits speech bubbles.
+
+Overview is read-only and never wakes a provider to discover native children.
+Unavailable native rosters differ from known empty ones. Refresh retains the
+last coherent graph while marking pending or stale information, then reconciles
+authoritative updates. Returning to a tab does not replay historical activity.
+Project names and icons update automatically.
+
+Requires a compatible host with passive subagent and public project-icon APIs.

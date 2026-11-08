@@ -51,8 +51,8 @@ describe("activity bubbles", () => {
 
   it("keeps escaped-text content short without splitting surrogate pairs", () => {
     expect(bubbleText("  hello\n\u0000world ")).toBe("hello world");
-    const result = bubbleText("🌳".repeat(200));
-    expect(Array.from(result)).toHaveLength(160);
+    const result = bubbleText("🌳".repeat(300));
+    expect(Array.from(result)).toHaveLength(240);
     expect(result.endsWith("…")).toBe(true);
     expect(bubbleText("<script>alert(1)</script>")).toBe("<script>alert(1)</script>");
   });
@@ -66,5 +66,33 @@ describe("activity bubbles", () => {
     expect(store.current(1500)).toEqual([]);
     store.ingest([{ ...event, id: "visible", timestamp: 1500 }], nodes, 1500);
     expect(store.current(1500)).toHaveLength(1);
+  });
+
+  it("keeps structured previews and does not renew an unchanged stream prefix", () => {
+    const nodes = new Map([["a", node("a", "w1")]]);
+    const store = new BubbleStore();
+    const event: OverviewEvent = { id: "one", sourceKey: "message1", nodeId: "a", kind: "message", timestamp: 1000,
+      preview: { title: "Assistant update", detail: "Same bounded prefix…", truncated: true } };
+    store.ingest([event], nodes, 1000);
+    expect(store.current(1000)[0].preview).toEqual(event.preview);
+    store.ingest([{ ...event, id: "two", timestamp: 5000 }], nodes, 5000);
+    expect(store.current(7000)).toEqual([]);
+    store.ingest([{ ...event, id: "three", timestamp: 8000 }], nodes, 8000);
+    expect(store.current(8000)).toEqual([]);
+    for (let now = 60_000; now <= 240_000; now += 60_000) {
+      store.ingest([{ ...event, id: `stream:${now}`, timestamp: now }], nodes, now);
+      expect(store.current(now)).toEqual([]);
+    }
+    store.ingest([{ ...event, id: "four", sourceKey: "message2", timestamp: 250_000 }], nodes, 250_000);
+    expect(store.current(250_000)).toHaveLength(1);
+  });
+
+  it("never presents cached non-current state as fresh activity", () => {
+    const store = new BubbleStore();
+    const event: OverviewEvent = { id: "pending", nodeId: "a", kind: "message", text: "Pending", timestamp: 1000 };
+    store.ingest([event], new Map([["a", { ...node("a", "w1"), freshness: "refreshing" }]]), 1000);
+    expect(store.current(1000)).toEqual([]);
+    store.ingest([event], new Map([["a", node("a", "w1")]]), 1500);
+    expect(store.current(1500)).toEqual([]);
   });
 });

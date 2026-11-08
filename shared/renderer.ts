@@ -1,9 +1,13 @@
 import type { OverviewModel } from "./model";
+import type { GroupPreferences, OverviewPresentation, OverviewScope } from "./presentation";
 
-export type OverviewFocus =
-  | null
-  | { kind: "project"; id: string }
-  | { kind: "workspace"; id: string };
+export type OverviewFocus = OverviewScope;
+
+export interface OverviewAnchor { x: number; y: number; width: number; height: number }
+export interface FloatingCardPositioner {
+  update(anchor: OverviewAnchor | null): void;
+  dispose(): void;
+}
 
 /** Deliberately free of DOM and Three.js types; native can import these contracts. */
 export interface OverviewTheme {
@@ -16,16 +20,20 @@ export interface OverviewTheme {
   working: string;
   waiting: string;
   error: string;
+  selection?: string;
 }
 
 export interface OverviewMountOptions {
   model: OverviewModel;
   theme: OverviewTheme;
   motion?: boolean;
+  presentation?: OverviewPresentation;
   onSelect(nodeId: string | null): void;
   onFocus(target: OverviewFocus): void;
   onOpenAgent(managedAgentId: string): void;
   onError?(message: string): void;
+  onGroupChange?(id: string, expanded: boolean): void;
+  onSelectionAnchor?(anchor: OverviewAnchor | null): void;
 }
 
 export interface OverviewRenderer {
@@ -33,6 +41,8 @@ export interface OverviewRenderer {
   updateTheme(theme: OverviewTheme): void;
   setFocus(target: OverviewFocus): void;
   setSelection(nodeId: string | null): void;
+  setGroups(groups: GroupPreferences): void;
+  focusNode(id: string): void;
   setMotion(enabled: boolean): void;
   setVisible(visible: boolean): void;
   dispose(): void;

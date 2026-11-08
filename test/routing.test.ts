@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { findOwnershipCrossings, findUnrelatedNodeIntersections, pointAlongRoute, routeDelegation, routedEdge } from "../client/routing";
+import { findOwnershipCrossings, findUnrelatedNodeIntersections, pointAlongRoute, routeDelegation, routeOwnership, routedEdge } from "../client/routing";
 
 describe("routed graph edges", () => {
+  it("uses direct capsule-to-agent connections without the old radial hooks", () => {
+    const workspace = { id: "workspace", position: { x: 0, y: 0 }, body: { x: -74, y: -23, width: 148, height: 46 }, bounds: { x: -78, y: -27, width: 156, height: 54 } };
+    for (const position of [{ x: -82, y: -95 }, { x: -94, y: 86 }, { x: 145, y: 35 }]) {
+      const agent = { id: "agent", position, body: { x: position.x - 16, y: position.y - 16, width: 32, height: 32 }, bounds: { x: position.x - 20, y: position.y - 20, width: 40, height: 40 } };
+      const route = routeOwnership(workspace, agent, "p", { nodes: [workspace, agent] });
+      expect(route.segments).toHaveLength(1);
+      expect(route.segments[0]!.kind).toBe("line");
+      expect(route.points).toHaveLength(2);
+    }
+  });
+  it("uses a shallow, bounded detour only when the direct ownership route is obstructed", () => {
+    const node = (id: string, x: number, y: number, size = 20) => ({ id, position: { x, y }, body: { x: x - size / 2, y: y - size / 2, width: size, height: size }, bounds: { x: x - size / 2, y: y - size / 2, width: size, height: size } });
+    const source = node("source", 0, 0), target = node("target", 180, 0), obstacle = node("obstacle", 90, 0, 10);
+    const route = routeOwnership(source, target, "p", { nodes: [source, target, obstacle], clearance: 3 });
+    expect(route.segments.some(segment => segment.kind === "cubic")).toBe(true);
+    expect(findUnrelatedNodeIntersections([route], [obstacle], 2)).toEqual([]);
+    expect(route.length).toBeLessThan(180);
+    expect(Math.max(...route.points.map(point => Math.abs(point.y)))).toBeLessThan(20);
+    expect(route.points.every((point, index) => index === 0 || point.x >= route.points[index - 1]!.x)).toBe(true);
+  });
   it("checks the actual curved route rather than its endpoint chord", () => {
     const route = routedEdge({ id: "curve", source: "a", target: "b", kind: "membership", projectId: "p", segments: [
       { kind: "cubic", from: { x: 0, y: 0 }, control1: { x: 0, y: 100 }, control2: { x: 100, y: 100 }, to: { x: 100, y: 0 } },

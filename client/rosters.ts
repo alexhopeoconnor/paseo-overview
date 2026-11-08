@@ -15,13 +15,15 @@ interface Entry {
 export class RosterTracker {
   private readonly entries = new Map<string, Entry>();
   private disposed = false;
+  private suspended = false;
+  private queue: ReadQueue;
   constructor(private readonly options: {
     queue: ReadQueue;
     read(parentAgentId: string): Promise<RosterSnapshot>;
     changed(): void;
     failed(error: unknown): void;
     activity?(parentId: string, child: NativeRecord, previous?: NativeRecord): void;
-  }) {}
+  }) { this.queue = options.queue; }
 
   get states(): ReadonlyMap<string, RosterState> {
     return new Map([...this.entries].map(([id, entry]) => [id, entry.state]));
@@ -29,7 +31,7 @@ export class RosterTracker {
   state(parentId: string): RosterState | undefined { return this.entries.get(parentId)?.state; }
 
   setParents(agents: readonly AgentRecord[]): void {
-    if (this.disposed) return;
+    if (this.disposed || this.suspended) return;
     const present = new Set(agents.map(agent => agent.id));
     for (const [id, entry] of this.entries) if (!present.has(id)) {
       entry.token++; this.entries.delete(id);
@@ -40,12 +42,12 @@ export class RosterTracker {
           : agent.status === "initializing" ? "initializing" : "resident";
       const entry = this.entries.get(agent.id);
       if (!entry) {
-        this.entries.set(agent.id, { lifecycle, token: 0, reading: false, dirty: false, buffered: [], state: { availability: "unknown", subagents: [] } });
+        this.entries.set(agent.id, { lifecycle, token: 0, reading: false, dirty: false, buffered: [], state: { availability: "unknown", freshness: "refreshing", subagents: [] } });
         this.refresh(agent.id);
       } else if (entry.lifecycle !== lifecycle) {
         entry.lifecycle = lifecycle;
         this.invalidate(agent.id);
-      } else if (agent.status === "running" && entry.state.availability === "not_resident") {
+      } else if (entry.state.freshness !== "current" || (agent.status === "running" && entry.state.availability === "not_resident")) {
         // A previously unloaded idle parent can become resident as work starts.
         // Ordinary running/idle updates keep an already-known resident roster.
         this.refresh(agent.id);
@@ -56,7 +58,7 @@ export class RosterTracker {
   invalidate(parentId: string): void {
     const entry = this.entries.get(parentId);
     if (!entry || this.disposed) return;
-    entry.state = { availability: "unknown", subagents: [] };
+    entry.state = { ...entry.state, freshness: this.suspended ? "stale" : "refreshing" };
     entry.cursor = undefined;
     if (entry.reading) { entry.dirty = true; entry.buffered = []; }
     else this.refresh(parentId);
@@ -64,7 +66,7 @@ export class RosterTracker {
   }
 
   receive(update: DescriptorUpdate): void {
-    if (this.disposed) return;
+    if (this.disposed || this.suspended) return;
     const parentId = update.kind === "upsert" ? update.subagent.parentAgentId : update.parentAgentId;
     const entry = this.entries.get(parentId);
     if (!entry) return;
@@ -74,7 +76,7 @@ export class RosterTracker {
       if (!entry.dirty) entry.buffered.push(update);
       return;
     }
-    if (!entry.cursor || entry.cursor.generation !== update.cursor.generation || entry.state.availability !== "resident") {
+    if (!entry.cursor || entry.cursor.generation !== update.cursor.generation || entry.state.availability !== "resident" || entry.state.freshness !== "current") {
       this.invalidate(parentId); return;
     }
     this.apply(entry, update, true);
@@ -92,17 +94,18 @@ export class RosterTracker {
       }
     } else children.delete(update.subagentId);
     entry.cursor = cursor;
-    entry.state = { availability: "resident", subagents: [...children.values()] };
+    entry.state = { availability: "resident", freshness: "current", subagents: [...children.values()] };
     this.options.changed();
   }
 
   private refresh(parentId: string): void {
     const entry = this.entries.get(parentId);
-    if (!entry || entry.reading || this.disposed) return;
+    if (!entry || entry.reading || this.disposed || this.suspended) return;
     const token = ++entry.token;
     entry.reading = true; entry.dirty = false; entry.buffered = [];
-    const alive = () => !this.disposed && this.entries.get(parentId) === entry && entry.token === token;
-    void this.options.queue.run(() => {
+    entry.state = { ...entry.state, freshness: "refreshing" };
+    const alive = () => !this.disposed && !this.suspended && this.entries.get(parentId) === entry && entry.token === token;
+    void this.queue.run(() => {
       if (!alive()) throw new Error("Observation closed");
       return this.options.read(parentId);
     }).then(snapshot => {
@@ -114,19 +117,44 @@ export class RosterTracker {
       entry.cursor = snapshot.cursor;
       entry.state = {
         availability: snapshot.availability,
+        freshness: "current",
         subagents: snapshot.availability === "resident" ? snapshot.subagents.filter(child => child.parentAgentId === parentId) : [],
       };
       for (const update of entry.buffered.sort((a, b) => a.cursor!.revision - b.cursor!.revision)) this.apply(entry, update, false);
       this.options.changed();
     }).catch(error => {
       if (!alive()) return;
-      entry.state = { availability: "unknown", subagents: [] };
+      entry.state = { ...entry.state, freshness: "stale" };
       this.options.changed(); this.options.failed(error);
     }).finally(() => {
       if (!alive()) return;
       entry.reading = false; entry.buffered = [];
       if (entry.dirty) this.refresh(parentId);
     });
+  }
+
+  /** Cancel owned reads without throwing away the last authoritative descriptors. */
+  suspend(): void {
+    if (this.disposed || this.suspended) return;
+    this.suspended = true;
+    for (const entry of this.entries.values()) {
+      entry.token++;
+      entry.reading = false;
+      entry.dirty = false;
+      entry.buffered = [];
+      entry.cursor = undefined;
+      entry.state = { ...entry.state, freshness: "stale" };
+    }
+  }
+
+  /** Reads restart after the acknowledged directory supplies the current parent set. */
+  resume(queue: ReadQueue): void {
+    if (this.disposed) return;
+    this.queue = queue;
+    this.suspended = false;
+    for (const entry of this.entries.values()) {
+      entry.state = { ...entry.state, freshness: "refreshing" };
+    }
   }
 
   dispose(): void {

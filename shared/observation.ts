@@ -30,6 +30,7 @@ export type RosterUpdate =
   | { kind: "timeline"; parentAgentId: string; subagentId: string; item: unknown; seq: number; epoch: string; timestamp: string; replayed?: boolean };
 export interface RosterState {
   availability: "resident" | "not_resident" | "unknown";
+  freshness?: "current" | "refreshing" | "stale";
   subagents: readonly NativeRecord[];
 }
 export interface ProjectIcon { data: string; mimeType: string }
