@@ -122,6 +122,7 @@ function copyProvisionalSource(destination) {
     const rosterRequests = new Map();
     let nativeParent = null;
     const nativeParents = new Map();
+    const nativeActivity = new Map();
     let proxiedPages = 0;
     await page.routeWebSocket(() => true, routed => {
       console.log("Intercepting isolated browser WebSocket");
@@ -143,10 +144,10 @@ function copyProvisionalSource(destination) {
           const snapshot = message.payload.output;
           // Transport fixture tests dense native presentation; the real passive RPC still executes.
           snapshot.subagents = Array.from({ length: nativeParents.get(snapshot.parentAgentId) }, (_, index) => ({
-            id: `fixture-native-${index}`, parentAgentId: snapshot.parentAgentId,
+            id: `fixture-native-${String(index).padStart(3, "0")}`, parentAgentId: snapshot.parentAgentId,
             parentSubagentId: null,
             provider: "overview-test", title: `Inspect subsystem ${index + 1}`, description: `Sanitised native child ${index + 1}`,
-            status: snapshot.parentAgentId === nativeParent && index < 3 ? "running" : snapshot.parentAgentId === nativeParent && index === 6 ? "failed" : "completed", subtitle: null, updatedAt: new Date().toISOString(), toolCallId: `fixture-tool-${index}`,
+            status: nativeActivity.get(`${snapshot.parentAgentId}:${index}`) ?? "completed", subtitle: null, updatedAt: new Date().toISOString(), toolCallId: `fixture-tool-${index}`,
           }));
           await delay(1400);
         }
@@ -188,17 +189,32 @@ function copyProvisionalSource(destination) {
       assert.ok(workspaceId);
       workspaces.push({ workspaceId, project, directory: directories[project] });
     }
+    // Exercise the angular orientation that failed in the live graph: the dense
+    // branch belongs to the final workspace in its project's stable ID order.
+    const denseWorkspace = workspaces.filter(workspace => workspace.project === 0)
+      .sort((a, b) => a.workspaceId.localeCompare(b.workspaceId)).at(-1);
+    assert.ok(denseWorkspace);
+    const agentWorkspaces = [denseWorkspace, ...workspaces.filter(workspace => workspace !== denseWorkspace)];
     const agents = [];
-    for (let index = 0; index < workspaces.length; index++) {
-      const workspace = workspaces[index];
+    for (let index = 0; index < agentWorkspaces.length; index++) {
+      const workspace = agentWorkspaces[index];
       const count = index === 0 ? 4 : index === 1 ? 2 : 1;
       for (let item = 0; item < count; item++) {
         const agent = await client.createAgent({ provider: "overview-test", cwd: workspace.directory, workspaceId: workspace.workspaceId, title: `Acceptance agent ${index + 1}.${item + 1}${index === 0 && item === 0 ? " — Review the complete ownership tree, workspace layout, delegation routes and passive observations across multiple concurrent projects. ".repeat(3) : ""}`.slice(0,200) });
         agents.push(agent);
       }
     }
-    nativeParent = agents[0].id;
-    for (const [index,count] of [[0,28],[1,8],[2,3],[13,4]]) nativeParents.set(agents[index].id,count);
+    const denseParents = agents.slice(0, 4).sort((a, b) => a.id.localeCompare(b.id));
+    nativeParent = denseParents[0].id;
+    // The deployed roster exposed a flat 37-child branch with 36 quiet children.
+    // Expanding it used to put the parent's collapse button over outgoing rays.
+    // Synthetic identities preserve that density without retaining private data.
+    for (const [parent,count] of [[denseParents[0],37],[denseParents[1],8],[denseParents[2],3],[agents[13],4]]) nativeParents.set(parent.id,count);
+    nativeActivity.set(`${nativeParent}:36`, "running");
+    nativeActivity.set(`${denseParents[1].id}:0`, "running");
+    nativeActivity.set(`${denseParents[1].id}:1`, "failed");
+    nativeActivity.set(`${denseParents[2].id}:0`, "running");
+    const nativeFixtureCount = [...nativeParents.values()].reduce((sum, count) => sum + count, 0);
     console.log("Created 7 projects, 14 workspaces and 18 managed agents");
     const operations = () => {
       const logPath = path.join(output, "provider-operations.jsonl");
@@ -215,7 +231,8 @@ function copyProvisionalSource(destination) {
     await waitFor(async () => await page.locator('[data-overview-kind="workspace"]').count() === 14, "all paginated workspaces");
     await waitFor(async () => await page.locator('[data-overview-kind="agent"]').count() === 18, "all paginated managed agents");
     await waitFor(async () => await page.locator('[data-overview-kind="provider-subagent"]').count() >= 3, "delayed native branch");
-    await delay(500);
+    await waitFor(async () => await page.locator('[data-overview-kind]').evaluateAll(nodes => new Set(nodes.flatMap(node => node.dataset.overviewKind === "provider-subagent" ? [node.dataset.overviewId]
+      : node.dataset.overviewKind === "completed-group" ? JSON.parse(node.dataset.overviewMembers || "[]") : [])).size) === nativeFixtureCount, "every delayed native fixture member");
     console.log("Cold paginated load and delayed native snapshot rendered");
     const geometry = await page.getByTestId("overview-canvas-host").evaluate(host => {
       const rect = element => { const box = element.getBoundingClientRect(); return {x:box.x,y:box.y,width:box.width,height:box.height}; };
@@ -223,31 +240,44 @@ function copyProvisionalSource(destination) {
     });
     assert.ok(new Set(geometry.nodes.filter(node => node.kind === "project").map(node => Math.round(node.box.x))).size > 1, "Cold loaded graph must not retain a single column");
     const representedNative=geometry.nodes.flatMap(node=>node.kind==='provider-subagent'?[node.id]:node.kind==='completed-group'?node.members:[]);
-    assert.equal(new Set(representedNative).size,43,"Native fixture members remain represented exactly once");
+    assert.equal(new Set(representedNative).size,nativeFixtureCount,"Native fixture members remain represented exactly once");
     await page.screenshot({ path: path.join(output, "full.png") });
     const projectRoot = page.locator('[data-overview-kind="project"][aria-label^="Projects,"]');
     await projectRoot.click();
     await delay(500);
     const groupsBeforeFocus = await page.locator('[data-overview-kind="completed-group"]').count();
     assert.ok(groupsBeforeFocus > 0, "Focus preserves explicit inactive groups");
-    const inactive = page.locator('[data-overview-kind="completed-group"]').first();
+    const denseGroup = geometry.nodes.find(node => node.kind === "completed-group" && node.members.length === 36);
+    assert.ok(denseGroup, "The actual-density 36-inactive branch starts collapsed");
+    const inactive = page.locator(`[data-overview-id="${denseGroup.id}"]`);
     const members = JSON.parse(await inactive.getAttribute("data-overview-members"));
     await inactive.click();
-    await waitFor(async () => await page.locator(`[data-overview-id="${members[0]}"]`).count() === 1, "explicit inactive group expansion");
-    assert.ok(await page.locator('[data-overview-collapse]').count() > 0, "Expanded group has explicit collapse control");
+    const allExpanded = async () => {
+      const visible = new Set(await page.locator('[data-overview-id]').evaluateAll(nodes => nodes.map(node => node.dataset.overviewId)));
+      return members.every(id => visible.has(id));
+    };
+    assert.deepEqual(pageErrors, [], "Dense expansion must not throw a layout error");
+    await waitFor(allExpanded, "all 36 inactive members expand explicitly");
+    const collapse = page.locator(`[data-overview-collapse="${denseGroup.id}"]`);
+    assert.equal(await collapse.count(), 1, "Expanded dense group has its own collapse control");
+    await collapse.click();
+    await waitFor(async () => await inactive.count() === 1, "explicit dense-group collapse");
+    await inactive.click();
+    await waitFor(allExpanded, "repeat dense expansion preserves every member");
+    assert.deepEqual(pageErrors, [], "Repeated dense expansion remains valid");
     await page.screenshot({ path: path.join(output, "project-focus.png") });
-    const workspaceRoot = page.locator('[data-overview-kind="workspace"]').filter({ hasText: "Workspace 1 —" }).first();
+    const workspaceRoot = page.locator(`[data-overview-kind="workspace"][data-overview-id$=":${encodeURIComponent(denseWorkspace.workspaceId)}"]`);
     await workspaceRoot.click();
     await delay(500);
     await page.screenshot({ path: path.join(output, "workspace-focus.png") });
-    const node = page.locator('[data-overview-kind="agent"]').first();
+    const node = page.locator(`[data-overview-kind="agent"][data-overview-id$=":${encodeURIComponent(agents[0].id)}"]`);
     const canvasBeforeSelection = await page.getByTestId("overview-canvas-host").boundingBox();
     await node.click();
     await page.getByTestId("overview-selection").waitFor({ state: "visible" });
     assert.deepEqual(await page.getByTestId("overview-canvas-host").boundingBox(), canvasBeforeSelection, "Details float without shrinking the graph");
     assert.ok(await node.getAttribute("data-overview-avatar"), "Emoji is the agent node glyph");
     assert.equal(await node.getAttribute("data-overview-role"), "agent");
-    const child = page.locator('[data-overview-kind="provider-subagent"]').first();
+    const child = page.locator(`[data-overview-kind="provider-subagent"][data-overview-workspace$=":${encodeURIComponent(denseWorkspace.workspaceId)}"]`).first();
     assert.equal(await child.getAttribute("data-overview-role"), "subagent");
     await child.click();
     const childId = await child.getAttribute("data-overview-id");
@@ -340,7 +370,7 @@ function copyProvisionalSource(destination) {
       };
       await previewSetting(false);
       await waitFor(async () => await page.locator('[data-overview-kind="agent"]').count() === 18, "Overview after isolated chat setting change");
-      await page.locator('[data-overview-kind="workspace"]').filter({hasText:"Workspace 1 —"}).first().click();
+      await workspaceRoot.click();
       await delay(400);
       await client.sendAgentMessage(agents[0].id,"Run the long preview independence check.");
       await waitFor(async () => await page.locator('[data-overview-bubble]').filter({hasText:"Bounded Overview"}).count() > 0, "bounded live long response preview");
@@ -361,7 +391,7 @@ function copyProvisionalSource(destination) {
     }
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount:43,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(status.version === "0.15.2-alex.10" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(status.version === "0.15.2-alex.10" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, provisional: !artifact }));
   } catch (error) {

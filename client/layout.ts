@@ -4,7 +4,7 @@ import type { OverviewFocus } from "../shared/renderer";
 import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
 import { agentRole, type AgentRole } from "./identity";
-import { distance, inflateRect, rectsOverlap, translateRect, unionRects, type Point, type Rect } from "./geometry";
+import { boundaryPoint, distance, inflateRect, rectsOverlap, segmentIntersectsRect, translateRect, unionRects, type Point, type Rect } from "./geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections, routeDelegation, routeOwnership, type RoutedEdge } from "./routing";
 import { graphMetrics, nodeFootprint, type LayoutNodeKind } from "./scene/metrics";
 
@@ -70,7 +70,7 @@ export function parentMap(nodes: readonly OverviewNode[], rootId: string): Map<s
 }
 type Definition = Omit<PositionedNode, "position" | "body" | "bounds" | "labelBounds">;
 interface TreeEntry { id: string; children: TreeEntry[] }
-interface LocalGeometry { positions: ReadonlyMap<string, Point>; bounds: Rect; edges: readonly RoutedEdge[] }
+interface LocalGeometry { positions: ReadonlyMap<string, Point>; controls: ReadonlyMap<string, Rect>; bounds: Rect; edges: readonly RoutedEdge[] }
 interface ProjectDefinition {
   id: string; name: string; iconUrl?: string; background: boolean;
   definitions: Definition[]; parents: Map<string, string>; workspaceIds: string[]; agentIds: string[];
@@ -79,14 +79,44 @@ interface ProjectDefinition {
 export function nodeCollisionBounds(node: PositionedNode): readonly Rect[] {
   return node.kind === "project" ? [inflateRect(node.body, 4), ...(node.labelBounds ? [inflateRect(node.labelBounds, 2)] : [])] : [node.bounds];
 }
-function positioned(definition: Definition, position: Point): PositionedNode {
+function positioned(definition: Definition, position: Point, reservedControl?: Rect): PositionedNode {
   const metric = nodeFootprint(definition.kind, definition.role);
   const control = definition.inactiveGroup?.expanded ? { x: metric.body.x + metric.body.width - 2,
     y: metric.body.y + metric.body.height - 2, width: 36, height: 24 } : undefined;
+  const controlBounds = reservedControl ?? (control ? translateRect(control, position) : undefined);
   return { ...definition, position, body: translateRect(metric.body, position),
-    bounds: translateRect(control ? unionRects([metric.bounds, control]) : metric.bounds, position),
-    ...(control ? { controlBounds: translateRect(control, position) } : {}),
+    bounds: controlBounds ? unionRects([translateRect(metric.bounds, position), controlBounds]) : translateRect(metric.bounds, position),
+    ...(controlBounds ? { controlBounds } : {}),
     ...(metric.labelBounds ? { labelBounds: translateRect(metric.labelBounds, position) } : {}) };
+}
+
+/** Keep the collapse affordance in a gap, rather than blocking a child's route. */
+function positionControls(nodes: readonly PositionedNode[], parents: ReadonlyMap<string, string>): PositionedNode[] {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  return nodes.map(node => {
+    if (!node.controlBounds) return node;
+    const incident = [...parents].flatMap(([child, parent]) => parent === node.id ? [byId.get(child)!]
+      : child === node.id ? [byId.get(parent)!] : []).filter(Boolean);
+    const angles = incident.map(other => Math.atan2(other.position.y - node.position.y, other.position.x - node.position.x))
+      .map(angle => (angle + Math.PI * 2) % (Math.PI * 2)).sort((a, b) => a - b);
+    const gaps = angles.map((start, index) => {
+      const end = angles[(index + 1) % angles.length]! + (index === angles.length - 1 ? Math.PI * 2 : 0);
+      return { angle: (start + end) / 2, gap: end - start };
+    }).sort((a, b) => b.gap - a.gap);
+    const candidates = gaps.map(({ angle }) => {
+      const x = Math.cos(angle), y = Math.sin(angle), width = 36, height = 24;
+      const radius = Math.abs(x) * (node.body.width + width) / 2 + Math.abs(y) * (node.body.height + height) / 2 + 8;
+      return { x: node.position.x + x * radius - width / 2, y: node.position.y + y * radius - height / 2, width, height };
+    });
+    const controlBounds = candidates.find(candidate => {
+      const obstacle = inflateRect(candidate, 3);
+      return !incident.some(other => segmentIntersectsRect(boundaryPoint(node.body, other.position, 2),
+        boundaryPoint(other.body, node.position, 2), obstacle)) &&
+        !nodes.some(other => other.id !== node.id && nodeCollisionBounds(other).some(bounds => rectsOverlap(candidate, bounds, 3)));
+    }) ?? candidates[0] ?? node.controlBounds;
+    const base = translateRect(nodeFootprint(node.kind, node.role).bounds, node.position);
+    return { ...node, controlBounds, bounds: unionRects([base, controlBounds]) };
+  });
 }
 function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
   const agents = new Map(model.nodes.map(node => [node.id, node]));
@@ -197,6 +227,7 @@ function localGeometry(project: ProjectDefinition): LocalGeometry {
       const depth = depths.get(definition.id) ?? 0, radius = radii[depth] ?? 0, angle = angles.get(definition.id) ?? 0;
       return positioned(definition, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
     });
+    nodes = positionControls(nodes, project.parents);
     const byId = new Map(nodes.map(node => [node.id, node]));
     edges = [];
     for (const [target, source] of [...project.parents].sort(([a], [b]) => a.localeCompare(b))) {
@@ -227,7 +258,9 @@ function localGeometry(project: ProjectDefinition): LocalGeometry {
       for (let next = depth; next < radii.length; next++) radii[next]! += increase;
     }
   }
-  return { positions: new Map(nodes.map(node => [node.id, node.position])), bounds: inflateRect(unionRects(nodes.map(node => node.bounds)), 12), edges };
+  return { positions: new Map(nodes.map(node => [node.id, node.position])),
+    controls: new Map(nodes.flatMap(node => node.controlBounds ? [[node.id, node.controlBounds] as const] : [])),
+    bounds: inflateRect(unionRects(nodes.map(node => node.bounds)), 12), edges };
 }
 
 function contains(outer: Rect, inner: Rect): boolean {
@@ -310,7 +343,7 @@ export class StableLayout {
       const signature = topologySignature(project);
       let cached = geometry.get(project.id);
       if (!cached || cached.signature !== signature) { cached = { signature, value: localGeometry(project) }; geometry.set(project.id, cached); }
-      const nodes = project.definitions.map(node => positioned(node, cached!.value.positions.get(node.id)!));
+      const nodes = project.definitions.map(node => positioned(node, cached!.value.positions.get(node.id)!, cached!.value.controls.get(node.id)));
       return { id: project.id, name: project.name, iconUrl: project.iconUrl, background: project.background,
         position: { x: 0, y: 0 }, scale: 1, bounds: cached.value.bounds,
         radius: Math.max(...nodes.map(node => Math.hypot(node.position.x, node.position.y) + Math.max(node.bounds.width, node.bounds.height) / 2)),
