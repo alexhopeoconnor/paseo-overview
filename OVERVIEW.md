@@ -12,9 +12,15 @@ speech bubbles show new output, tool activity and attention events.
 Click a project or workspace to bring it forward. Hover a node to follow its
 ownership path. Click an agent to inspect its status alongside the graph and use
 **Open chat** to continue in Paseo. Press Escape or click the background to return
-to the full view. Use **Pause motion** when desired. Phones show a simpler view
-grouped by project, workspace and agent relationships. Unread results,
-permission requests and errors have distinct indicators.
+to the full view. Use **Pause motion** when desired. Phones start with collapsed
+project roots that pulse while agents are working. Tap roots and workspaces to
+reveal their connected branches, and use Back to return. The phone graph omits
+speech bubbles. Unread results, permission requests and errors have distinct
+indicators.
+
+Dense groups of completed subagents appear as **N completed**. Click the count
+or focus its project/workspace to expand them. Running agents and blockers remain
+individual nodes, and Escape returns to the full view.
 
 This page is read-only. Unloaded native subagent rosters are labelled unavailable;
 observing them never wakes their parent. Reconnection refreshes current state

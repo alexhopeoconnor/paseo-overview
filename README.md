@@ -17,9 +17,22 @@ agent opens its details alongside the graph. Hover or keyboard focus highlights
 its ownership path; arrow keys move between parents, children and siblings.
 Escape or the empty background returns to the full view. The graph has no wheel zoom or orbit
 controls; browser zoom remains available. **Pause motion** and the operating
-system's reduced-motion preference stop animated effects. The phone and WebGL
-fallback group workspaces and agents under every project. Finished unread results
+system's reduced-motion preference stop animated effects. Finished unread results
 have a separate indicator from permission requests and errors.
+
+Phones open a touch graph of collapsed project roots with live icons and activity
+halos. Tap a project, then a workspace, to reveal its connected branches. The
+native graph uses React Native views and animation, without WebGL or speech
+bubbles. Back navigation restores the previous level. The same touch graph is
+available if browser graphics are unavailable.
+Completed phone branches may fold as work finishes; explicitly expanded groups
+stay open until navigating to another level.
+
+When a dense full view would make labels too small, completed native subagent
+branches use explicit **N completed** nodes. Working, waiting, failed and
+attention-bearing agents stay individual. Click a count, project or workspace to
+reveal its completed children; Escape restores the full-view arrangement. Counts
+and activity totals always include the represented agents.
 
 ## Observation and coverage
 
@@ -83,6 +96,7 @@ Artifact integrity and visual acceptance are verified separately.
 ## Source layout
 
 - `index.client.tsx`, `client/screen.tsx`, `client/native.tsx`: contributed UI.
+- `client/native-layout.ts`: touch graph geometry and collapsed branch membership.
 - `client/transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: passive observation.
 - `client/normalize.ts`: ownership and display model.
 - `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.

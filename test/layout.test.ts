@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { BACKGROUND_GROUP, StableLayout, canvasNode, parentMap, type SceneLayout } from "../client/layout";
+import { BACKGROUND_GROUP, StableLayout, canvasNode, nodeCollisionBounds, parentMap, type SceneLayout } from "../client/layout";
 import { distance, rectsOverlap } from "../client/geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections } from "../client/routing";
+import { graphMetrics } from "../client/scene/metrics";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 
 const node = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
@@ -34,7 +35,7 @@ function valid(layout: SceneLayout) {
       const first = nodes[a]!, second = nodes[b]!;
       if ((first.kind === "agent" || first.kind === "provider-subagent") && (second.kind === "agent" || second.kind === "provider-subagent")) {
         expect(distance(first.position, second.position)).toBeGreaterThanOrEqual((first.bounds.width + second.bounds.width) / 2);
-      } else expect(rectsOverlap(first.bounds, second.bounds)).toBe(false);
+      } else expect(nodeCollisionBounds(first).some(a => nodeCollisionBounds(second).some(b => rectsOverlap(a, b)))).toBe(false);
     }
   }
   const rectangles = layout.projects.map(project => ({ x: project.position.x + project.bounds.x * project.scale,
@@ -149,5 +150,57 @@ describe("project-root layout", () => {
     const result = new StableLayout().update(value, 1920, 1440);
     expect(result.nodes.size).toBe(value.projects.length + value.workspaces.length + value.nodes.length);
     valid(result);
+  });
+  it("collapses only finished native subtrees when density requires it, preserving every original identity", () => {
+    const value = model([4, 0, 0, 3, 2, 4, 1], 43);
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
+    value.nodes = [...value.nodes, { ...node("active-grandchild", "w0:0", "native:0", true), state: "working" },
+      { ...node("finished-grandchild", "w0:0", "native:4", true), state: "finished" },
+      { ...node("finished-descendant", "w0:0", "finished-grandchild", true), state: "finished" }];
+    value.nodes = value.nodes.map(item => item.id === "native:1" ? { ...item, attention: true, attentionReason: "permission" } :
+      item.id === "native:2" ? { ...item, state: "error" } : item.id === "native:3" ? { ...item, state: "waiting" } : item);
+    const result = new StableLayout().update(value, 1196, 1157);
+    const groups = [...result.nodes.values()].filter(item => item.kind === "completed-group");
+    expect(groups.length).toBeGreaterThan(0);
+    expect(result.projects[0]!.scale).toBeGreaterThanOrEqual(0.8);
+    for (const id of ["native:0", "native:1", "native:2", "native:3", "active-grandchild"]) expect(result.nodes.has(id)).toBe(true);
+    const represented = [...result.nodes.values()].flatMap(item => item.memberIds ?? (value.nodes.some(original => original.id === item.id) ? [item.id] : []));
+    expect([...represented].sort()).toEqual(value.nodes.map(item => item.id).sort());
+    expect(new Set(represented).size).toBe(represented.length);
+    for (const group of groups) for (const id of group.memberIds!) expect(result.memberToDisplay.get(id)).toBe(group.id);
+    valid(result);
+  });
+  it("expands focused completed groups and restores the identical full-view anchors", () => {
+    const value = model([4, 0, 0, 3, 2, 4, 1], 43);
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item);
+    value.nodes = [...value.nodes, ...Array.from({ length: 6 }, (_, index) => ({ ...node(`other-completed:${index}`, "w0:1", "a:w0:1", true), state: "finished" as const }))];
+    const engine = new StableLayout(), base = engine.update(value, 930, 761);
+    expect([...base.nodes.values()].some(item => item.kind === "completed-group")).toBe(true);
+    expect(base.projects[0]!.scale * graphMetrics.workspace.fontSize).toBeGreaterThanOrEqual(10.75);
+    const focused = engine.update(value, 930, 761, { kind: "workspace", id: "w0:0" });
+    expect(value.nodes.filter(item => item.workspaceId === "w0:0").every(item => focused.nodes.has(item.id))).toBe(true);
+    expect([...focused.nodes.values()].some(item => item.kind === "completed-group" && item.workspaceId === "w0:1")).toBe(true);
+    expect(focused.projects.map(project => [project.id, project.position, project.scale])).toEqual(base.projects.map(project => [project.id, project.position, project.scale]));
+    const restored = engine.update(value, 930, 761);
+    expect(restored.projects.map(project => [project.id, project.position, project.scale])).toEqual(base.projects.map(project => [project.id, project.position, project.scale]));
+    expect([...restored.nodes.keys()]).toEqual([...base.nodes.keys()]);
+    valid(restored);
+    const projectFocused = engine.update(value, 930, 761, { kind: "project", id: "p0" });
+    expect(value.nodes.every(item => projectFocused.nodes.has(item.id))).toBe(true);
+  });
+  it("keeps newly finished nodes visible and immediately reveals a grouped node needing attention", () => {
+    const value = model([4, 0, 0, 3, 2, 4, 1], 43);
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: item.id === "native:0" ? "working" as const : "finished" as const } : item);
+    const engine = new StableLayout(), initial = engine.update(value, 1196, 1157);
+    const allFinished = { ...value, nodes: value.nodes.map(item => item.kind === "provider-subagent" ? { ...item, state: "finished" as const } : item) };
+    const finished = engine.update(allFinished, 1196, 1157);
+    expect(finished.nodes.has("native:0")).toBe(true);
+    expect([...finished.nodes.keys()]).toEqual([...initial.nodes.keys()]);
+    expect(finished.projects.map(project => project.position)).toEqual(initial.projects.map(project => project.position));
+    const needsAttention = { ...allFinished, nodes: allFinished.nodes.map(item => item.id === "native:1" ? { ...item, state: "waiting" as const, attention: true } : item) };
+    const revealed = engine.update(needsAttention, 1196, 1157);
+    expect(revealed.nodes.has("native:1")).toBe(true);
+    expect(revealed.memberToDisplay.get("native:1")).toBe("native:1");
+    expect(engine.update(allFinished, 1196, 1157).nodes.has("native:1")).toBe(true);
   });
 });

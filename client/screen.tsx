@@ -112,7 +112,7 @@ export function OverviewScreen(props: PluginScreenProps) {
   const returnToFull = () => { renderer.current?.setFocus(null); setFocus(null); setSelectedId(null); };
 
   return <View testID="overview-screen" style={{ flex: 1, minWidth: 0, minHeight: 0, backgroundColor: theme.background }}>
-    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: 24, paddingVertical: 16, gap: 16, borderBottomWidth: 1, borderBottomColor: theme.border }}>
+    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", paddingHorizontal: props.layout.compact ? 14 : 24, paddingVertical: props.layout.compact ? 10 : 16, gap: props.layout.compact ? 10 : 16, borderBottomWidth: 1, borderBottomColor: theme.border }}>
       <View style={{ flex: 1, minWidth: 200, gap: 5 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 9 }}>
           <Text style={{ color: theme.foreground, fontSize: 16, fontWeight: "600" }}>{focused?.name || "All projects"}</Text>
@@ -128,16 +128,16 @@ export function OverviewScreen(props: PluginScreenProps) {
       </View>
       {model.connection !== "connected" ? <Text accessibilityLiveRegion="polite" style={{ color: theme.waiting, fontSize: 12 }}>{model.connection === "connecting" ? "Connecting…" : "Disconnected · showing last state"}</Text> : null}
       {focus ? <Pressable accessibilityRole="button" onPress={returnToFull} style={{ paddingVertical: 7, paddingHorizontal: 10 }}><Text style={{ color: theme.accent, fontSize: 12 }}>All projects ↗</Text></Pressable> : null}
-      {browser ? <Pressable testID="overview-motion" accessibilityRole="button" accessibilityLabel={motion ? "Pause animation" : "Resume animation"} onPress={() => setMotion(value => !value)} style={{ paddingVertical: 7, paddingHorizontal: 10, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.muted, fontSize: 12 }}>{motion ? "Pause motion" : "Resume motion"}</Text></Pressable> : null}
+      <Pressable testID="overview-motion" accessibilityRole="button" accessibilityLabel={motion ? "Pause animation" : "Resume animation"} onPress={() => setMotion(value => !value)} style={{ paddingVertical: 7, paddingHorizontal: 10, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.muted, fontSize: 12 }}>{motion ? "Pause motion" : "Resume motion"}</Text></Pressable>
     </View>
     {error ? <View style={{ paddingHorizontal: 18, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: theme.border }}><Text selectable style={{ color: theme.waiting, fontSize: 12 }}>{error}</Text></View> : null}
-    {renderError ? <View style={{ paddingHorizontal: 18, paddingVertical: 8, gap: 8, flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}><Text style={{ color: theme.muted, fontSize: 12, flex: 1 }}>Showing the simple view. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => { setFocus(null); setSelectedId(null); setRenderError(""); }} style={{ paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.accent, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
+    {renderError ? <View style={{ paddingHorizontal: 18, paddingVertical: 8, gap: 8, flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}><Text style={{ color: theme.muted, fontSize: 12, flex: 1 }}>Using the touch graph. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => { setFocus(null); setSelectedId(null); setRenderError(""); }} style={{ paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: theme.border, borderRadius: 8 }}><Text style={{ color: theme.accent, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
     <View style={{ flex: 1, minHeight: 0, flexDirection: props.layout.compact ? "column" : "row" }}>
     {browser ? <View style={{ flex: 1, minWidth: 0, minHeight: props.layout.compact && selected ? 180 : 250 }}>
       <View ref={panel} testID="overview-canvas-host" style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }} />
       {!ready ? <View pointerEvents="none" style={{ position: "absolute", top: 14, left: 24 }}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading project activity…</Text></View> : null}
       {ready && !model.projects.length && !model.nodes.length ? <View pointerEvents="none" style={{ position: "absolute", top: "40%", left: 24, right: 24, alignItems: "center", gap: 8 }}><Text style={{ color: theme.foreground, fontSize: 18, fontWeight: "600" }}>Your projects will appear here</Text><Text style={{ color: theme.muted, fontSize: 13 }}>Overview follows the projects and workspaces on this host.</Text></View> : null}
-    </View> : <NativeOverview model={model} theme={theme} onSelect={setSelectedId} onOpenAgent={navigation ? openAgent : undefined} />}
+    </View> : <NativeOverview model={model} theme={theme} motion={motion} onSelect={setSelectedId} onOpenAgent={navigation ? openAgent : undefined} />}
     {selected ? <ScrollView testID="overview-selection" style={{ width: props.layout.compact ? undefined : 288, minHeight: 0, flexGrow: 0, flexShrink: 1, maxHeight: props.layout.compact ? "45%" : "100%", borderLeftWidth: props.layout.compact ? 0 : 1, borderTopWidth: props.layout.compact ? 1 : 0, borderColor: theme.border, backgroundColor: theme.surface }} contentContainerStyle={{ padding: 20, gap: 12 }}>
       <Text style={{ color: theme.muted, fontSize: 10, letterSpacing: 1.2, fontWeight: "600" }}>{selected.kind === "provider-subagent" ? "SUBAGENT" : "AGENT"}</Text>
       <View style={{ flexDirection: "row", gap: 12 }}><Text selectable style={{ flex: 1, color: theme.foreground, fontWeight: "600" }}>{selected.label}</Text><Pressable accessibilityRole="button" accessibilityLabel="Close agent details" onPress={() => setSelectedId(null)}><Text style={{ color: theme.muted }}>×</Text></Pressable></View>
@@ -151,7 +151,7 @@ export function OverviewScreen(props: PluginScreenProps) {
     </ScrollView> : null}
     </View>
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 16, paddingHorizontal: 24, paddingVertical: 10, borderTopWidth: 1, borderTopColor: theme.border }}>
-      <Text style={{ color: theme.muted, fontSize: 11 }}>— Ownership</Text><Text style={{ color: theme.accent, fontSize: 11 }}>┄ Delegation</Text><Text style={{ color: theme.muted, fontSize: 11, flex: 1, textAlign: "right" }}>{focus ? "Esc or click the background to return" : "Click a project or workspace to explore"}</Text>
+      <Text style={{ color: theme.muted, fontSize: 11 }}>— Ownership</Text><Text style={{ color: theme.accent, fontSize: 11 }}>{browser ? "┄ Delegation" : "↗ Delegation"}</Text><Text style={{ color: theme.muted, fontSize: 11, flex: 1, textAlign: "right" }}>{browser ? focus ? "Esc or click the background to return" : "Click a project or workspace to explore" : "Tap a node to explore its branches"}</Text>
     </View>
   </View>;
 }

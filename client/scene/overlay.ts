@@ -84,15 +84,23 @@ export class GraphOverlay {
       }
       item.node = node;
       const agent = agents.get(node.id), w = node.body.width, h = node.body.height;
+      const completedGroup = node.kind === "completed-group";
+      const members = completedGroup ? (node.memberIds ?? []).flatMap(id => { const member = agents.get(id); return member ? [member] : []; }) : [];
       const hitW = Math.max(28, w), hitH = Math.max(28, h);
-      css(item.button, { width: `${hitW}px`, height: `${hitH}px`, borderRadius: node.kind === "workspace" ? "12px" : "50%" });
-      css(item.glyph, { width: `${w}px`, height: `${h}px`, borderRadius: node.kind === "workspace" ? "11px" : node.kind === "project" ? "18px" : "50%", fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650" });
-      Object.assign(item.button.dataset, { overviewKind: node.kind, overviewId: node.id, overviewProject: node.projectId, overviewWorkspace: node.workspaceId ?? "", overviewStatus: agent?.state ?? "", overviewAttention: agent?.attentionReason ?? "" });
-      item.label.textContent = node.label;
-      item.label.style.fontSize = `${node.kind === "project" ? graphMetrics.project.fontSize : node.kind === "workspace" ? graphMetrics.workspace.fontSize : graphMetrics.agent.fontSize}px`;
-      item.label.style.lineHeight = node.kind === "project" ? "20px" : node.kind === "workspace" ? "16px" : "1.3";
+      css(item.button, { width: `${hitW}px`, height: `${hitH}px`, borderRadius: completedGroup ? "15px" : node.kind === "workspace" ? "12px" : "50%" });
+      css(item.glyph, { width: `${w}px`, height: `${h}px`, borderRadius: completedGroup ? "15px" : node.kind === "workspace" ? "11px" : node.kind === "project" ? "18px" : "50%", fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650" });
+      Object.assign(item.button.dataset, { overviewKind: node.kind, overviewId: node.id, overviewProject: node.projectId, overviewWorkspace: node.workspaceId ?? "", overviewStatus: agent?.state ?? (completedGroup && members.length && members.every(member => member.state === "finished") ? "finished" : ""), overviewAttention: agent?.attentionReason ?? "" });
+      if (completedGroup) {
+        item.button.dataset.overviewMembers = JSON.stringify(members.map(member => member.id));
+        item.button.setAttribute("aria-expanded", "false");
+      } else { delete item.button.dataset.overviewMembers; item.button.removeAttribute("aria-expanded"); }
+      item.label.textContent = completedGroup ? `${members.length} completed` : node.label;
+      item.label.style.fontSize = `${node.kind === "project" ? graphMetrics.project.fontSize : node.kind === "workspace" ? graphMetrics.workspace.fontSize : completedGroup ? graphMetrics.completedGroup.fontSize : graphMetrics.agent.fontSize}px`;
+      item.label.style.lineHeight = node.kind === "project" ? "22px" : node.kind === "workspace" ? "20px" : completedGroup ? "18px" : "1.3";
+      item.label.style.webkitLineClamp = completedGroup ? "1" : "2";
       if (node.labelBounds) css(item.label, { left: `${node.labelBounds.x - node.position.x + hitW / 2}px`, top: `${node.labelBounds.y - node.position.y + hitH / 2}px`, width: `${node.labelBounds.width}px`, height: `${node.labelBounds.height}px`, display: "-webkit-box" });
-      else if (node.kind === "workspace") css(item.label, { left: `${(hitW - w) / 2 + 10}px`, top: `${(hitH - h) / 2 + 3}px`, width: `${w - 20}px`, height: "32px", display: "-webkit-box" });
+      else if (node.kind === "workspace") css(item.label, { left: `${(hitW - w) / 2 + 10}px`, top: `${(hitH - h) / 2 + 3}px`, width: `${w - 20}px`, height: "40px", display: "-webkit-box" });
+      else if (completedGroup) css(item.label, { left: `${(hitW - w) / 2 + 6}px`, top: `${hitH / 2 - 9}px`, width: `${w - 12}px`, height: "18px", display: "-webkit-box" });
       else item.label.style.display = "none";
       item.glyph.textContent = node.kind === "project" ? node.label.slice(0, 1).toUpperCase() : node.kind === "agent" ? (agent?.provider ?? "A").slice(0, 1).toUpperCase() : "";
       if (node.kind === "project" && node.iconUrl) {
@@ -102,7 +110,7 @@ export class GraphOverlay {
         if (available) item.glyph.textContent = "";
       } else { item.failedIcon = undefined; item.image.removeAttribute("src"); item.image.style.display = "none"; }
       const project = model.projects.find(project => project.id === node.id);
-      const descendants = node.kind === "project" ? model.nodes.filter(child => model.workspaces.some(workspace => workspace.id === child.workspaceId && workspace.projectId === project?.projectId)) : node.kind === "workspace" ? model.nodes.filter(child => child.workspaceId === node.id) : agent ? [agent] : [];
+      const descendants = node.kind === "project" ? model.nodes.filter(child => model.workspaces.some(workspace => workspace.id === child.workspaceId && workspace.projectId === project?.projectId)) : node.kind === "workspace" ? model.nodes.filter(child => child.workspaceId === node.id) : completedGroup ? members : agent ? [agent] : [];
       const waiting = descendants.filter(child => !hasError(child) && needsInput(child)).length, errors = descendants.filter(hasError).length;
       const active = descendants.filter(child => child.state === "working" && !hasError(child) && !needsInput(child)).length;
       const unread = descendants.filter(child => child.attention && child.attentionReason === "finished" && child.state !== "working" && !hasError(child) && !needsInput(child)).length;
@@ -112,7 +120,7 @@ export class GraphOverlay {
       const summary = agent ? statusLabel(agent) : `${active} working · ${waiting} waiting · ${errors} errors · ${unread} unread`;
       item.summary = summary;
       const delegations = this.delegationDescriptions.get(node.id)?.join(". ");
-      item.button.setAttribute("aria-label", `${node.label}, ${node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
+      item.button.setAttribute("aria-label", completedGroup ? `${members.length} completed subagents; ${summary}. Click to expand and show individual subagents.` : `${node.label}, ${node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
     }
     this.updateTheme(this.theme);
   }
@@ -129,6 +137,14 @@ export class GraphOverlay {
     if (held === this.bubbleHeld.has(id)) return;
     if (held) this.bubbleHeld.add(id); else this.bubbleHeld.delete(id);
     this.callbacks.hold(id, held || this.hovered === id);
+  }
+
+  /** Transfer keyboard focus when expanding a summary removes its own button. */
+  focusNode(id: string): boolean {
+    const item = this.nodes.get(id);
+    if (!item) return false;
+    item.button.focus({ preventScroll: true });
+    return document.activeElement === item.button;
   }
 
   private onKey(event: KeyboardEvent, id: string): void {
@@ -151,9 +167,10 @@ export class GraphOverlay {
     const agents = new Map(this.model?.nodes.map(node => [node.id, node]));
     for (const [id, item] of this.nodes) {
       const agent = agents.get(id), colour = agent ? statusColour(agent, theme) : theme.accent;
+      const completedGroup = item.node.kind === "completed-group";
       const structural = item.node.kind === "project" || item.node.kind === "workspace";
-      css(item.glyph, { background: structural ? theme.surface : colour, color: structural ? theme.foreground : theme.background, border: `1px solid ${structural ? theme.border : colour}`, boxShadow: structural ? "0 3px 12px #0000000b, inset 0 1px 0 #ffffff12" : "none" });
-      item.label.style.color = theme.foreground; item.badge.style.color = theme.background;
+      css(item.glyph, { background: structural || completedGroup ? theme.surface : colour, color: structural || completedGroup ? theme.foreground : theme.background, border: `1px ${completedGroup ? "dashed" : "solid"} ${structural || completedGroup ? theme.border : colour}`, boxShadow: structural ? "0 3px 12px #0000000b, inset 0 1px 0 #ffffff12" : "none" });
+      item.label.style.color = completedGroup ? theme.muted : theme.foreground; item.badge.style.color = theme.background;
     }
     css(this.tooltip, { color: theme.foreground, background: theme.surface, borderColor: theme.border });
     for (const item of this.bubbles.values()) css(item.button, { background: theme.surface, color: theme.foreground, borderColor: theme.border });
@@ -163,7 +180,8 @@ export class GraphOverlay {
   positionNode(id: string, x: number, y: number, scale: number, opacity: number, selected: boolean, focused: boolean, highlighted: boolean, foreground = false): void {
     const item = this.nodes.get(id); if (!item) return;
     css(item.button, { left: `${x}px`, top: `${y}px`, transform: `translate(-50%, -50%) scale(${scale})`, opacity: String(opacity), zIndex: selected ? "6" : focused ? "5" : foreground ? "4" : "2", outline: selected || focused ? `2px solid ${this.theme.accent}` : highlighted ? `1px solid ${this.theme.accent}` : "", pointerEvents: opacity < 0.08 ? "none" : "auto" });
-    item.button.setAttribute("aria-pressed", String(selected || focused));
+    if (item.node.kind === "completed-group") item.button.removeAttribute("aria-pressed");
+    else item.button.setAttribute("aria-pressed", String(selected || focused));
     const b = item.node.bounds;
     const rect = { x: x + (b.x - item.node.position.x) * scale, y: y + (b.y - item.node.position.y) * scale, width: b.width * scale, height: b.height * scale };
     this.positions.set(id, rect); if (opacity > 0.25) this.occupied.push(rect);
@@ -213,13 +231,14 @@ export class GraphOverlay {
       const agent = this.model?.nodes.find(node => node.id === this.hovered);
       if (item && anchor && width >= 72 && height >= 64) {
         const descriptions = this.delegationDescriptions.get(item.node.id);
-        const text = `${item.node.label}\n${agent ? `${agent.provider ?? "Agent"} · ${statusLabel(agent)}` : `${item.summary}\nClick to explore this ${item.node.kind === "project" ? "project" : "workspace"}`}${descriptions?.length ? `\n${descriptions.join("\n")}` : ""}`;
+        const group = item.node.kind === "completed-group";
+        const text = `${group ? `${item.label.textContent} subagents` : item.node.label}\n${agent ? `${agent.provider ?? "Agent"} · ${statusLabel(agent)}` : `${item.summary}\n${group ? "Click to expand and show individual subagents" : `Click to explore this ${item.node.kind === "project" ? "project" : "workspace"}`}`}${descriptions?.length ? `\n${descriptions.join("\n")}` : ""}`;
         const tooltipWidth = Math.min(270, width - 24), maxHeight = Math.min(166, height - 16);
         const key = `${tooltipWidth}:${maxHeight}:${text}`;
         if (this.tooltipSize?.key !== key) {
           this.tooltip.textContent = text;
           css(this.tooltip, { display: "block", visibility: "hidden", width: `${tooltipWidth}px`, height: "auto", maxHeight: `${maxHeight}px` });
-          this.tooltipSize = { key, width: tooltipWidth, height: Math.min(maxHeight, Math.ceil(this.tooltip.getBoundingClientRect().height)) };
+          this.tooltipSize = { key, width: tooltipWidth, height: Math.min(maxHeight, this.tooltip.offsetHeight) };
         }
         const box = this.place(anchor, this.tooltipSize.width, this.tooltipSize.height, width, height);
         css(this.tooltip, { display: box ? "block" : "none", visibility: "visible" });

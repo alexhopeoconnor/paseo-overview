@@ -1,6 +1,6 @@
 {
   "id": "overview",
   "name": "Overview",
-  "description": "See workspace and agent activity in a live, read-only graph.",
+  "description": "Explore live project, workspace and agent activity in read-only graphs.",
   "requirements": { "paseo": "^0.15.0" }
 }

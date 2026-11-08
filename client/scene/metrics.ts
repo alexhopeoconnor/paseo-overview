@@ -1,13 +1,14 @@
 import type { Rect } from "../geometry";
 
-export type LayoutNodeKind = "project" | "workspace" | "agent" | "provider-subagent";
+export type LayoutNodeKind = "project" | "workspace" | "agent" | "provider-subagent" | "completed-group";
 
 /** Shared by the layout, scene and overlays. No DOM/Three.js initialisation. */
 export const graphMetrics = {
-  project: { glyph: 52, labelWidth: 156, labelHeight: 42, fontSize: 17 },
-  workspace: { width: 148, height: 38, fontSize: 15 },
+  project: { glyph: 52, labelWidth: 156, labelHeight: 48, fontSize: 20 },
+  workspace: { width: 148, height: 46, fontSize: 18 },
   agent: { glyph: 18, fontSize: 11 },
   subagent: { glyph: 12, fontSize: 11 },
+  completedGroup: { width: 128, height: 34, fontSize: 16 },
   minimumHitTarget: 28,
   edgeClearance: 7,
   branchGap: 18,
@@ -20,12 +21,15 @@ export interface NodeFootprint { body: Rect; bounds: Rect; labelBounds?: Rect }
 export function nodeFootprint(kind: LayoutNodeKind): NodeFootprint {
   if (kind === "project") {
     const body = { x: -26, y: -26, width: 52, height: 52 };
-    const labelBounds = { x: -78, y: 34, width: 156, height: 42 };
-    return { body, labelBounds, bounds: { x: -78, y: -30, width: 156, height: 106 } };
+    const labelBounds = { x: -78, y: 34, width: 156, height: 48 };
+    return { body, labelBounds, bounds: { x: -78, y: -30, width: 156, height: 112 } };
   }
   if (kind === "workspace") {
-    const body = { x: -74, y: -19, width: 148, height: 38 };
-    return { body, bounds: { x: -78, y: -23, width: 156, height: 46 } };
+    const body = { x: -74, y: -23, width: 148, height: 46 };
+    return { body, bounds: { x: -78, y: -27, width: 156, height: 54 } };
+  }
+  if (kind === "completed-group") {
+    return { body: { x: -64, y: -17, width: 128, height: 34 }, bounds: { x: -68, y: -21, width: 136, height: 42 } };
   }
   const size = kind === "agent" ? graphMetrics.agent.glyph : graphMetrics.subagent.glyph;
   return {
