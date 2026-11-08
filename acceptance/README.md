@@ -15,6 +15,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   Three.js. Native primitives and animation scheduling are mocked so phase
   continuity, obsolete callbacks, visibility, AppState, reduced motion and
   cleanup can be checked deterministically.
+- `floating.cjs` exercises the actual browser positioner with long scrollable
+  cards, short viewports, corner anchors, CSS zoom, a bordered/scrolled offset
+  parent, rapid updates and Escape. It asserts graph containment with a 12-pixel
+  margin and confirms that opening the card does not change graph dimensions.
 - `compile.mjs` uses the Paseo plugin compiler and checks the compiled native
   boundary, including Hermes where the pinned build environment provides it.
 
@@ -43,7 +47,7 @@ docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   node /plugin/acceptance/renderer.cjs
 ```
 
-Repeat with `native-preview.cjs` and `native-interaction.cjs`. The native
+Repeat with `native-preview.cjs`, `floating.cjs` and `native-interaction.cjs`. The native
 interaction runner needs neither the browser cache nor the font mount. Read
 `compile.mjs` for its exact output requirements before running it. With the same
 `/fork`, `/plugin` and `/out` mounts, its successful compiler command is:
