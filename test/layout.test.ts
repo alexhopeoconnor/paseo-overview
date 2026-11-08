@@ -1,54 +1,153 @@
 import { describe, expect, it } from "vitest";
-import { BACKGROUND_GROUP, parentMap, StableLayout } from "../client/layout";
+import { BACKGROUND_GROUP, StableLayout, canvasNode, parentMap, type SceneLayout } from "../client/layout";
+import { distance, rectsOverlap } from "../client/geometry";
+import { findOwnershipCrossings, findUnrelatedNodeIntersections } from "../client/routing";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 
-const node = (id: string, workspaceId: string | null, parentId?: string): OverviewNode => ({
-  id, workspaceId, parentId, managedAgentId: id, kind: "agent", label: id, state: "idle", attention: false,
+const node = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
+  id, workspaceId, parentId, managedAgentId: native ? parentId! : id, kind: native ? "provider-subagent" : "agent", label: id, state: "idle", attention: false,
 });
-const model = (nodes: OverviewNode[]): OverviewModel => ({
-  hostId: "host", revision: 1, connection: "connected", events: [], edges: [], nodes,
-  workspaces: ["w1", "w2"].map((id) => ({ id, projectId: "project", name: id, projectName: "Project", agentIds: nodes.filter((item) => item.workspaceId === id).map((item) => item.id) })),
-});
+function model(projectCounts = [2, 1, 0], children = 0): OverviewModel {
+  const workspaces = projectCounts.flatMap((count, project) => Array.from({ length: count }, (_, index) => ({
+    id: `w${project}:${index}`, projectId: `raw${project}`, name: `Workspace ${project} ${index} with a readable title`, projectName: `Project ${project}`, agentIds: [] as string[],
+  })));
+  const nodes = workspaces.map(workspace => node(`a:${workspace.id}`, workspace.id));
+  if (workspaces[0]) for (let index = 0; index < children; index++) nodes.push(node(`native:${index}`, workspaces[0].id, nodes[0]!.id, true));
+  return { hostId: "host", revision: 1, connection: "connected", events: [], edges: [],
+    readiness: { projects: true, workspaces: true, agents: true }, nodes, workspaces,
+    projects: projectCounts.map((_, index) => ({ id: `p${index}`, projectId: `raw${index}`, name: `Project ${index}`,
+      workspaceIds: workspaces.filter(workspace => workspace.projectId === `raw${index}`).map(workspace => workspace.id) })),
+  };
+}
+function valid(layout: SceneLayout) {
+  for (const project of layout.projects) {
+    expect(findOwnershipCrossings(project.edges)).toEqual([]);
+    expect(findUnrelatedNodeIntersections(project.edges, project.nodes)).toEqual([]);
+    const nodes = project.nodes.map(item => canvasNode(item, project));
+    for (const item of nodes) {
+      expect(item.bounds.x).toBeGreaterThanOrEqual(0);
+      expect(item.bounds.y).toBeGreaterThanOrEqual(0);
+      expect(item.bounds.x + item.bounds.width).toBeLessThanOrEqual(layout.width);
+      expect(item.bounds.y + item.bounds.height).toBeLessThanOrEqual(layout.height);
+    }
+    for (let a = 0; a < nodes.length; a++) for (let b = a + 1; b < nodes.length; b++) {
+      const first = nodes[a]!, second = nodes[b]!;
+      if ((first.kind === "agent" || first.kind === "provider-subagent") && (second.kind === "agent" || second.kind === "provider-subagent")) {
+        expect(distance(first.position, second.position)).toBeGreaterThanOrEqual((first.bounds.width + second.bounds.width) / 2);
+      } else expect(rectsOverlap(first.bounds, second.bounds)).toBe(false);
+    }
+  }
+  const rectangles = layout.projects.map(project => ({ x: project.position.x + project.bounds.x * project.scale,
+    y: project.position.y + project.bounds.y * project.scale, width: project.bounds.width * project.scale, height: project.bounds.height * project.scale }));
+  for (let a = 0; a < rectangles.length; a++) for (let b = a + 1; b < rectangles.length; b++) expect(rectsOverlap(rectangles[a]!, rectangles[b]!)).toBe(false);
+}
 
-describe("stable workspace layout", () => {
-  it("keeps positions on status/icon changes and preserves existing local positions on additions", () => {
-    const layout = new StableLayout();
-    const initial = model([node("a", "w1"), node("b", "w1", "a"), node("c", "w2")]);
-    const first = layout.update(initial, 1200, 800);
-    const updated = { ...initial, nodes: initial.nodes.map((item) => ({ ...item, state: "working" as const })), workspaces: initial.workspaces.map((item) => ({ ...item, iconUrl: "data:image/png;base64,updated" })) };
-    const second = layout.update(updated, 1200, 800);
-    expect(second.map((item) => item.position)).toEqual(first.map((item) => item.position));
-    expect([...second[0]!.points]).toEqual([...first[0]!.points]);
-    const third = layout.update({ ...updated, nodes: [...updated.nodes, node("new", "w1")] }, 1200, 800);
-    expect(third[0]!.points.get("a")).toEqual(first[0]!.points.get("a"));
-    expect(third[0]!.points.get("b")).toEqual(first[0]!.points.get("b"));
+describe("project-root layout", () => {
+  it("lays out asynchronously loaded projects without a resize", () => {
+    const engine = new StableLayout(), complete = model([4, 0, 0, 3, 2, 4, 1], 29);
+    engine.update({ ...complete, projects: [], nodes: [], workspaces: [] }, 1196, 1173);
+    engine.update({ ...complete, nodes: [], workspaces: [] }, 1196, 1173);
+    const result = engine.update(complete, 1196, 1173);
+    expect(result.projects).toHaveLength(7);
+    expect(result.nodes.size).toBe(complete.projects.length + complete.workspaces.length + complete.nodes.length);
+    expect(new Set(result.projects.map(project => Math.round(project.position.x))).size).toBeGreaterThan(1);
+    valid(result);
+    expect(result.projects[0]!.scale, JSON.stringify(result.projects.map(project => ({ id: project.id, bounds: project.bounds })))).toBeGreaterThanOrEqual(0.75);
   });
-
-  it("keeps cross-workspace children owned once and unassigned nodes explicit", () => {
-    const layout = new StableLayout();
-    const result = layout.update(model([node("a", "w1"), node("b", "w2", "a"), node("background", null)]), 1200, 800);
-    expect(result.find((item) => item.id === "w1")!.nodes.map((item) => item.id)).toEqual(["a"]);
-    expect(result.find((item) => item.id === "w2")!.parents.get("b")).toBe("w2");
-    expect(result.find((item) => item.id === BACKGROUND_GROUP)!.background).toBe(true);
-    expect(result.flatMap((item) => item.nodes)).toHaveLength(3);
+  it("preserves positions on status, name and icon updates", () => {
+    const engine = new StableLayout(), initial = model();
+    const first = engine.update(initial, 1200, 800);
+    const second = engine.update({ ...initial, projects: initial.projects.map(project => ({ ...project, name: "A new project name", iconUrl: "data:image/png;base64,update" })),
+      nodes: initial.nodes.map(item => ({ ...item, state: "working" as const })) }, 1200, 800);
+    expect(second.projects.map(project => project.position)).toEqual(first.projects.map(project => project.position));
+    expect([...second.nodes].map(([id, item]) => [id, item.position])).toEqual([...first.nodes].map(([id, item]) => [id, item.position]));
+    expect(second.projects[0]!.name).toBe("A new project name");
   });
-
-  it("breaks self-parenting, cycles and missing parents before tree layout", () => {
-    const nodes = [node("a", "w1", "b"), node("b", "w1", "a"), node("self", "w1", "self"), node("missing", "w1", "gone")];
-    const parents = parentMap(nodes, "w1");
-    expect(parents.get("self")).toBe("w1");
-    expect(parents.get("missing")).toBe("w1");
-    expect(parents.get("a") === "w1" || parents.get("b") === "w1").toBe(true);
-    const result = new StableLayout().update(model(nodes), 1000, 700);
-    expect(result[0]!.points.size).toBe(4);
-    for (const point of result[0]!.points.values()) expect(Number.isFinite(point.x) && Number.isFinite(point.y)).toBe(true);
+  it("accepts arbitrary project counts and keeps empty roots", () => {
+    for (const counts of [[0], [0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 1, 3], [1, 1, 1, 1, 1]]) {
+      const result = new StableLayout().update(model(counts), 1280, 900);
+      expect(result.projects).toHaveLength(counts.length); valid(result);
+    }
   });
-
-  it("does not compact unrelated workspace slots when one disappears", () => {
-    const layout = new StableLayout();
-    const initial = model([]);
-    const first = layout.update(initial, 1200, 800);
-    const second = layout.update({ ...initial, workspaces: initial.workspaces.slice(1) }, 1200, 800);
-    expect(second[0]!.position).toEqual(first[1]!.position);
+  it("reconciles delayed native rosters without crossing branches", () => {
+    const engine = new StableLayout();
+    engine.update(model([3, 1, 0], 0), 1200, 900);
+    const next = engine.update(model([3, 1, 0], 24), 1200, 900);
+    expect(next.nodes.size).toBe(3 + 4 + 4 + 24); valid(next);
+  });
+  it("never reparents a cross-workspace child into its delegator's graph", () => {
+    const value = model([1, 1]);
+    value.nodes = [node("source", "w0:0"), node("child", "w1:0", "source")];
+    value.edges = [{ id: "delegation", source: "source", target: "child", kind: "delegation" }];
+    const result = new StableLayout().update(value, 1200, 800);
+    expect(result.nodes.get("source")!.projectId).toBe("p0");
+    expect(result.nodes.get("child")!.projectId).toBe("p1");
+    expect(result.projects.find(project => project.id === "p1")!.parents.get("child")).toBe("w1:0");
+    expect(result.delegationEdges).toHaveLength(1); valid(result);
+  });
+  it("reuses delegation routes for metadata and activity but invalidates changed geometry or relationships", () => {
+    const engine = new StableLayout(), value = model([1, 1]);
+    value.edges = [{ id: "delegation", source: "a:w0:0", target: "a:w1:0", kind: "delegation" }];
+    const initial = engine.update(value, 1200, 800);
+    const metadata = { ...value, revision: 2,
+      projects: value.projects.map(project => ({ ...project, name: "Renamed", iconUrl: "data:image/png;base64,new" })),
+      nodes: value.nodes.map(item => ({ ...item, state: "working" as const, label: "A changed agent title" })),
+    };
+    const updated = engine.update(metadata, 1200, 800);
+    expect(updated.delegationEdges).toBe(initial.delegationEdges);
+    expect(updated.delegationEdges[0]).toBe(initial.delegationEdges[0]);
+    const topology = { ...metadata, nodes: [...metadata.nodes, node("new-child", "w0:0", "a:w0:0", true)] };
+    const grown = engine.update(topology, 1200, 800);
+    expect(grown.delegationEdges).not.toBe(updated.delegationEdges);
+    const resized = engine.update(topology, 1000, 700);
+    expect(resized.delegationEdges).not.toBe(grown.delegationEdges);
+    const reversed = engine.update({ ...topology, edges: [{ ...value.edges[0]!, source: "a:w1:0", target: "a:w0:0" }] }, 1000, 700);
+    expect(reversed.delegationEdges).not.toBe(resized.delegationEdges);
+    expect(reversed.delegationEdges[0]!.source).toBe("a:w1:0");
+    const removed = engine.update({ ...topology, edges: [] }, 1000, 700);
+    expect(removed.delegationEdges).toEqual([]);
+  });
+  it("handles self-parenting, cycles, missing parents and actual unassigned agents", () => {
+    const value = model([1]);
+    value.nodes = [node("a", "w0:0", "b"), node("b", "w0:0", "a"), node("self", "w0:0", "self"), node("missing", "w0:0", "gone"), node("unassigned", null)];
+    const parents = parentMap(value.nodes.slice(0, 4), "w0:0");
+    expect(parents.get("self")).toBe("w0:0");
+    expect(parents.get("missing")).toBe("w0:0");
+    expect(Object.fromEntries(parentMap([...value.nodes.slice(0, 4)].reverse(), "w0:0"))).toEqual(Object.fromEntries(parents));
+    const result = new StableLayout().update(value, 1200, 800);
+    expect(result.projects.some(project => project.id === BACKGROUND_GROUP && project.background)).toBe(true); valid(result);
+  });
+  it("does not merge ownership for unresolved distinct workspaces", () => {
+    const value = model([0]);
+    value.nodes = [node("unknown-a", "missing-a"), node("unknown-b", "missing-b", "unknown-a")];
+    const result = new StableLayout().update(value, 1200, 800);
+    const background = result.projects.find(project => project.id === BACKGROUND_GROUP)!;
+    expect(background.parents.get("unknown-b")).toBe(BACKGROUND_GROUP);
+    valid(result);
+  });
+  it("does not compact other project anchors after a project disappears", () => {
+    const engine = new StableLayout(), value = model();
+    const first = engine.update(value, 1200, 800);
+    const remaining = { ...value, projects: value.projects.slice(0, 2) };
+    const second = engine.update(remaining, 1200, 800);
+    expect(second.projects.map(project => project.position)).toEqual(first.projects.slice(0, 2).map(project => project.position));
+  });
+  it("is deterministic regardless of project, workspace and agent arrival order", () => {
+    const value = model([2, 0, 3, 1], 12);
+    const forward = new StableLayout().update(value, 1400, 1000);
+    const reverse = new StableLayout().update({ ...value, projects: [...value.projects].reverse(), workspaces: [...value.workspaces].reverse(), nodes: [...value.nodes].reverse() }, 1400, 1000);
+    expect(reverse.projects.map(project => ({ id: project.id, position: project.position }))).toEqual(forward.projects.map(project => ({ id: project.id, position: project.position })));
+    expect([...reverse.nodes].map(([id, item]) => [id, item.position])).toEqual([...forward.nodes].map(([id, item]) => [id, item.position]));
+  });
+  it("lays out a larger asymmetric roster with nested native descendants", () => {
+    const value = model([4, 3, 2, 3, 2, 0, 1, 1], 20);
+    value.nodes = [...value.nodes,
+      ...Array.from({ length: 8 }, (_, index) => node(`nested:${index}`, "w0:0", `native:${index % 4}`, true)),
+      ...Array.from({ length: 6 }, (_, index) => node(`second:${index}`, "w1:0", "a:w1:0", true)),
+      node("deep:0", "w0:0", "nested:0", true), node("deep:1", "w0:0", "deep:0", true),
+    ];
+    const result = new StableLayout().update(value, 1920, 1440);
+    expect(result.nodes.size).toBe(value.projects.length + value.workspaces.length + value.nodes.length);
+    valid(result);
   });
 });

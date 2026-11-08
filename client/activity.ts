@@ -1,4 +1,5 @@
-import type { OverviewEvent } from "../shared/model";
+import type { OverviewEvent, OverviewModel, OwnershipIndex } from "../shared/model";
+import { hasError, needsInput } from "./status";
 
 export function decay(value: number, elapsedSeconds: number, halfLifeSeconds = 5): number {
   return value * Math.pow(0.5, Math.max(0, elapsedSeconds) / halfLifeSeconds);
@@ -52,6 +53,65 @@ export class ActivityTracker {
     this.seen.clear();
     this.scores.clear();
   }
+}
+
+export interface OwnedActivity {
+  score: number;
+  working: number;
+  waiting: number;
+  errors: number;
+  unread: number;
+  managed: number;
+  native: number;
+}
+
+function emptyActivity(): OwnedActivity {
+  return { score: 0, working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 };
+}
+
+/**
+ * Roll original node activity up its ownership path exactly once. A parent's
+ * already-aggregated total is never an input, and delegation is not traversed.
+ * Includes each agent's own total so its halo can reflect its child branch too.
+ */
+export function aggregateOwnedActivity(
+  model: OverviewModel,
+  ownership: OwnershipIndex,
+  tracker: Pick<ActivityTracker, "score">,
+  now: number,
+): Map<string, OwnedActivity> {
+  const totals = new Map<string, OwnedActivity>();
+  for (const project of model.projects) totals.set(project.id, emptyActivity());
+  for (const workspace of model.workspaces) totals.set(workspace.id, emptyActivity());
+  const sources = new Map(model.nodes.map(node => [node.id, node]));
+  for (const node of sources.values()) totals.set(node.id, emptyActivity());
+  for (const node of sources.values()) {
+    const error = hasError(node);
+    const waiting = !error && needsInput(node);
+    const working = !error && !waiting && node.state === "working";
+    const contribution: OwnedActivity = {
+      score: tracker.score(node.id, now),
+      working: Number(working), waiting: Number(waiting), errors: Number(error),
+      unread: Number(!error && !waiting && !working && node.attention && node.attentionReason === "finished"),
+      managed: Number(node.kind === "agent"), native: Number(node.kind === "provider-subagent"),
+    };
+    const visited = new Set<string>();
+    let owner: string | undefined = node.id;
+    while (owner && !visited.has(owner)) {
+      visited.add(owner);
+      const total = totals.get(owner);
+      if (!total) break; // Do not manufacture a project from an unresolved ID.
+      total.score += contribution.score;
+      total.working += contribution.working;
+      total.waiting += contribution.waiting;
+      total.errors += contribution.errors;
+      total.unread += contribution.unread;
+      total.managed += contribution.managed;
+      total.native += contribution.native;
+      owner = ownership.parentByNode.get(owner);
+    }
+  }
+  return totals;
 }
 
 export interface PulseRequest {

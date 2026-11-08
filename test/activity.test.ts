@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { ActivityTracker, decay, heartbeatBpm, normaliseActivity, PulseLimiter } from "../client/activity";
+import { ActivityTracker, aggregateOwnedActivity, decay, heartbeatBpm, normaliseActivity, PulseLimiter } from "../client/activity";
 import type { OverviewEvent } from "../shared/model";
+import { buildOwnershipIndex, normalise } from "../client/normalize";
 
 describe("activity", () => {
   it("counts each event once and decays smoothly without inventing stalled state", () => {
@@ -39,5 +40,67 @@ describe("activity", () => {
     }
     expect(limiter.admit("global-overflow", "w4", 1000)).toBe(false);
     expect(limiter.admit("a", "w1", 2000)).toBe(true);
+  });
+
+  it("aggregates each owned source once through nested parents without feeding parent totals back", () => {
+    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(),
+      projects: [{ projectId: "project", projectDisplayName: "Project" }, { projectId: "empty", projectDisplayName: "Empty" }],
+      workspaces: [{ id: "workspace", projectId: "project", name: "Workspace", projectDisplayName: "Project" }],
+      agents: [{ id: "parent", workspaceId: "workspace", title: "Parent", provider: "codex", status: "idle" }],
+      rosters: new Map([["parent", { availability: "resident", subagents: [
+        { id: "child", parentAgentId: "parent", title: "Child", description: null, provider: "codex", status: "running" },
+        { id: "grandchild", parentAgentId: "parent", parentSubagentId: "child", title: "Grandchild", description: null, provider: "codex", status: "failed" },
+      ] }]]),
+    });
+    const tracker = new ActivityTracker();
+    tracker.ingest(model.nodes.map((node, index) => ({ id: `event-${index}`, nodeId: node.id, kind: "tool", timestamp: 1000 })), 1000);
+    const ownership = buildOwnershipIndex(model);
+    const totals = aggregateOwnedActivity(model, ownership, tracker, 1000);
+    expect(totals.get("h:native:parent:grandchild")?.score).toBe(1);
+    expect(totals.get("h:native:parent:child")?.score).toBe(2);
+    expect(totals.get("h:agent:parent")?.score).toBe(3);
+    expect(totals.get("h:workspace:workspace")).toEqual({ score: 3, working: 1, waiting: 0, errors: 1, unread: 0, managed: 1, native: 2 });
+    expect(totals.get("h:project:project")).toEqual(totals.get("h:workspace:workspace"));
+    expect(totals.get("h:project:empty")).toEqual({ score: 0, working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 });
+    // Rendering a second frame cannot increase activity or alter the tracker.
+    expect(aggregateOwnedActivity(model, ownership, tracker, 1000)).toEqual(totals);
+    expect(aggregateOwnedActivity(model, ownership, tracker, 6000).get("h:project:project")?.score).toBeCloseTo(1.5);
+  });
+
+  it("keeps delegated work in its actual project and separates blockers from unread results", () => {
+    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+      projects: [{ projectId: "p1", projectDisplayName: "One" }, { projectId: "p2", projectDisplayName: "Two" }],
+      workspaces: [
+        { id: "w1", projectId: "p1", name: "One", projectDisplayName: "One" },
+        { id: "w2", projectId: "p2", name: "Two", projectDisplayName: "Two" },
+      ],
+      agents: [
+        { id: "parent", workspaceId: "w1", title: null, provider: "codex", status: "idle", requiresAttention: true, attentionReason: "finished" },
+        { id: "delegated", workspaceId: "w2", title: null, provider: "codex", status: "running", pendingPermissions: [{}], labels: { "paseo.parent-agent-id": "parent" } },
+        { id: "unassigned", title: null, provider: "codex", status: "running" },
+      ],
+    });
+    const tracker = new ActivityTracker();
+    tracker.ingest([{ id: "event", nodeId: "h:agent:delegated", kind: "tool", timestamp: 1000 }], 1000);
+    const totals = aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 1000);
+    expect(totals.get("h:project:p1")).toMatchObject({ score: 0, managed: 1, working: 0, waiting: 0, unread: 1 });
+    expect(totals.get("h:project:p2")).toMatchObject({ score: 1, managed: 1, working: 0, waiting: 1, unread: 0 });
+    expect(totals.get("h:agent:unassigned")).toMatchObject({ managed: 1, working: 1 });
+    expect(totals.size).toBe(7);
+  });
+
+  it("guards repeated node identities and invalid parent cycles without inventing aggregate owners", () => {
+    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+      projects: [], workspaces: [], agents: [
+        { id: "one", title: null, provider: "codex", status: "running" },
+        { id: "two", title: null, provider: "codex", status: "idle" },
+      ],
+    });
+    const repeated = { ...model, nodes: [...model.nodes, model.nodes[0]] };
+    const ownership = { ...buildOwnershipIndex(model), parentByNode: new Map([["h:agent:one", "h:agent:two"], ["h:agent:two", "h:agent:one"]]) };
+    const totals = aggregateOwnedActivity(repeated, ownership, { score: () => 1 }, 1000);
+    expect([...totals.values()].map(total => total.score)).toEqual([2, 2]);
+    expect([...totals.values()].map(total => total.managed)).toEqual([2, 2]);
+    expect(totals.size).toBe(2);
   });
 });

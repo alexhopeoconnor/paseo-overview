@@ -1,4 +1,4 @@
-import type { OverviewEvent, OverviewModel } from "../shared/model";
+import type { OverviewEvent, OverviewModel, OverviewReadiness } from "../shared/model";
 import type { AgentRecord, NativeRecord, ProjectIcon, ProjectRecord, RosterSnapshot, RosterUpdate, WorkspaceRecord } from "../shared/observation";
 import { ProjectIcons } from "./icons";
 import { displayId, normalise } from "./normalize";
@@ -35,8 +35,10 @@ export function createOverviewStore(options: Options) {
   let connection: OverviewModel["connection"] = "connected";
   let visible = true, started = false, disposed = false, generation = 0, revision = 0, eventSequence = 0;
   let agents: AgentRecord[] = [], workspaces: WorkspaceRecord[] = [], projects: ProjectRecord[] = [];
+  let readiness: OverviewReadiness = { projects: false, workspaces: false, agents: false };
   let events: OverviewEvent[] = [];
-  let current: OverviewModel = { hostId: options.hostId, workspaces: [], nodes: [], edges: [], events: [], connection, revision };
+  let current: OverviewModel = { hostId: options.hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { ...readiness }, connection, revision };
+  let lastComplete: OverviewModel | undefined;
   let cleanups: Array<() => void> = [];
   let queue: ReadQueue | undefined, rosters: RosterTracker | undefined, icons: ProjectIcons | undefined;
   let publishTimer: ReturnType<typeof setTimeout> | undefined, expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,11 +52,15 @@ export function createOverviewStore(options: Options) {
     if (publishTimer !== undefined) { clearTimeout(publishTimer); publishTimer = undefined; }
     const now = Date.now();
     events = events.filter(event => now - event.timestamp < 8000).slice(-64);
-    current = rosters && icons ? normalise({
+    const complete = readiness.projects && readiness.workspaces && readiness.agents;
+    current = !complete && lastComplete ? {
+      ...lastComplete, readiness: { ...readiness }, events: [...events], connection, revision: ++revision,
+    } : rosters && icons ? normalise({
       hostId: options.hostId, agents, workspaces, projects,
       rosters: rosters.states, icons: icons.urls,
-      events: [...events], connection, revision: ++revision,
-    }) : { ...current, events: [...events], connection, revision: ++revision };
+      events: [...events], readiness, connection, revision: ++revision,
+    }) : { ...current, readiness: { ...readiness }, events: [...events], connection, revision: ++revision };
+    if (complete) lastComplete = current;
     options.onChange(current);
     if (events.length && expiryTimer === undefined) expiryTimer = setTimeout(() => {
       expiryTimer = undefined; publish();
@@ -166,6 +172,7 @@ export function createOverviewStore(options: Options) {
   }
   function halt() {
     generation++;
+    readiness = { projects: false, workspaces: false, agents: false };
     for (const cleanup of cleanups.splice(0)) cleanup();
     for (const cleanup of timelines.values()) cleanup();
     timelines.clear();
@@ -181,6 +188,7 @@ export function createOverviewStore(options: Options) {
     if (disposed || !visible || connection !== "connected") return;
     if (starting) return starting;
     const run = ++generation;
+    readiness = { projects: false, workspaces: false, agents: false };
     const alive = () => !disposed && visible && connection === "connected" && generation === run;
     const ownedQueue = new ReadQueue(4); queue = ownedQueue;
     const failed = (error: unknown) => { if (alive()) report(error); };
@@ -199,13 +207,12 @@ export function createOverviewStore(options: Options) {
     const observeTask = async () => {
       const eventObservation = options.paseo.observeEvents(["project.update", "agent.provider_subagents.update"]);
       cleanups.push(() => { void eventObservation.release().catch(() => {}); });
-      let projectToken = 0, loadingProjects = false, projectOverflow = false, projectBuffer: ProjectChange[] = [];
+      let projectToken = 0, loadingProjects = false, projectOverflow = false, projectNeedsRefresh = false, projectBuffer: ProjectChange[] = [];
       let projectGeneration: string | undefined, projectHead = 0;
       const projectVersions = new Map<string, number>();
       const syncIcons = () => {
         if (!alive()) return;
-        const roots = new Set(workspaces.map(workspace => workspace.projectId));
-        icons?.sync(projects.filter(project => roots.has(project.projectId)), workspaces);
+        icons?.sync(projects, workspaces);
         schedule();
       };
       function applyProject(change: ProjectChange) {
@@ -217,9 +224,10 @@ export function createOverviewStore(options: Options) {
         syncIcons();
         if (change.kind === "upsert" && change.project.projectIconRevision === undefined) icons?.invalidate(id);
       }
-      async function loadProjects() {
+      async function loadProjects(seed: ProjectChange[] = []) {
         const token = ++projectToken;
-        loadingProjects = true; projectOverflow = false; projectBuffer = [];
+        readiness.projects = false;
+        loadingProjects = true; projectOverflow = false; projectBuffer = seed;
         try {
           const response = await options.paseo.projects.list({ sync: {} });
           if (!alive() || token !== projectToken) return;
@@ -231,8 +239,8 @@ export function createOverviewStore(options: Options) {
           projectVersions.clear();
           for (const project of response.projects) if (project.syncSeq !== undefined) projectVersions.set(project.projectId, project.syncSeq);
           for (const change of projectBuffer) applyProject(change);
-          loadingProjects = false; projectBuffer = []; syncIcons();
-        } catch (error) { if (token === projectToken) { loadingProjects = false; failed(error); } }
+          loadingProjects = false; projectNeedsRefresh = false; projectBuffer = []; readiness.projects = true; syncIcons();
+        } catch (error) { if (token === projectToken) { loadingProjects = false; projectNeedsRefresh = true; failed(error); } }
       }
       let eventSnapshots = 0;
       eventObservation.subscribe({
@@ -251,7 +259,7 @@ export function createOverviewStore(options: Options) {
           if (loadingProjects) {
             if (projectBuffer.length >= 512) { projectOverflow = true; projectBuffer = []; }
             if (!projectOverflow) projectBuffer.push(change);
-          } else if (change.generation && projectGeneration && change.generation !== projectGeneration) void loadProjects();
+          } else if (projectNeedsRefresh || (change.generation && projectGeneration && change.generation !== projectGeneration)) void loadProjects([change]);
           else applyProject(change);
         }, error: failed,
       });
@@ -279,7 +287,11 @@ export function createOverviewStore(options: Options) {
               generation: data.generation, seq: data.seq,
             } as DirectoryChange<AgentEntry>;
           },
-          changed: values => { agents = values.map(entry => entry.agent); reconcileAgents(alive); }, failed, alive,
+          changed: values => {
+            agents = values.map(entry => entry.agent);
+            readiness.agents = true;
+            reconcileAgents(alive);
+          }, failed, alive,
         })),
         register(observeDirectory<WorkspaceRecord & { syncSeq?: number }>({
           read: async (cursor, subscribe) => await options.paseo.workspaces.list({
@@ -296,7 +308,7 @@ export function createOverviewStore(options: Options) {
               generation: data.generation, seq: data.seq,
             } as DirectoryChange<WorkspaceRecord>;
           },
-          changed: values => { workspaces = [...values]; syncIcons(); }, failed, alive,
+          changed: values => { workspaces = [...values]; readiness.workspaces = true; syncIcons(); }, failed, alive,
         })),
       ]);
       if (alive()) publish();

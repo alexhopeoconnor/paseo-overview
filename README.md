@@ -1,19 +1,25 @@
 # Paseo Overview
 
-A read-only view of workspace and agent activity, contributed as a separate
+A read-only view of project, workspace and agent activity, contributed as a separate
 **Overview** page in Paseo. The existing workspace, chat and editor surfaces keep
 their normal behaviour.
 
-The browser shows one graph per workspace, using its current project icon.
-Managed agents and known provider-native subagents appear beneath their owners.
-Cross-workspace delegation has a separate dashed link. Activity produces bounded
-heartbeats, travelling pulses and short-lived text bubbles.
+Every live project on the selected host has its own graph, including empty
+projects. The project uses its current icon and name; its actual workspaces,
+managed agents and known provider-native subagents branch beneath it. Project
+membership is automatic and follows Paseo IDs, not directory nesting or a fixed
+selection. Ownership routes avoid unrelated nodes and labels. Cross-workspace
+delegation has a separate dashed route. Activity produces bounded heartbeats,
+travelling pulses and short-lived text bubbles.
 
-Click a workspace or agent to bring its graph forward. Escape or the empty
-background returns to the full view. The graph has no wheel zoom or orbit
+Click a project or workspace to bring its graph or branch forward. Selecting an
+agent opens its details alongside the graph. Hover or keyboard focus highlights
+its ownership path; arrow keys move between parents, children and siblings.
+Escape or the empty background returns to the full view. The graph has no wheel zoom or orbit
 controls; browser zoom remains available. **Pause motion** and the operating
 system's reduced-motion preference stop animated effects. The phone and WebGL
-fallback use workspace cards with the same ownership and status information.
+fallback group workspaces and agents under every project. Finished unread results
+have a separate indicator from permission requests and errors.
 
 ## Observation and coverage
 
@@ -59,7 +65,8 @@ Run `npm ci --ignore-scripts`, `npm run typecheck` and `npm test` in the reviewe
 plugin Docker builder. The TypeScript configurations separately check the
 cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
-stable layout and cleanup behaviour.
+empty-to-populated loading, branch layout and routed geometry. Activity and icon
+updates keep positions stable; structural changes may expand an affected branch.
 
 Managed workstation packaging uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.
@@ -68,12 +75,18 @@ overview` workflow. The plugin has no required persisted settings or companion.
 The machine repository owns deployment locks and recovery instructions; completed
 artifacts are immutable.
 
+Compatible rendering updates reload only this plugin on the existing host.
+Retain the previous artifact for rollback and use the ordinary application backup
+schedule. They do not require a host/Codium cutover or additional full backups.
+Artifact integrity and visual acceptance are verified separately.
+
 ## Source layout
 
 - `index.client.tsx`, `client/screen.tsx`, `client/native.tsx`: contributed UI.
 - `client/transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: passive observation.
 - `client/normalize.ts`: ownership and display model.
-- `client/layout.ts`, `activity.ts`, `bubbles.ts`: stable layout and bounded effects.
+- `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.
+- `client/activity.ts`, `bubbles.ts`, `status.ts`: bounded effects and status semantics.
 - `client/web.ts`, `client/scene/`: browser rendering and accessible overlays.
 - `index.server.ts`, `server/api.ts`, `shared/rpc.ts`: read-only host bridge.
 

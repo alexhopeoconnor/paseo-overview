@@ -1,6 +1,21 @@
 /** Display identities are host-qualified. managedAgentId stays a daemon ID. */
 export type OverviewState = "working" | "waiting" | "idle" | "finished" | "error" | "unknown";
 export type RosterAvailability = "resident" | "not_resident" | "unknown";
+export type AttentionReason = "finished" | "permission" | "error" | null;
+
+export interface OverviewProject {
+  id: string;
+  projectId: string;
+  name: string;
+  iconUrl?: string;
+  workspaceIds: readonly string[];
+}
+
+export interface OverviewReadiness {
+  projects: boolean;
+  workspaces: boolean;
+  agents: boolean;
+}
 
 export interface OverviewWorkspace {
   id: string;
@@ -21,6 +36,7 @@ export interface OverviewNode {
   label: string;
   state: OverviewState;
   attention: boolean;
+  attentionReason?: AttentionReason;
   provider?: string;
   detail?: string;
   rosterAvailability?: RosterAvailability;
@@ -44,10 +60,20 @@ export interface OverviewEvent {
 
 export interface OverviewModel {
   hostId: string;
+  projects: readonly OverviewProject[];
   workspaces: readonly OverviewWorkspace[];
   nodes: readonly OverviewNode[];
   edges: readonly OverviewEdge[];
   events: readonly OverviewEvent[];
+  readiness: OverviewReadiness;
   connection: "connected" | "connecting" | "disconnected";
   revision: number;
+}
+
+export interface OwnershipIndex {
+  parentByNode: ReadonlyMap<string, string>;
+  /** Values are host-qualified project display IDs, never names or paths. */
+  projectByNode: ReadonlyMap<string, string>;
+  workspaceByNode: ReadonlyMap<string, string>;
+  childrenByNode: ReadonlyMap<string, readonly string[]>;
 }

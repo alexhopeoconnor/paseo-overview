@@ -71,7 +71,7 @@ function setup(options: { acknowledgement?: Promise<object>; observeActivity?: b
     projects: { list: vi.fn(async () => ({ projects: [{ projectId: "project", projectDisplayName: "Project", projectIconRevision: "one" }] })) },
   };
   const changed = vi.fn(), failed = vi.fn();
-  const readRoster = vi.fn(async () => roster), readIcon = vi.fn(async (): Promise<ProjectIcon | null> => null);
+  const readRoster = vi.fn(async (_parentAgentId: string) => roster), readIcon = vi.fn(async (_projectId: string): Promise<ProjectIcon | null> => null);
   const store = createOverviewStore({
     hostId: "host", paseo: api as unknown as OverviewApi, readRoster, readIcon,
     onChange: changed, onError: failed, observeActivity: options.observeActivity,
@@ -91,6 +91,8 @@ describe("Overview observations", () => {
     expect(test.listAgents).not.toHaveBeenCalled();
     ack.resolve({}); await pending; await flush(); await vi.advanceTimersByTimeAsync(50);
     expect(test.store.model.workspaces).toHaveLength(1);
+    expect(test.store.model.projects).toHaveLength(1);
+    expect(test.store.model.readiness).toEqual({ projects: true, workspaces: true, agents: true });
     expect(test.store.model.nodes).toHaveLength(2);
     expect(test.store.model.events).toEqual([]);
     expect(test.listAgents).toHaveBeenCalledWith(expect.objectContaining({ includeBackground: true, scope: "active", page: { limit: 200 } }));
@@ -109,12 +111,77 @@ describe("Overview observations", () => {
       return { ...first, subscription: initial } as never;
     });
     await test.store.start(); await flush();
+    expect(test.store.model.readiness.agents).toBe(false);
+    expect(test.store.model.readiness.workspaces).toBe(true);
+    expect(test.store.model.readiness.projects).toBe(true);
     initial.emit({ type: "agent_update", payload: { kind: "remove", agentId: "late" } });
     second.resolve({ entries: [{ agent: { ...parent, id: "late" } }], pageInfo });
     await flush(); await vi.advanceTimersByTimeAsync(50);
     expect(test.listAgents).toHaveBeenCalledTimes(2);
     expect(test.store.model.nodes.filter(node => node.kind === "agent").map(node => node.managedAgentId)).toEqual(["parent"]);
+    expect(test.store.model.readiness.agents).toBe(true);
     test.store.dispose(); expect(initial.release).toHaveBeenCalledOnce();
+  });
+
+  it("observes empty project roots and live icon/name changes without emitting activity", async () => {
+    const test = setup();
+    test.api.projects.list.mockResolvedValue({ projects: [
+      { projectId: "project", projectDisplayName: "Project", projectIconRevision: "one" },
+      { projectId: "empty", projectDisplayName: "Empty project", projectIconRevision: "empty-one" },
+    ] });
+    test.readIcon.mockImplementation(async projectId => ({ mimeType: "image/png", data: projectId === "empty" ? "ZW1wdHk=" : "cHJvamVjdA==" }));
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.readIcon).toHaveBeenCalledWith("empty");
+    expect(test.store.model.projects.find(project => project.projectId === "empty")).toMatchObject({
+      id: "host:project:empty", name: "Empty project", workspaceIds: [], iconUrl: "data:image/png;base64,ZW1wdHk=",
+    });
+    test.events.emit({ type: "project.update", payload: { kind: "upsert", project: {
+      projectId: "empty", projectDisplayName: "Renamed", projectIconRevision: "empty-two",
+    } } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.projects.find(project => project.projectId === "empty")?.name).toBe("Renamed");
+    expect(test.readIcon.mock.calls.filter(([id]) => id === "empty")).toHaveLength(2);
+    expect(test.store.model.events).toEqual([]);
+    test.events.emit({ type: "project.update", payload: { kind: "remove", projectId: "empty" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.projects.map(project => project.projectId)).toEqual(["project"]);
+    expect(test.store.model.events).toEqual([]);
+  });
+
+  it("keeps the last coherent graph while reconnect snapshots are incomplete", async () => {
+    const test = setup();
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    test.store.setConnection("disconnected");
+    const nextProjects = deferred<Awaited<ReturnType<typeof test.api.projects.list>>>();
+    test.api.projects.list.mockReturnValue(nextProjects.promise);
+    test.store.setConnection("connected");
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.projects).toBe(before.projects);
+    expect(test.store.model.workspaces).toBe(before.workspaces);
+    expect(test.store.model.nodes).toBe(before.nodes);
+    expect(test.store.model.readiness.projects).toBe(false);
+    nextProjects.resolve({ projects: [{ projectId: "project", projectDisplayName: "Fresh name", projectIconRevision: "two" }] });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.readiness).toEqual({ projects: true, workspaces: true, agents: true });
+    expect(test.store.model.projects[0].name).toBe("Fresh name");
+    expect(test.store.model.events).toEqual([]);
+  });
+
+  it("recovers project readiness after a failed snapshot without accepting an incomplete project list", async () => {
+    const test = setup();
+    test.api.projects.list.mockRejectedValueOnce(new Error("Temporary project read failure"));
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.readiness.projects).toBe(false);
+    expect(test.store.model.projects).toEqual([]);
+    test.events.emit({ type: "project.update", payload: { kind: "upsert", project: {
+      projectId: "another", projectDisplayName: "Another project", projectIconRevision: "new",
+    } } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(test.api.projects.list).toHaveBeenCalledTimes(2);
+    expect(test.store.model.readiness.projects).toBe(true);
+    expect(new Set(test.store.model.projects.map(project => project.projectId))).toEqual(new Set(["project", "another"]));
+    expect(test.store.model.events).toEqual([]);
   });
 
   it("does not animate metadata or replayed native history, and deduplicates mirrored native tools", async () => {

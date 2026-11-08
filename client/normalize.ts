@@ -1,11 +1,11 @@
-import type { OverviewEdge, OverviewModel, OverviewNode, OverviewState } from "../shared/model";
+import type { AttentionReason, OverviewEdge, OverviewModel, OverviewNode, OverviewReadiness, OverviewState, OwnershipIndex } from "../shared/model";
 import type { AgentRecord, ProjectRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 
 export function displayId(hostId: string, kind: string, ...parts: string[]): string {
   return [hostId, kind, ...parts].map(encodeURIComponent).join(":");
 }
 export function agentState(agent: AgentRecord): OverviewState {
-  if (agent.pendingPermissions?.length) return "waiting";
+  if (agent.pendingPermissions?.length || (agent.requiresAttention && agent.attentionReason === "permission")) return "waiting";
   if (agent.status === "error") return "error";
   if (agent.providerUnavailable) return "unknown";
   if (agent.status === "running" || agent.status === "initializing") return "working";
@@ -14,11 +14,18 @@ export function agentState(agent: AgentRecord): OverviewState {
   return "unknown";
 }
 
+export function attentionReason(agent: AgentRecord): AttentionReason {
+  if (agent.pendingPermissions?.length) return "permission";
+  if (!agent.requiresAttention) return null;
+  return agent.attentionReason === "finished" || agent.attentionReason === "permission" || agent.attentionReason === "error"
+    ? agent.attentionReason : null;
+}
+
 export function normalise(input: {
   hostId: string; agents: readonly AgentRecord[]; workspaces: readonly WorkspaceRecord[];
   projects: readonly ProjectRecord[]; rosters: ReadonlyMap<string, RosterState>;
   icons: ReadonlyMap<string, string>; events: OverviewModel["events"];
-  connection: OverviewModel["connection"]; revision: number;
+  connection: OverviewModel["connection"]; revision: number; readiness?: OverviewReadiness;
 }): OverviewModel {
   const { hostId } = input;
   const projects = new Map(input.projects.map(project => [project.projectId, project]));
@@ -33,6 +40,7 @@ export function normalise(input: {
       parentId: parent && parent !== agent.id && parentHost === hostId ? displayId(hostId, "agent", parent) : undefined,
       label: agent.title || "Untitled agent", state: agentState(agent),
       attention: !!agent.requiresAttention || !!agent.pendingPermissions?.length,
+      attentionReason: attentionReason(agent),
       provider: agent.provider, detail: agent.lastError,
       rosterAvailability: input.rosters.get(agent.id)?.availability ?? "unknown",
     };
@@ -50,7 +58,8 @@ export function normalise(input: {
           ? displayId(hostId, "native", parentId, child.parentSubagentId) : parent.id,
         label: child.title || child.description || "Subagent", provider: child.provider,
         state: child.status === "running" ? "working" : child.status === "failed" ? "error" : "finished",
-        attention: child.status === "failed", detail: child.subtitle || child.description || undefined,
+        attention: child.status === "failed", attentionReason: child.status === "failed" ? "error" : null,
+        detail: child.subtitle || child.description || undefined,
       });
     }
   }
@@ -60,11 +69,19 @@ export function normalise(input: {
     const seen = new Set([node.id]);
     let ancestor = node.parentId;
     while (ancestor) {
-      if (seen.has(ancestor) || !byId.has(ancestor)) { node.parentId = undefined; break; }
+      if (seen.has(ancestor) || !byId.has(ancestor)) {
+        node.parentId = node.kind === "provider-subagent" ? agentNodes.get(node.managedAgentId)?.id : undefined;
+        break;
+      }
       seen.add(ancestor); ancestor = byId.get(ancestor)?.parentId;
     }
   }
   const edges: OverviewEdge[] = [];
+  for (const workspace of input.workspaces) {
+    if (!projects.has(workspace.projectId)) continue;
+    const id = displayId(hostId, "workspace", workspace.id);
+    edges.push({ id: `member:${id}`, source: displayId(hostId, "project", workspace.projectId), target: id, kind: "membership" });
+  }
   for (const node of nodes) {
     const parent = node.parentId ? byId.get(node.parentId) : undefined;
     if (parent && parent.workspaceId === node.workspaceId) {
@@ -76,6 +93,13 @@ export function normalise(input: {
   }
   return {
     hostId, nodes, edges, events: input.events, connection: input.connection, revision: input.revision,
+    readiness: input.readiness ? { ...input.readiness } : { projects: true, workspaces: true, agents: true },
+    projects: [...projects.values()].map(project => ({
+      id: displayId(hostId, "project", project.projectId), projectId: project.projectId,
+      name: project.projectDisplayName, iconUrl: input.icons.get(project.projectId),
+      workspaceIds: input.workspaces.filter(workspace => workspace.projectId === project.projectId)
+        .map(workspace => displayId(hostId, "workspace", workspace.id)),
+    })),
     workspaces: input.workspaces.map(workspace => {
       const id = displayId(hostId, "workspace", workspace.id);
       return {
@@ -86,4 +110,54 @@ export function normalise(input: {
       };
     }),
   };
+}
+
+/** One ownership tree per actual project; delegation never changes ownership. */
+export function buildOwnershipIndex(model: OverviewModel): OwnershipIndex {
+  const parentByNode = new Map<string, string>();
+  const projectByNode = new Map<string, string>();
+  const workspaceByNode = new Map<string, string>();
+  const childrenByNode = new Map<string, string[]>();
+  const projects = new Map(model.projects.map(project => [project.projectId, project]));
+  const workspaces = new Map(model.workspaces.map(workspace => [workspace.id, workspace]));
+  const nodes = new Map(model.nodes.map(node => [node.id, node]));
+  const attach = (id: string, parent: string) => {
+    parentByNode.set(id, parent);
+    const children = childrenByNode.get(parent) ?? [];
+    children.push(id); childrenByNode.set(parent, children);
+  };
+  for (const project of model.projects) {
+    projectByNode.set(project.id, project.id);
+    childrenByNode.set(project.id, []);
+  }
+  for (const workspace of model.workspaces) {
+    workspaceByNode.set(workspace.id, workspace.id);
+    childrenByNode.set(workspace.id, []);
+    const project = workspace.projectId ? projects.get(workspace.projectId) : undefined;
+    if (project) { projectByNode.set(workspace.id, project.id); attach(workspace.id, project.id); }
+  }
+  for (const node of model.nodes) childrenByNode.set(node.id, []);
+  for (const node of model.nodes) {
+    const workspace = node.workspaceId ? workspaces.get(node.workspaceId) : undefined;
+    if (workspace) {
+      workspaceByNode.set(node.id, workspace.id);
+      const project = projectByNode.get(workspace.id);
+      if (project) projectByNode.set(node.id, project);
+    }
+    const parent = node.parentId ? nodes.get(node.parentId) : undefined;
+    let owner = parent && parent.workspaceId === node.workspaceId ? parent.id : workspace?.id;
+    // The normalizer already repairs cycles; protect callers constructing models directly too.
+    const seen = new Set([node.id]);
+    let ancestor = owner;
+    while (ancestor && nodes.has(ancestor)) {
+      if (seen.has(ancestor)) { owner = workspace?.id; break; }
+      seen.add(ancestor);
+      const candidate = nodes.get(ancestor)!;
+      const next = candidate.parentId ? nodes.get(candidate.parentId) : undefined;
+      ancestor = next && next.workspaceId === candidate.workspaceId ? next.id : undefined;
+    }
+    if (owner) attach(node.id, owner);
+  }
+  for (const children of childrenByNode.values()) children.sort();
+  return { parentByNode, projectByNode, workspaceByNode, childrenByNode };
 }
