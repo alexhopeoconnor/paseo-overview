@@ -76,7 +76,21 @@ record those host and artifact identities with the release evidence.
 For that check, set `OVERVIEW_TEST_DEB` to the retained exact package file and
 `OVERVIEW_TEST_ARTIFACT_DIR` to the verified artifact directory containing
 `lock.json`, `release.json` and `payload/`. The harness verifies the package SHA256
-against the artifact's declared compatible host and records both identities:
+against the artifact's declared compatible host and records both identities.
+Every run, including provisional runs, also requires an explicit acceptance row:
+
+- `OVERVIEW_EXPECT_RUNTIME_VERSION`: the exact runtime version.
+- `OVERVIEW_EXPECT_PACKAGE_SHA256`: the retained package's SHA256.
+- `OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS`: `required` or `not-applicable`.
+
+Use `required` for hosts with configurable chat previews, including `alex.10`
+and neutral workstation releases. Use `not-applicable` only for a reviewed host
+without the setting, such as `alex.9`. Missing or invalid inputs fail before the
+daemon starts; a mismatching package hash or runtime version fails acceptance.
+The report records the expectation and the checks actually performed. A new
+version label does not automatically skip chat coverage.
+
+For example, after selecting the tested package's version and hash:
 
 ```bash
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
@@ -85,6 +99,9 @@ docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin-source,readonly" \
   --mount "type=bind,src=$OVERVIEW_TEST_DEB,dst=/inputs/package.deb,readonly" \
   --mount "type=bind,src=$OVERVIEW_TEST_ARTIFACT_DIR,dst=/artifact,readonly" \
+  --env "OVERVIEW_EXPECT_RUNTIME_VERSION=$OVERVIEW_EXPECT_RUNTIME_VERSION" \
+  --env "OVERVIEW_EXPECT_PACKAGE_SHA256=$OVERVIEW_EXPECT_PACKAGE_SHA256" \
+  --env OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS=required \
   --mount type=bind,src=/tmp/overview-v05,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
@@ -98,3 +115,10 @@ workstation's running Paseo daemon. Before an artifact exists, omit the `/artifa
 mount to exercise the source checkout provisionally. Those results explicitly
 say `provisionalHarnessOnly`; repeat with the final immutable artifact on every
 host package declared in its compatibility lock.
+
+A successful `required` run must include both `bounded Overview previews independent
+of chat preferences` and `stock chat preview disable/enable and one-way expansion`
+in `results.json`'s `checks`. The check turns the isolated browser setting off and
+on, verifies full chat text and one-way expansion, and confirms Overview's own
+preview remains bounded. Do not accept a provisional report as evidence for a
+final artifact, or modify a completed artifact's lock to add a new host.

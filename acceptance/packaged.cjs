@@ -5,8 +5,16 @@ const net = require("node:net");
 const { spawn } = require("node:child_process");
 const { setTimeout: delay } = require("node:timers/promises");
 const { createHash } = require("node:crypto");
-const { chromium } = require("/fork/node_modules/playwright");
-const { WebSocket } = require("/fork/node_modules/ws");
+
+function readExpectation(env) {
+  const runtimeVersion = env.OVERVIEW_EXPECT_RUNTIME_VERSION;
+  const packageSha256 = env.OVERVIEW_EXPECT_PACKAGE_SHA256;
+  const chatPreviewSettings = env.OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS;
+  assert.match(runtimeVersion ?? "", /^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/, "Set OVERVIEW_EXPECT_RUNTIME_VERSION to the tested package runtime version");
+  assert.match(packageSha256 ?? "", /^[a-f0-9]{64}$/, "Set OVERVIEW_EXPECT_PACKAGE_SHA256 to the exact tested package SHA256");
+  assert.ok(chatPreviewSettings === "required" || chatPreviewSettings === "not-applicable", "Set OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS to required or not-applicable");
+  return { runtimeVersion, packageSha256, chatPreviewSettings };
+}
 
 async function freePort() {
   const server = net.createServer();
@@ -40,9 +48,15 @@ function copyProvisionalSource(destination) {
     fs.cpSync(path.join("/plugin-source/node_modules", name), path.join(destination, "node_modules", name), { recursive: true });
 }
 
-(async () => {
-  const packageRoot = process.env.OVERVIEW_TEST_PACKAGE_ROOT || "/package";
+async function run() {
+  const expectation = readExpectation(process.env);
   const packageFile = process.env.OVERVIEW_TEST_PACKAGE_FILE;
+  assert.ok(packageFile, "Acceptance requires the exact package file, including provisional runs");
+  const packageSha256 = await sha256(packageFile);
+  assert.equal(packageSha256, expectation.packageSha256, "Tested package SHA256 differs from the explicit acceptance expectation");
+  const { chromium } = require("/fork/node_modules/playwright");
+  const { WebSocket } = require("/fork/node_modules/ws");
+  const packageRoot = process.env.OVERVIEW_TEST_PACKAGE_ROOT || "/package";
   const artifact = process.env.OVERVIEW_TEST_ARTIFACT;
   const output = fs.mkdtempSync("/out/run-");
   const state = path.join(output, "state");
@@ -63,15 +77,13 @@ function copyProvisionalSource(destination) {
     assert.equal(lock.schemaVersion, 5);
     assert.equal(release.manifestSha256, createHash("sha256").update(lockBytes).digest("hex"));
     assert.match(release.artifactId, /^[a-f0-9]{64}$/);
-    assert.ok(packageFile, "Final acceptance requires the exact package file");
-    const packageSha256 = await sha256(packageFile);
     const matches = lock.validatedHosts.filter(host => host.artifactSha256 === packageSha256);
     assert.equal(matches.length, 1, "Artifact must explicitly validate the tested package");
     identity = { artifactId: release.artifactId, packageSha256, host: matches[0] };
     fs.cpSync(path.join(artifact, "payload"), payload, { recursive: true });
   } else {
     copyProvisionalSource(payload);
-    identity = { provisionalHarnessOnly: true };
+    identity = { provisionalHarnessOnly: true, packageSha256 };
   }
   const cli = path.join(packageRoot, "opt/Paseo/resources/bin/paseo");
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PASEO_")));
@@ -99,6 +111,7 @@ function copyProvisionalSource(destination) {
     client = new DaemonClient({ url: `ws://${listen}/ws`, clientId: "overview-packaged-acceptance", webSocketFactory: (url, options) => new WebSocket(url, options?.protocols, { headers: options?.headers }) });
     await client.connect();
     const status = await client.getDaemonStatus();
+    assert.equal(status.version, expectation.runtimeVersion, "Connected daemon version differs from the explicit acceptance expectation");
     if (identity.host) assert.equal(status.version, identity.host.version);
     const installed = await client.installDirectoryPlugin(payload);
     assert.equal(installed.id, "overview");
@@ -396,7 +409,7 @@ function copyProvisionalSource(destination) {
     await page.setViewportSize({width:1440,height:1000});
     await page.getByRole("button",{name:"Overview",exact:true}).click();
     await waitFor(async()=>await page.locator('[data-overview-kind="project"]').count()===7,"remount after explicit chat navigation");
-    if (status.version === "0.15.2-alex.10") {
+    if (expectation.chatPreviewSettings === "required") {
       // Isolated browser preferences only. Overview never imports the chat hook.
       const previewSetting = async enabled => {
         await page.evaluate(value => {
@@ -430,7 +443,7 @@ function copyProvisionalSource(destination) {
     }
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(status.version === "0.15.2-alex.10" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, provisional: !artifact }));
   } catch (error) {
@@ -451,4 +464,7 @@ function copyProvisionalSource(destination) {
     if (daemon.exitCode === null) daemon.kill("SIGKILL");
     log.end();
   }
-})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+}
+
+module.exports = { readExpectation };
+if (require.main === module) run().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

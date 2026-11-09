@@ -20,7 +20,7 @@ describe("bounded event previews", () => {
   it("extracts supported public tool fields and labels shortened paths", () => {
     const tool = (detail: unknown, status = "completed") => timelinePreview({ type: "tool_call", name: "tool", status, detail });
     expect(tool({ type: "shell", command: "npm test", exitCode: 0 })).toEqual({ title: "Command finished", detail: "npm test · exit 0", truncated: false });
-    expect(tool({ type: "read", filePath: "/home/alex/project/client/store.ts" }, "running")).toEqual({ title: "Read running", detail: "…/client/store.ts", truncated: true });
+    expect(tool({ type: "read", filePath: "/home/example/project/client/store.ts" }, "running")).toEqual({ title: "Read running", detail: "…/client/store.ts", truncated: true });
     expect(tool({ type: "search", query: "subscription", numMatches: 17 })).toEqual({ title: "Search finished", detail: "subscription · 17 matches", truncated: false });
     expect(tool({ type: "fetch", url: "https://example.com/docs" })).toMatchObject({ detail: "https://example.com/docs" });
     expect(tool({ type: "sub_agent", description: "Review lifecycle" })).toMatchObject({ title: "Delegation finished", detail: "Review lifecycle" });
