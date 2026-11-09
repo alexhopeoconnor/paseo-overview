@@ -23,6 +23,7 @@ export class ActivityTracker {
   ingest(events: readonly OverviewEvent[], now: number): OverviewEvent[] {
     const fresh: OverviewEvent[] = [];
     for (const event of events) {
+      if (event.displayOnly) continue;
       if (this.seen.has(event.id)) continue;
       this.seen.set(event.id, now);
       if (!Number.isFinite(event.timestamp) || event.timestamp < now - 15_000 || event.timestamp > now + 5_000) continue;

@@ -6,7 +6,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
 
 - `renderer.cjs` bundles the real Three.js renderer and checks delayed loading,
   ownership roles, animal identities, explicit groups, selected ancestors,
-  background framing, visibility restoration, bounded bubbles and disposal.
+  background framing, visibility restoration, bounded bubbles and disposal. It
+  also observes real depth transforms, fixed centres, pulse continuity, ambient
+  pixels and the low-rate idle scheduler, with pause/visibility/reduced-motion
+  checks. Instrumentation stays in the fixture, outside the product bundle.
 - `native-preview.cjs` renders the actual native graph and shared header through
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
@@ -21,6 +24,11 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   margin and confirms that opening the card does not change graph dimensions.
 - `compile.mjs` uses the Paseo plugin compiler and checks the compiled native
   boundary, including Hermes where the pinned build environment provides it.
+- `packaged.cjs` exercises the same immutable plugin on each exact supported host
+  package, including additive streaming previews, actual element fullscreen,
+  preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
+  tests use a real user click and inspect `document.fullscreenElement`; controller
+  mocks alone are not fullscreen acceptance.
 
 Browser screenshots and JSON results go under `/out` in the container, or the
 path selected by `OVERVIEW_ACCEPTANCE_OUTPUT`. Keep outputs outside Git. Chromium
@@ -31,16 +39,16 @@ checks do not substitute for an actual paired-phone check.
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-v04` in this example:
+`/tmp/overview-v05` in this example:
 
 ```bash
-mkdir -p /tmp/overview-v04
+mkdir -p /tmp/overview-v05
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-v04,dst=/out \
+  --mount type=bind,src=/tmp/overview-v05,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \
@@ -77,7 +85,7 @@ docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin-source,readonly" \
   --mount "type=bind,src=$OVERVIEW_TEST_DEB,dst=/inputs/package.deb,readonly" \
   --mount "type=bind,src=$OVERVIEW_TEST_ARTIFACT_DIR,dst=/artifact,readonly" \
-  --mount type=bind,src=/tmp/overview-v04,dst=/out \
+  --mount type=bind,src=/tmp/overview-v05,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \

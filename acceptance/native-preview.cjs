@@ -63,6 +63,7 @@ const inspect = page => page.evaluate(() => {
     await collapse.scrollIntoViewIfNeeded();
     const collapseBox = await collapse.boundingBox();
     assert.ok(collapseBox.width >= 44 && collapseBox.height >= 44);
+    assert.match(await collapse.innerText(), /^Collapse \d+$/);
     await page.screenshot({ path: `${output}/phone-expanded.png` });
     await collapse.tap();
     await page.getByTestId('overview-native-agent:n0').scrollIntoViewIfNeeded();

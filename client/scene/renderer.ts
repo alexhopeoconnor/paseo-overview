@@ -8,28 +8,47 @@ import { StableLayout, type PositionedNode, type ProjectLayout, type SceneLayout
 import { pointAlongRoute, routeDelegation, type RoutedEdge, type RouteNode } from "../routing";
 import { unionRects, type Rect, type Point } from "../geometry";
 import { statusColour } from "../status";
-import { GraphOverlay } from "./overlay";
+import { GraphOverlay, createCollapseTextMeasure } from "./overlay";
 import { selectionColour } from "../appearance";
 import type { GroupPreferences } from "../../shared/presentation";
 import { canRetainSelection } from "../presentation";
 import { createGraphLine, FibreLight } from "./lines";
 import { advancePulseJourney, createPulseJourney, type PulseJourney } from "./pulses";
 import type { Line2 } from "three/addons/lines/Line2.js";
+import { activityDepth, advanceDepth, depthTransform, transformRouteNode, type DepthRange } from "./depth";
+import { planDepthDelegations, updateMovingDelegation, type CachedDelegation } from "./delegation";
+import { AmbientField } from "./ambient";
 
 interface VisualNode { halo: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; phase: number }
 interface Cluster {
   layout: ProjectLayout; group: THREE.Group; wash: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   nodes: Map<string, VisualNode>; lines: Map<string, Line2>;
   signature: string; opacity: number; routedAt: number;
+  depth: number; depthHeld: boolean; depthRange: DepthRange;
 }
 interface Pulse {
   nodeId: string; projectId: string; journey: PulseJourney; light: FibreLight;
 }
-interface Delegation { route: RoutedEdge; line: Line2; arrow: Line2 }
+interface Delegation extends CachedDelegation { line: Line2; arrow: Line2; transforms: Float64Array }
 interface ProjectAnchor { x: number; y: number; scale: number }
 const phaseFor = (id: string) => { let value = 0; for (const char of id) value = (value * 31 + char.charCodeAt(0)) | 0; return (value >>> 0) / 0xffffffff; };
 const beat = (phase: number) => Math.min(1, Math.exp(-Math.pow((phase - 0.12) / 0.055, 2)) + 0.48 * Math.exp(-Math.pow((phase - 0.29) / 0.075, 2)));
 const sameFocus = (a: OverviewFocus, b: OverviewFocus) => a?.kind === b?.kind && a?.id === b?.id;
+
+/** Reuse the line buffers while attachments move; the expensive spine stays cached. */
+function updateLinePoints(line: Line2, points: readonly Point[]): void {
+  const starts = line.geometry.getAttribute("instanceStart"), ends = line.geometry.getAttribute("instanceEnd");
+  const distanceStarts = line.geometry.getAttribute("instanceDistanceStart"), distanceEnds = line.geometry.getAttribute("instanceDistanceEnd");
+  let length = 0;
+  for (let index = 0; index < points.length - 1; index++) {
+    const a = points[index]!, b = points[index + 1]!;
+    starts.setXYZ(index, a.x, a.y, 12); ends.setXYZ(index, b.x, b.y, 12);
+    distanceStarts?.setX(index, length); length += Math.hypot(b.x - a.x, b.y - a.y); distanceEnds?.setX(index, length);
+  }
+  starts.needsUpdate = ends.needsUpdate = true;
+  if (distanceStarts) distanceStarts.needsUpdate = true;
+  if (distanceEnds) distanceEnds.needsUpdate = true;
+}
 
 /** One orthographic scene, with measured DOM controls sharing every layout transform. */
 export function createOverviewRenderer(parentValue: unknown, options: OverviewMountOptions): OverviewRenderer {
@@ -44,11 +63,13 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   let width = 1, height = 1, pixelRatio = 0, visible = true, disposed = false, failed = false;
   let requestedMotion = options.motion !== false, frame = 0, lastTime = 0;
   let wakeTimer: ReturnType<typeof setTimeout> | undefined;
-  let delegationDirty = true;
+  let delegationDirty = true, delegationPlanDirty = true, structuralTransition = true;
+  let graphDirty = true, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity, lastAmbientTime = 0;
+  let depthRoutes = new Map<string, CachedDelegation>();
   const media = window.matchMedia("(prefers-reduced-motion: reduce)");
   const motion = () => requestedMotion && !media.matches;
   const canRender = () => !disposed && !failed && visible && document.visibilityState !== "hidden";
-  const layoutEngine = new StableLayout();
+  const layoutEngine = new StableLayout(createCollapseTextMeasure());
   let layout: SceneLayout = { projects: [], nodes: new Map(), ownershipEdges: [], delegationEdges: [], memberToDisplay: new Map(), groups: [], width, height };
   const activity = new ActivityTracker(), limiter = new PulseLimiter(), bubbles = new BubbleStore();
   const clusters = new Map<string, Cluster>(), delegations = new Map<string, Delegation>();
@@ -75,9 +96,22 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   gradient.addColorStop(0, "#ffffffff"); gradient.addColorStop(0.4, "#ffffff88"); gradient.addColorStop(1, "#ffffff00");
   glowContext.fillStyle = gradient; glowContext.fillRect(0, 0, 64, 64);
   const glowTexture = new THREE.CanvasTexture(glowCanvas);
+  const ambient = new AmbientField(scene, plane, glowTexture);
   const point = new THREE.Vector3();
   const material = (colour: string, glow = false) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, ...(glow ? { map: glowTexture } : {}) });
-  const requestFrame = () => { if (canRender() && !frame) frame = requestAnimationFrame(renderFrame); };
+  const requestFrame = (dirty = true) => {
+    graphDirty ||= dirty;
+    if (wakeTimer !== undefined) { clearTimeout(wakeTimer); wakeTimer = undefined; }
+    if (canRender() && !frame) frame = requestAnimationFrame(renderFrame);
+  };
+
+  function scheduleFrame(now: number): void {
+    if (!canRender()) return;
+    if (graphAnimating && motion()) { requestFrame(false); return; }
+    const delay = Math.min(motion() && model.connection === "connected" ? 1000 / 15 : Infinity,
+      Math.min(nextBubbleExpiry, nextActivityUpdate) - now + 1);
+    if (Number.isFinite(delay)) wakeTimer = setTimeout(() => { wakeTimer = undefined; requestFrame(false); }, Math.max(16, delay));
+  }
 
   const authoritative = () => Object.values(model.readiness).every(Boolean) && (!model.freshness || model.freshness === "current");
   function reportAnchor(anchor: OverviewAnchor | null): void {
@@ -101,7 +135,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     if (sameFocus(next, focused)) return;
     if (!focused && next) rememberFocusAnchors();
     if (!next) focusAnchors.clear();
-    focused = next; delegationDirty = true; clearPulses();
+    focused = next; delegationDirty = true; delegationPlanDirty = true; structuralTransition = true; clearPulses();
     if (!next) setSelection(null);
     try { rebuildLayout(); }
     catch (error) { failed = true; options.onError?.(error instanceof Error ? error.message : "The focused graph is unavailable."); }
@@ -146,9 +180,10 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     for (const line of cluster.lines.values()) { line.geometry.dispose(); line.material.dispose(); }
     cluster.wash.material.dispose(); scene.remove(cluster.group);
   }
-  function rememberFocusAnchors(): void {
+  function rememberFocusAnchors(resized = false): void {
     focusAnchors.clear();
-    for (const project of layout.projects) focusAnchors.set(project.id, { ...project.position, scale: project.scale });
+    for (const [id, cluster] of clusters) focusAnchors.set(id, resized ? depthTransform(cluster.layout, cluster.depth)
+      : { x: cluster.group.position.x, y: cluster.group.position.y, scale: cluster.group.scale.x });
   }
   function rebuildLayout(): void {
     const protectedIds = new Set<string>([...held.keys(), ...[selected, hovered].filter((id): id is string => !!id)]);
@@ -168,7 +203,8 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       if (!cluster) {
         const group = new THREE.Group(); group.position.set(project.position.x, project.position.y, 0); group.scale.setScalar(project.scale);
         const wash = new THREE.Mesh(plane, material(theme.accent, true)); wash.position.z = -8; group.add(wash); scene.add(group);
-        cluster = { layout: project, group, wash, nodes: new Map(), lines: new Map(), signature: "", opacity: 1, routedAt: 0 }; clusters.set(project.id, cluster);
+        cluster = { layout: project, group, wash, nodes: new Map(), lines: new Map(), signature: "", opacity: 1, routedAt: 0,
+          depth: 1, depthHeld: false, depthRange: { min: 1, max: 1 } }; clusters.set(project.id, cluster);
       }
       cluster.layout = project;
       if (focused && !focusAnchors.has(project.id)) focusAnchors.set(project.id, { ...project.position, scale: project.scale });
@@ -195,6 +231,16 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       }
     }
     layout = next; ownership = buildOwnershipIndex(model); delegationDirty ||= routeChanged;
+    delegationPlanDirty ||= routeChanged; structuralTransition ||= routeChanged;
+    if (!focused && delegationPlanDirty) {
+      const plan = planDepthDelegations(layout.projects, model.edges, layout.memberToDisplay, { x: 8, y: 8, width: width - 16, height: height - 16 });
+      depthRoutes = plan.routes;
+      for (const [id, cluster] of clusters) {
+        cluster.depthRange = plan.ranges.get(id)!;
+        cluster.depth = Math.max(cluster.depthRange.min, Math.min(cluster.depthRange.max, cluster.depth));
+      }
+      delegationPlanDirty = false;
+    }
     overlay.sync(layout, model);
     for (const [id, members] of held) if (!layout.nodes.has(id)) {
       for (const member of members) bubbles.hold(member, member === selected);
@@ -206,8 +252,16 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
 
   function transformNode(node: PositionedNode): RouteNode {
     const group = clusters.get(node.projectId)!.group, scale = group.scale.x;
-    const rect = (value: Rect): Rect => ({ x: group.position.x + value.x * scale, y: group.position.y + value.y * scale, width: value.width * scale, height: value.height * scale });
-    return { id: node.id, position: { x: group.position.x + node.position.x * scale, y: group.position.y + node.position.y * scale }, body: rect(node.body), bounds: rect(node.bounds) };
+    return transformRouteNode(node, { x: group.position.x, y: group.position.y, scale });
+  }
+  function arrowPoints(route: RoutedEdge): Point[] {
+    const tip = pointAlongRoute(route, 1), before = pointAlongRoute(route, Math.max(0, 1 - 8 / Math.max(1, route.length)));
+    const angle = Math.atan2(tip.y - before.y, tip.x - before.x);
+    const back = { x: tip.x - Math.cos(angle) * 7, y: tip.y - Math.sin(angle) * 7 };
+    return [
+      { x: back.x - Math.sin(angle) * 3, y: back.y + Math.cos(angle) * 3 }, tip,
+      { x: back.x + Math.sin(angle) * 3, y: back.y - Math.cos(angle) * 3 },
+    ];
   }
   function rebuildDelegations(): void {
     for (const item of delegations.values()) {
@@ -217,24 +271,25 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     }
     delegations.clear();
     const nodes = new Map([...layout.nodes.values()].map(node => [node.id, transformNode(node)]));
-    for (const edge of model.edges) {
+    const routes = focused ? new Map<string, CachedDelegation>() : depthRoutes;
+    if (focused) for (const edge of model.edges) {
       if (edge.kind !== "delegation") continue;
-      const source = nodes.get(edge.source), target = nodes.get(edge.target);
-      if (!source || !target) continue;
+      const source = nodes.get(layout.memberToDisplay.get(edge.source) ?? edge.source);
+      const target = nodes.get(layout.memberToDisplay.get(edge.target) ?? edge.target);
+      if (!source || !target || source.id === target.id) continue;
       const route = routeDelegation({ id: edge.id, source, target,
-        obstacles: [...nodes.values()].filter(node => node.id !== edge.source && node.id !== edge.target).map(node => node.bounds),
+        obstacles: [...nodes.values()].filter(node => node.id !== source.id && node.id !== target.id).map(node => node.bounds),
         viewport: { x: 8, y: 8, width: width - 16, height: height - 16 } });
-      if (!route.points.length) continue;
+      if (route.points.length) routes.set(edge.id, { route });
+    }
+    for (const [id, cached] of routes) {
+      const { route } = cached, source = nodes.get(route.source), target = nodes.get(route.target);
+      if (!source || !target) continue;
+      updateMovingDelegation(cached, source, target);
       const line = createGraphLine(route.points, theme.accent, 1.35, 12, true);
-      const tip = pointAlongRoute(route, 1), before = pointAlongRoute(route, Math.max(0, 1 - 8 / Math.max(1, route.length)));
-      const angle = Math.atan2(tip.y - before.y, tip.x - before.x);
-      const back = { x: tip.x - Math.cos(angle) * 7, y: tip.y - Math.sin(angle) * 7 };
-      const arrow = createGraphLine([
-        { x: back.x - Math.sin(angle) * 3, y: back.y + Math.cos(angle) * 3 },
-        tip,
-        { x: back.x + Math.sin(angle) * 3, y: back.y - Math.cos(angle) * 3 },
-      ], theme.accent, 1.35, 12);
-      line.computeLineDistances(); scene.add(line, arrow); delegations.set(edge.id, { route, line, arrow });
+      const arrow = createGraphLine(arrowPoints(route), theme.accent, 1.35, 12);
+      line.frustumCulled = arrow.frustumCulled = false;
+      scene.add(line, arrow); delegations.set(id, { ...cached, line, arrow, transforms: new Float64Array(6).fill(NaN) });
     }
     delegationDirty = false;
   }
@@ -279,6 +334,14 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const now = Date.now(), dt = lastTime ? Math.min(0.05, (time - lastTime) / 1000) : 1 / 60;
     lastTime = time;
     const animate = motion(), smooth = animate ? 1 - Math.exp(-dt * 12) : 1;
+    ambient.update(width, height, theme, lastAmbientTime ? (time - lastAmbientTime) / 1000 : 0,
+      animate && model.connection === "connected", !!focused);
+    lastAmbientTime = time;
+    if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
+      renderer.render(scene, camera); scheduleFrame(now); return;
+    }
+    graphDirty = false;
+    nextActivityUpdate = Infinity;
     const live = model.connection === "connected";
     const summaries = aggregateOwnedActivity(model, ownership, activity, now);
     const agentById = new Map(model.nodes.map(node => [node.id, node]));
@@ -287,11 +350,22 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const ancestry = new Set<string>();
     let ancestor: string | undefined = hovered ?? selected ?? undefined;
     while (ancestor && !ancestry.has(ancestor)) { ancestry.add(ancestor); ancestor = layout.nodes.get(ancestor)?.parentId; }
+    const inspectedProjects = new Set([...held.keys(), ...[selected, hovered].filter((id): id is string => !!id)]
+      .map(id => layout.nodes.get(layout.memberToDisplay.get(id) ?? id)?.projectId));
     let continuous = false, transitioning = false;
     const opacityByNode = new Map<string, number>();
     for (const [id, cluster] of clusters) {
       const summary = summaries.get(id), intensity = live ? normaliseActivity(summary?.score ?? 0) : 0;
+      if (animate && intensity > 0.001) nextActivityUpdate = now + 250;
       const foreground = focusProject === id, background = !!focused && !foreground;
+      const heldDepth = inspectedProjects.has(id);
+      const targetDepth = activityDepth(summary?.score ?? 0, summary?.working ?? 0, live, cluster.depthRange);
+      if (!focused) {
+        if (heldDepth && !cluster.depthHeld && !structuralTransition) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
+        cluster.depthHeld = heldDepth;
+        if (animate && !heldDepth && !structuralTransition) cluster.depth = advanceDepth(cluster.depth, targetDepth, dt);
+        if (animate && !heldDepth && Math.abs(cluster.depth - targetDepth) > 0.00001) continuous = true;
+      }
       let bounds = cluster.layout.bounds;
       if (foreground && focused?.kind === "workspace") {
         const workspaceId = focused.id;
@@ -303,17 +377,20 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       // full-view packing, but distant projects retain their recognisable size
       // and anchors until the user returns to that full view.
       const baseline = background ? focusAnchors.get(id) : undefined;
-      const scale = foreground ? Math.max(cluster.layout.scale, fit) : baseline?.scale ?? cluster.layout.scale;
-      const targetX = foreground ? width / 2 - (bounds.x + bounds.width / 2) * scale : baseline?.x ?? cluster.layout.position.x;
-      const targetY = foreground ? height / 2 - (bounds.y + bounds.height / 2) * scale : baseline?.y ?? cluster.layout.position.y;
+      const full = depthTransform(cluster.layout, cluster.depth);
+      const scale = foreground ? Math.max(cluster.layout.scale, fit) : baseline?.scale ?? full.scale;
+      const targetX = foreground ? width / 2 - (bounds.x + bounds.width / 2) * scale : baseline?.x ?? full.x;
+      const targetY = foreground ? height / 2 - (bounds.y + bounds.height / 2) * scale : baseline?.y ?? full.y;
       const z = foreground ? 140 : background ? -180 : intensity * 32;
       const alpha = background ? 0.13 : 1;
       const moving = animate && (Math.abs(cluster.group.position.x - targetX) + Math.abs(cluster.group.position.y - targetY) > 0.25 || Math.abs(cluster.group.scale.x - scale) > 0.001 || Math.abs(cluster.opacity - alpha) > 0.005);
-      transitioning ||= moving;
-      cluster.group.position.x += (targetX - cluster.group.position.x) * smooth;
-      cluster.group.position.y += (targetY - cluster.group.position.y) * smooth;
+      transitioning ||= structuralTransition && moving;
+      continuous ||= moving;
+      const transformSmooth = structuralTransition ? smooth : 1;
+      cluster.group.position.x += (targetX - cluster.group.position.x) * transformSmooth;
+      cluster.group.position.y += (targetY - cluster.group.position.y) * transformSmooth;
       cluster.group.position.z += (z - cluster.group.position.z) * smooth;
-      cluster.group.scale.setScalar(cluster.group.scale.x + (scale - cluster.group.scale.x) * smooth);
+      cluster.group.scale.setScalar(cluster.group.scale.x + (scale - cluster.group.scale.x) * transformSmooth);
       cluster.opacity += (alpha - cluster.opacity) * smooth;
       cluster.wash.material.color.set(theme.accent); cluster.wash.material.opacity = cluster.opacity * (0.028 + intensity * 0.035);
       for (const node of cluster.layout.nodes) {
@@ -331,7 +408,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         visual.halo.material.color.set(agent ? statusColour(agent, theme) : count?.errors ? theme.error : count?.waiting ? theme.waiting : working ? theme.working : theme.accent);
         visual.halo.material.opacity = nodeAlpha * (working ? 0.08 + wave * 0.5 : wave * 0.4);
         visual.halo.scale.set(node.body.width + 14 + wave * 15, node.body.height + 14 + wave * 15, 1);
-        if (animate && (working || score > 0.01 || arrival > 0.02)) continuous = true;
+        if (animate && (working || arrival > 0.02)) continuous = true;
       }
       for (const edge of cluster.layout.edges) {
         const line = cluster.lines.get(edge.id)!;
@@ -344,10 +421,24 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       }
     }
     scene.updateMatrixWorld(true);
+    if (structuralTransition && !transitioning) { structuralTransition = false; continuous = true; }
     if (transitioning) { delegationDirty = true; continuous = true; }
     else if (delegationDirty) rebuildDelegations();
     for (const item of delegations.values()) {
       item.line.visible = item.arrow.visible = !transitioning;
+      if (!transitioning && item.sourceSide) {
+        const source = layout.nodes.get(item.route.source), target = layout.nodes.get(item.route.target);
+        if (source && target) {
+          const a = clusters.get(source.projectId)!.group, b = clusters.get(target.projectId)!.group, previous = item.transforms;
+          if (previous[0] !== a.position.x || previous[1] !== a.position.y || previous[2] !== a.scale.x ||
+            previous[3] !== b.position.x || previous[4] !== b.position.y || previous[5] !== b.scale.x) {
+            updateMovingDelegation(item, transformNode(source), transformNode(target));
+            updateLinePoints(item.line, item.route.points); updateLinePoints(item.arrow, arrowPoints(item.route));
+            previous[0] = a.position.x; previous[1] = a.position.y; previous[2] = a.scale.x;
+            previous[3] = b.position.x; previous[4] = b.position.y; previous[5] = b.scale.x;
+          }
+        }
+      }
       const highlighted = hovered === item.route.source || hovered === item.route.target || selected === item.route.source || selected === item.route.target;
       item.line.material.color.set(theme.accent); item.arrow.material.color.set(theme.accent);
       item.line.material.opacity = highlighted ? 0.9 : focused ? 0.18 : 0.3;
@@ -392,14 +483,10 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const shown = [...displayedBubbles.values()];
     overlay.finishPositions(shown, width, height);
     renderer.render(scene, camera);
-    if (continuous && animate) requestFrame();
-    else {
-      // Static or held text does not need a polling render loop. The next real
-      // input requests a frame; otherwise wake exactly when unheld text expires.
-      const nextExpiry = shown.reduce((expiry, bubble) => selected === bubble.nodeId || held.has(bubble.nodeId)
-        ? expiry : Math.min(expiry, bubble.expiresAt), Infinity);
-      if (Number.isFinite(nextExpiry)) wakeTimer = setTimeout(() => { wakeTimer = undefined; requestFrame(); }, Math.max(16, nextExpiry - now + 1));
-    }
+    graphAnimating = continuous && animate;
+    nextBubbleExpiry = shown.reduce((expiry, bubble) => selected === bubble.nodeId || held.has(bubble.nodeId)
+      ? expiry : Math.min(expiry, bubble.expiresAt), Infinity);
+    scheduleFrame(now);
   }
 
   function resize(): void {
@@ -414,7 +501,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     width = logicalWidth; height = logicalHeight; pixelRatio = nextPixelRatio;
     camera.left = 0; camera.right = width; camera.top = 0; camera.bottom = height; camera.updateProjectionMatrix();
     renderer.setPixelRatio(pixelRatio); renderer.setSize(width, height, false);
-    if (sizeChanged) { rebuildLayout(); if (focused) rememberFocusAnchors(); }
+    if (sizeChanged) { rebuildLayout(); if (focused) rememberFocusAnchors(true); }
     requestFrame();
   }
   const dismiss = () => {
@@ -425,10 +512,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   const onKey = (event: KeyboardEvent) => {
     const target = event.target as HTMLElement | null;
     if (event.key !== "Escape" || event.defaultPrevented || !target || !parent.contains(target) || target.closest("input,textarea,select,[contenteditable='true'],[role='dialog'],[aria-modal='true']")) return;
+    if (document.fullscreenElement?.contains(parent)) return;
     event.preventDefault(); event.stopPropagation(); dismiss();
   };
   const onVisibility = () => {
-    lastTime = 0;
+    lastTime = 0; lastAmbientTime = 0;
     if (!canRender()) {
       if (frame) cancelAnimationFrame(frame); frame = 0;
       if (wakeTimer !== undefined) { clearTimeout(wakeTimer); wakeTimer = undefined; }
@@ -440,7 +528,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       requestFrame();
     }
   };
-  const onMotion = () => { clearPulses(); requestFrame(); };
+  const onMotion = () => {
+    if (!motion() && !focused && !structuralTransition) for (const cluster of clusters.values()) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
+    lastTime = 0; lastAmbientTime = 0;
+    clearPulses(); requestFrame();
+  };
   const onContextLost = (event: Event) => { event.preventDefault(); failed = true; options.onError?.("The graphics context was lost. Showing the simple view."); };
   renderer.domElement.addEventListener("pointerdown", background);
   renderer.domElement.addEventListener("webglcontextlost", onContextLost);
@@ -464,7 +556,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       for (const item of delegations.values()) {
         item.line.geometry.dispose(); item.line.material.dispose(); item.arrow.geometry.dispose(); item.arrow.material.dispose();
       }
-      clusters.clear(); delegations.clear(); overlay.dispose(); plane.dispose(); glowTexture.dispose(); renderer.dispose(); renderer.domElement.remove();
+      clusters.clear(); delegations.clear(); overlay.dispose(); ambient.dispose(); plane.dispose(); glowTexture.dispose(); renderer.dispose(); renderer.domElement.remove();
       parent.style.position = previousPosition; parent.style.overflow = previousOverflow;
   };
   try { resize(); acceptEvents(); } catch (error) { dispose(); throw error; }

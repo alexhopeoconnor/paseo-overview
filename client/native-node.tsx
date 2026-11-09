@@ -7,6 +7,7 @@ import { identityAccent, nodeAppearance, selectionColour } from "./appearance";
 import { statusColour, statusLabel } from "./status";
 import type { NativeGraphNode, NativeSummary } from "./native-layout";
 import { useNativeHeartbeat } from "./native-motion";
+import { collapseLabel } from "./collapse";
 
 function ProjectIcon({ url, name, theme }: { url?: string; name: string; theme: OverviewTheme }) {
   const [failedUrl, setFailedUrl] = useState<string>();
@@ -43,6 +44,7 @@ export function NativeNode({ node, summary, agent, theme, animated, delegated, s
     : summaryText(summary);
   const coverage = agent?.rosterAvailability === "not_resident" ? "Native subagents unavailable while unloaded." : agent?.rosterAvailability === "unknown" ? "Native subagent coverage unavailable." : "";
   const label = node.labelBounds;
+  const control = node.controlBounds;
   return <View style={{ position: "absolute", left: node.bounds.x, top: node.bounds.y, width: node.bounds.width, height: node.bounds.height }}>
     <Pressable testID={`overview-native-${testKind}:${node.id}`} accessibilityRole="button"
       accessibilityLabel={`${agent ? `${identity.emoji} ${subagent ? "Subagent" : "Agent"}. ` : ""}${group ? `${node.memberIds?.length ?? 0} inactive subagents` : node.label}. ${agent ? statusLabel(agent) : groupStatus}. ${coverage}${delegated ? " Delegation connection." : ""} ${action}.`}
@@ -65,8 +67,8 @@ export function NativeNode({ node, summary, agent, theme, animated, delegated, s
       </View> : null}
       {delegated || agent?.rosterAvailability === "not_resident" || agent?.rosterAvailability === "unknown" ? <Text pointerEvents="none" style={{ position: "absolute", left: local.left + node.body.width + 1, top: local.top - 8, color: delegated ? theme.accent : theme.muted, fontSize: 12 }}>{delegated ? "↗" : "?"}</Text> : null}
     </Pressable>
-    {node.inactiveGroup?.expanded ? <Pressable testID={`overview-native-collapse:${node.inactiveGroup.id}`} accessibilityRole="button" accessibilityLabel={`Collapse ${node.inactiveGroup.memberIds.length} inactive subagents`} onPress={() => onCollapse(node.inactiveGroup!.id)} style={{ position: "absolute", left: Math.min(node.bounds.width - 44, local.left + node.body.width + 2), top: local.top - 5, minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}>
-      <Text style={{ color: selection, fontSize: 20 }}>⊟</Text>
+    {node.inactiveGroup?.expanded && control ? <Pressable testID={`overview-native-collapse:${node.inactiveGroup.id}`} accessibilityRole="button" accessibilityLabel={`Collapse ${node.inactiveGroup.memberIds.length} inactive subagents`} accessibilityState={{ expanded: true }} onPress={() => onCollapse(node.inactiveGroup!.id)} style={{ position: "absolute", left: control.x - node.bounds.x, top: control.y - node.bounds.y, width: control.width, height: control.height, minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center", borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface }}>
+      <Text numberOfLines={1} style={{ color: selection, fontSize: 12, fontWeight: "600" }}>{collapseLabel(node.inactiveGroup.memberIds.length)}</Text>
     </Pressable> : null}
   </View>;
 }

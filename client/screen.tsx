@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import type { OverviewModel } from "../shared/model";
 import type { OverviewPresentation, PresentationAction } from "../shared/presentation";
-import type { FloatingCardPositioner, OverviewAnchor, OverviewRenderer, OverviewTheme } from "../shared/renderer";
+import type { FloatingCardPositioner, OverviewAnchor, OverviewFullscreen, OverviewRenderer, OverviewTheme } from "../shared/renderer";
 import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
 import { AgentDetails } from "./agent-details";
 import { selectionColour } from "./appearance";
@@ -12,7 +12,7 @@ import { OverviewHeader } from "./header";
 import { NativeOverview } from "./native";
 import { parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation } from "./presentation";
 import { createOverviewStore } from "./store";
-import { mountFloatingCard, mountOverview } from "./web";
+import { mountFloatingCard, mountGraphFullscreen, mountOverview } from "./web";
 
 function emptyModel(hostId: string): OverviewModel {
   return { hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { projects: false, workspaces: false, agents: false }, connection: "connecting", revision: 0 };
@@ -28,6 +28,9 @@ export function OverviewScreen(props: PluginScreenProps) {
   const model = useMemo(() => observedModel.hostId === props.host.id ? observedModel : emptyModel(props.host.id), [observedModel, props.host.id]);
   const [error, setError] = useState("");
   const [renderError, setRenderError] = useState("");
+  const [fullscreenActive, setFullscreenActive] = useState(false);
+  const [fullscreenSupported, setFullscreenSupported] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState("");
   const [owned, setOwned] = useState(() => ({ hostId: props.host.id, value: recallPresentation(props.host.id) }));
   const presentation: OverviewPresentation = owned.hostId === props.host.id ? owned.value : recallPresentation(props.host.id);
   if (owned.hostId !== props.host.id) setOwned({ hostId: props.host.id, value: presentation });
@@ -39,6 +42,8 @@ export function OverviewScreen(props: PluginScreenProps) {
     });
   }, [props.host.id]);
 
+  const screen = useRef<View | null>(null);
+  const fullscreen = useRef<OverviewFullscreen | null>(null);
   const panel = useRef<View | null>(null);
   const card = useRef<View | null>(null);
   const renderer = useRef<OverviewRenderer | null>(null);
@@ -56,7 +61,10 @@ export function OverviewScreen(props: PluginScreenProps) {
     return { ...base, selection: selectionColour(base) };
   }, [props.theme]);
   const navigation = (props as PluginScreenProps & { navigation?: { openAgent(input: { agentId: string; serverId: string }): void } }).navigation;
-  const openAgent = useCallback((agentId: string) => navigation?.openAgent({ agentId, serverId: props.host.id }), [navigation, props.host.id]);
+  const openAgent = useCallback((agentId: string) => {
+    void fullscreen.current?.exit().catch(() => {});
+    navigation?.openAgent({ agentId, serverId: props.host.id });
+  }, [navigation, props.host.id]);
   const current = useRef({ model, theme, presentation, openAgent, dispatch });
   current.current = { model, theme, presentation, openAgent, dispatch };
   const browser = Platform.OS === "web" && !renderError;
@@ -69,6 +77,27 @@ export function OverviewScreen(props: PluginScreenProps) {
     current.current.dispatch({ type: "select", id: null });
     if (id) renderer.current?.focusNode(id);
   }, []);
+
+  useEffect(() => {
+    if (!browser) { setFullscreenSupported(false); setFullscreenActive(false); return; }
+    let mounted = true;
+    const controller = mountGraphFullscreen(screen.current, active => { if (mounted) setFullscreenActive(active); });
+    fullscreen.current = controller;
+    setFullscreenSupported(!!controller?.supported);
+    setFullscreenError("");
+    return () => {
+      mounted = false; controller?.dispose();
+      if (fullscreen.current === controller) fullscreen.current = null;
+    };
+  }, [props.host.id, browser]);
+  const toggleFullscreen = () => {
+    const controller = fullscreen.current;
+    if (!controller) return;
+    setFullscreenError("");
+    void (fullscreenActive ? controller.exit() : controller.enter()).catch(cause => {
+      if (fullscreen.current === controller) setFullscreenError(cause instanceof Error ? cause.message : "Fullscreen could not be opened.");
+    });
+  };
 
   useEffect(() => {
     setError(""); setModel(emptyModel(props.host.id));
@@ -141,11 +170,13 @@ export function OverviewScreen(props: PluginScreenProps) {
 
   const ready = Object.values(model.readiness).every(Boolean);
   const details = selected ? <AgentDetails model={model} node={selected} theme={theme} onClose={closeDetails} onOpenAgent={navigation ? openAgent : undefined} /> : null;
-  return <View testID="overview-screen" style={[styles.screen, { backgroundColor: theme.background }]}>
+  return <View ref={screen} testID="overview-screen" style={[styles.screen, { backgroundColor: theme.background }]}>
     <OverviewHeader model={model} presentation={presentation} hostLabel={props.host.label} theme={theme} compact={props.layout.compact}
       onBack={() => dispatch({ type: "focus", scope: parentScope(presentation.scope, model) })}
       onAllProjects={() => dispatch({ type: "focus", scope: null })}
-      onMotion={() => dispatch({ type: "set-motion", enabled: !presentation.motion })} />
+      onMotion={() => dispatch({ type: "set-motion", enabled: !presentation.motion })}
+      fullscreen={fullscreenSupported ? { active: fullscreenActive, toggle: toggleFullscreen } : undefined} />
+    {fullscreenError ? <View style={styles.notice}><Text accessibilityLiveRegion="polite" style={{ color: theme.waiting, fontSize: 12 }}>{fullscreenError}</Text></View> : null}
     {error ? <View style={styles.notice}><Text selectable style={{ color: theme.waiting, fontSize: 12 }}>{error}</Text></View> : null}
     {renderError ? <View style={styles.notice}><Text style={{ color: theme.muted, fontSize: 12 }}>Using the touch graph. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => setRenderError("")}><Text style={{ color: theme.selection, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
     <View style={styles.canvasArea}>

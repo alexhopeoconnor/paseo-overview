@@ -8,7 +8,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 
 (async () => {
-  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { full, lightTheme } from "/plugin/acceptance/fixture";', resolveDir: '/plugin' }, bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
+  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { full, lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
   const listeners = { app: new Set(), motion: new Set() };
   const active = new Map(), animationCalls = [];
   let animationId = 0;
@@ -52,7 +52,19 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
       throw new Error(`Unexpected native-only import: ${name}`);
     },
   });
+  for (const name of ['document', 'window']) Object.defineProperty(context, name, {
+    get() { throw new Error(`Native graph accessed browser global ${name}`); },
+  });
   vm.runInContext(built.outputFiles[0].text, context);
+  const nativeRoot = new Proxy({}, { get(_target, property) { throw new Error(`Browser initialization accessed native root ${String(property)}`); } });
+  const unexpectedCallback = () => { throw new Error('Browser callback ran on native'); };
+  for (const platform of ['android', 'ios']) {
+    native.Platform.OS = platform;
+    assert.equal(module.exports.mountGraphFullscreen(nativeRoot, unexpectedCallback), null);
+    assert.equal(module.exports.mountOverview(nativeRoot, {}), null);
+    assert.equal(module.exports.mountFloatingCard(nativeRoot, nativeRoot, unexpectedCallback), null);
+  }
+  native.Platform.OS = 'android';
   let model = { ...module.exports.full, nodes: module.exports.full.nodes.map(node => node.id === "a9-0" ? { ...node, state: "working" } : node) };
   let visible = true, state, tree;
   const onState = next => { state = next; };
@@ -111,6 +123,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   const collapse = byId(`overview-native-collapse:${groupId}`);
   assert.equal(collapse.props.style.minWidth, 44);
   assert.equal(collapse.props.style.minHeight, 44);
+  assert.match(text(collapse), /^Collapse \d+$/);
   await press('overview-back');
   await press('overview-native-workspace:w0');
   assert.ok(byId('overview-native-agent:n10'), 'Explicit expansion survives focus changes');
@@ -144,6 +157,6 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.equal(active.size, 0); assert.equal(listeners.app.size, 0); assert.equal(listeners.motion.size, 0);
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(`${output}/native-interaction-results.json`, JSON.stringify({ ok: true, actualComponents: true, nativePrimitivesAndAnimationMocked: true, withoutDOM: true, withoutThree: true,
-    checks: ['controlled header scope', 'stable role-aware emoji nodes', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
+    checks: ['android/iOS browser fullscreen/renderer/positioner guards', 'controlled header scope', 'stable role-aware emoji nodes', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
   console.log(JSON.stringify({ ok: true, output, animationsObserved: animationCalls.length }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

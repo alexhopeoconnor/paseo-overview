@@ -46,6 +46,20 @@ function valid(layout: SceneLayout) {
 }
 
 describe("project-root layout", () => {
+  it("remeasures an expanded control when its count grows without changing visible topology", () => {
+    const value = model([1], 100), parent = "a:w0:0";
+    value.nodes = value.nodes.map(item => item.kind === "provider-subagent" && item.id !== "native:99"
+      ? { ...item, state: "finished" as const } : item);
+    const engine = new StableLayout(text => text.length * 6.25);
+    const options = { groups: new Map([[inactiveGroupId(parent), "expanded" as const]]) };
+    const before = engine.update(value, 1400, 1000, null, options);
+    const after = engine.update({ ...value, nodes: value.nodes.map(item => item.id === "native:99"
+      ? { ...item, state: "finished" as const } : item) }, 1400, 1000, null, options);
+    expect([...after.nodes.keys()]).toEqual([...before.nodes.keys()]);
+    expect(after.nodes.get(parent)!.controlBounds!.width).toBeGreaterThan(before.nodes.get(parent)!.controlBounds!.width);
+    expect(after.nodes.get(parent)!.controlBounds!.width).toBe(Math.ceil("Collapse 100".length * 6.25) + 18);
+    valid(after);
+  });
   it("restores full-view framing after an inactive branch expands and collapses", () => {
     const engine = new StableLayout(), value = model([3, 2, 1, 0], 20);
     value.nodes = value.nodes.map(node => node.kind === "provider-subagent" ? { ...node, state: "finished" as const } : node);

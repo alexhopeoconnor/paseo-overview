@@ -4,6 +4,16 @@ import type { OverviewEvent } from "../shared/model";
 import { buildOwnershipIndex, normalise } from "../client/normalize";
 
 describe("activity", () => {
+  it("never counts presentation flushes as work or pulse candidates", () => {
+    const tracker = new ActivityTracker();
+    const delta: OverviewEvent = { id: "delta", nodeId: "agent", kind: "message", timestamp: 1000 };
+    const preview: OverviewEvent = { ...delta, id: "preview", displayOnly: true,
+      preview: { title: "Assistant update", detail: "Readable sentence.", truncated: false } };
+    expect(tracker.ingest([delta, preview], 1000)).toEqual([delta]);
+    expect(tracker.score("agent", 1000)).toBe(1);
+    expect(tracker.ingest([{ ...preview, id: "next-preview", timestamp: 2000 }], 2000)).toEqual([]);
+    expect(tracker.score("agent", 2000)).toBeCloseTo(decay(1, 1));
+  });
   it("counts each event once and decays smoothly without inventing stalled state", () => {
     const tracker = new ActivityTracker();
     const event: OverviewEvent = { id: "one", nodeId: "agent", kind: "tool", timestamp: 1000 };

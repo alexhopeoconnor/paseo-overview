@@ -104,6 +104,7 @@ export function createFloatingCardPositioner(
     });
   };
   const onKey = (event: KeyboardEvent) => {
+    if (document.fullscreenElement?.contains(parent)) return;
     if (event.key !== "Escape" || event.defaultPrevented || !options?.onDismiss) return;
     event.preventDefault(); event.stopPropagation(); options.onDismiss();
   };

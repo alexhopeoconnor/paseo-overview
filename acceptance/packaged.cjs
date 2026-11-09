@@ -88,6 +88,7 @@ function copyProvisionalSource(destination) {
   const consoleErrors = [];
   const browserRequests = [];
   const received = [];
+  const liveRows = [];
   try {
     await waitFor(async () => {
       if (daemon.exitCode !== null) throw new Error(`Packaged daemon exited with ${daemon.exitCode}`);
@@ -140,6 +141,7 @@ function copyProvisionalSource(destination) {
       upstream.onMessage(async raw => {
         const packet = JSON.parse(String(raw));
         const message = packet.message || packet;
+        if (message.type === "agent_stream") liveRows.push(message);
         if (message.type === "plugin.rpc.invoke.response" && nativeParents.has(rosterRequests.get(message.payload.requestId))) {
           const snapshot = message.payload.output;
           // Transport fixture tests dense native presentation; the real passive RPC still executes.
@@ -281,6 +283,24 @@ function copyProvisionalSource(destination) {
     assert.equal(await child.getAttribute("data-overview-role"), "subagent");
     await child.click();
     const childId = await child.getAttribute("data-overview-id");
+    const fullscreenButton = page.getByTestId("overview-fullscreen");
+    await fullscreenButton.waitFor({ state: "visible" });
+    const scopeBeforeFullscreen = await page.getByTestId("overview-scope-title").innerText();
+    await page.getByTestId("overview-canvas-host").locator("canvas").evaluate(canvas => { window.acceptanceCanvas = canvas; });
+    for (const exitMethod of ["button", "Escape"]) {
+      await fullscreenButton.click();
+      await waitFor(() => page.evaluate(() => document.fullscreenElement?.getAttribute("data-testid") === "overview-screen"), "real element fullscreen");
+      await page.getByRole("button", { name: "Exit fullscreen", exact: true }).waitFor({ state: "visible" });
+      assert.equal(await page.getByTestId("overview-details-popover").evaluate(card => document.fullscreenElement.contains(card)), true);
+      assert.equal(await page.getByTestId("overview-header").evaluate(header => document.fullscreenElement.contains(header)), true);
+      assert.equal(await page.getByTestId("overview-canvas-host").locator("canvas").evaluate(canvas => canvas === window.acceptanceCanvas), true, "Fullscreen preserves the renderer instance");
+      if (exitMethod === "button") await fullscreenButton.click();
+      else await child.press("Escape");
+      await waitFor(() => page.evaluate(() => document.fullscreenElement === null), "fullscreen exit");
+      assert.equal(await child.getAttribute("aria-pressed"), "true", "Fullscreen Escape preserves selection");
+      assert.equal(await page.getByTestId("overview-scope-title").innerText(), scopeBeforeFullscreen);
+      assert.equal(await collapse.count(), 1, "Fullscreen preserves expanded groups");
+    }
     const ids = () => page.locator('[data-overview-id]').evaluateAll(nodes => nodes.map(node => node.dataset.overviewId).sort());
     const knownBefore = await ids();
     const childrenBefore = await page.locator('[data-overview-kind="provider-subagent"]').count();
@@ -333,7 +353,16 @@ function copyProvisionalSource(destination) {
     await client.sendAgentMessage(agents[0].id,"Run the deterministic acceptance stream.");
     await delay(400);
     await page.screenshot({path:path.join(output,"activity.png")});
-    await delay(2300);
+    // Let the previous terminal bubble's established six-second priority window
+    // expire before verifying a new lower-priority streaming preview.
+    await delay(8200);
+    await workspaceRoot.click();
+    const fragmentedPrompt = client.sendAgentMessage(agents[0].id, "Run the fragmented preview check.");
+    await waitFor(async () => await page.locator('[data-overview-bubble]').filter({ hasText: /The tests have passed|I am checking the next operation/ }).count() > 0, "readable additive streaming preview");
+    const fragmentedPreview = await page.locator('[data-overview-bubble]').filter({ hasText: /The tests have passed|I am checking the next operation/ }).first().innerText();
+    assert.ok(!/^Assistant response\s+\S+\s*$/.test(fragmentedPreview), "Token fragments do not replace readable text");
+    await fragmentedPrompt;
+    await delay(2800);
     const overviewRequests=browserRequests.slice(requestsBeforeFixtures);
     const forbidden=overviewRequests.filter(type=>/^(?:create_agent_request|agent\.create\.request|send_agent_message_request|agent\.message\.send\.request|agent\.stop\.request|stop_agent_request|archive_agent_request|agent\.archive\.request|workspace\.clear_attention\.request|agent\.clear_attention\.request|permission_response)$/.test(type));
     assert.deepEqual(forbidden,[],"Observing Overview must not send mutation operations");
@@ -352,8 +381,11 @@ function copyProvisionalSource(destination) {
     assert.ok(cardBox.y >= graphBox.y && cardBox.y + cardBox.height <= graphBox.y + graphBox.height + 1, "Details card stays within a short viewport");
     await page.screenshot({path:path.join(output,"inspector-scroll.png")});
     // Navigation is an explicit user action, outside the passive observation assertions above.
+    await fullscreenButton.click();
+    await waitFor(() => page.evaluate(() => !!document.fullscreenElement), "fullscreen for navigation check");
     await inspector.getByRole("button",{name:"Open chat →",exact:true}).click();
     await page.waitForURL(/\/workspace\//);
+    await waitFor(() => page.evaluate(() => document.fullscreenElement === null), "Open chat leaves Overview fullscreen");
     await page.setViewportSize({width:1440,height:1000});
     await page.getByRole("button",{name:"Overview",exact:true}).click();
     await waitFor(async()=>await page.locator('[data-overview-kind="project"]').count()===7,"remount after explicit chat navigation");
@@ -391,7 +423,7 @@ function copyProvisionalSource(destination) {
     }
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(status.version === "0.15.2-alex.10" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(status.version === "0.15.2-alex.10" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, provisional: !artifact }));
   } catch (error) {
@@ -401,6 +433,7 @@ function copyProvisionalSource(destination) {
     }
     fs.writeFileSync(path.join(output, "failure.json"), JSON.stringify({ message: error.message, pageErrors, consoleErrors, requestTypes: [...new Set(browserRequests)] }, null, 2));
     fs.writeFileSync(path.join(output, "received.json"), JSON.stringify(received, null, 2));
+    fs.writeFileSync(path.join(output, "live-rows.json"), JSON.stringify(liveRows, null, 2));
     console.error(`Acceptance failed. Artifacts: ${output}`);
     throw error;
   } finally {

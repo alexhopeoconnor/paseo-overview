@@ -2,7 +2,7 @@ import type { OverviewModel, OverviewNode } from "../shared/model";
 import { buildOwnershipIndex } from "./normalize";
 import { hasError, needsInput } from "./status";
 import { UNASSIGNED_SCOPE_ID, type OverviewScope } from "../shared/presentation";
-import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
+import { collapseLabel, inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
 import { agentRole, type AgentRole } from "./identity";
 import { nodeAppearance } from "./appearance";
 
@@ -17,7 +17,7 @@ export interface NativeGraphNode {
   inactiveGroup?: InactiveGroup;
   /** Original owned sources, never already-aggregated activity. */
   activityIds: readonly string[];
-  body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect;
+  body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect; controlBounds?: NativeRect;
 }
 export interface NativeGraphEdge {
   id: string; source: string; target: string;
@@ -66,9 +66,9 @@ type Definition = Omit<NativeGraphNode, "body" | "bounds">;
 const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
 
 interface TreeEntry { definition: Definition; children: TreeEntry[] }
-interface Footprint { body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect }
+interface Footprint { body: NativeRect; bounds: NativeRect; labelBounds?: NativeRect; controlBounds?: NativeRect }
 
-function footprint(kind: NativeGraphNode["kind"], role?: AgentRole): Footprint {
+function footprint(kind: NativeGraphNode["kind"], role?: AgentRole, expandedCount?: number): Footprint {
   if (kind === "project" || kind === "unassigned") return {
     body: { x: -36, y: 0, width: 72, height: 72 },
     labelBounds: { x: -76, y: 80, width: 152, height: 64 },
@@ -85,18 +85,23 @@ function footprint(kind: NativeGraphNode["kind"], role?: AgentRole): Footprint {
   };
   const subordinate = role ? role === "subagent" : kind === "provider-subagent";
   const size = subordinate ? nodeAppearance.subagent.outerSize : nodeAppearance.agent.size;
+  // Reserve a separate touch row below the name/status, clear of the outgoing branch lane.
+  const controlWidth = expandedCount ? Math.max(44, Math.ceil(collapseLabel(expandedCount).length * 7.5) + 16) : 0;
+  const width = Math.max(124, controlWidth);
   return {
     body: { x: -size / 2, y: (44 - size) / 2, width: size, height: size },
     labelBounds: { x: -62, y: 50, width: 124, height: 60 },
-    bounds: { x: -62, y: 0, width: 124, height: 110 },
+    bounds: { x: -width / 2, y: 0, width, height: controlWidth ? 160 : 110 },
+    ...(controlWidth ? { controlBounds: { x: -controlWidth / 2, y: 116, width: controlWidth, height: 44 } } : {}),
   };
 }
 
 function positioned(definition: Definition, centreX: number, y: number): NativeGraphNode {
-  const metric = footprint(definition.kind, definition.role);
+  const metric = footprint(definition.kind, definition.role, definition.inactiveGroup?.expanded ? definition.inactiveGroup.memberIds.length : undefined);
   const translate = (rect: NativeRect): NativeRect => ({ ...rect, x: rect.x + centreX, y: rect.y + y });
   return { ...definition, body: translate(metric.body), bounds: translate(metric.bounds),
-    ...(metric.labelBounds ? { labelBounds: translate(metric.labelBounds) } : {}) };
+    ...(metric.labelBounds ? { labelBounds: translate(metric.labelBounds) } : {}),
+    ...(metric.controlBounds ? { controlBounds: translate(metric.controlBounds) } : {}) };
 }
 
 /** Spatial touch graph with readable glyphs, separate labels and clear branch lanes. */
@@ -200,8 +205,10 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
   }
   const spans = new Map<string, number>(), heights: number[] = [];
   const measure = (entry: TreeEntry, depth: number): number => {
-    heights[depth] = Math.max(heights[depth] ?? 0, footprint(entry.definition.kind, entry.definition.role).bounds.height);
-    const span = Math.max(180, entry.children.reduce((total, child) => total + measure(child, depth + 1), 0));
+    const { definition } = entry;
+    const metric = footprint(definition.kind, definition.role, definition.inactiveGroup?.expanded ? definition.inactiveGroup.memberIds.length : undefined);
+    heights[depth] = Math.max(heights[depth] ?? 0, metric.bounds.height);
+    const span = Math.max(180, metric.bounds.width + 32, entry.children.reduce((total, child) => total + measure(child, depth + 1), 0));
     spans.set(entry.definition.id, span); return span;
   };
   const span = measure(root, 0), width = Math.max(viewport, span + 32);

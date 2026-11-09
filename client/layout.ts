@@ -6,7 +6,7 @@ import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./coll
 import { agentRole, type AgentRole } from "./identity";
 import { boundaryPoint, distance, inflateRect, rectsOverlap, segmentIntersectsRect, translateRect, unionRects, type Point, type Rect } from "./geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections, routeDelegation, routeOwnership, type RoutedEdge } from "./routing";
-import { graphMetrics, nodeFootprint, type LayoutNodeKind } from "./scene/metrics";
+import { collapseControlMetrics, graphMetrics, nodeFootprint, type LayoutNodeKind } from "./scene/metrics";
 
 export type { Point, Rect } from "./geometry";
 export type { RoutedEdge, PathSegment } from "./routing";
@@ -79,10 +79,10 @@ interface ProjectDefinition {
 export function nodeCollisionBounds(node: PositionedNode): readonly Rect[] {
   return node.kind === "project" ? [inflateRect(node.body, 4), ...(node.labelBounds ? [inflateRect(node.labelBounds, 2)] : [])] : [node.bounds];
 }
-function positioned(definition: Definition, position: Point, reservedControl?: Rect): PositionedNode {
+function positioned(definition: Definition, position: Point, reservedControl?: Rect, measureCollapseText?: (text: string) => number): PositionedNode {
   const metric = nodeFootprint(definition.kind, definition.role);
   const control = definition.inactiveGroup?.expanded ? { x: metric.body.x + metric.body.width - 2,
-    y: metric.body.y + metric.body.height - 2, width: 36, height: 24 } : undefined;
+    y: metric.body.y + metric.body.height - 2, ...collapseControlMetrics(definition.inactiveGroup.memberIds.length, measureCollapseText) } : undefined;
   const controlBounds = reservedControl ?? (control ? translateRect(control, position) : undefined);
   return { ...definition, position, body: translateRect(metric.body, position),
     bounds: controlBounds ? unionRects([translateRect(metric.bounds, position), controlBounds]) : translateRect(metric.bounds, position),
@@ -104,7 +104,7 @@ function positionControls(nodes: readonly PositionedNode[], parents: ReadonlyMap
       return { angle: (start + end) / 2, gap: end - start };
     }).sort((a, b) => b.gap - a.gap);
     const candidates = gaps.map(({ angle }) => {
-      const x = Math.cos(angle), y = Math.sin(angle), width = 36, height = 24;
+      const x = Math.cos(angle), y = Math.sin(angle), { width, height } = node.controlBounds!;
       const radius = Math.abs(x) * (node.body.width + width) / 2 + Math.abs(y) * (node.body.height + height) / 2 + 8;
       return { x: node.position.x + x * radius - width / 2, y: node.position.y + y * radius - height / 2, width, height };
     });
@@ -167,8 +167,11 @@ function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
   }
   return projects.sort((a, b) => a.id.localeCompare(b.id));
 }
-function topologySignature(project: ProjectDefinition): string {
-  return project.definitions.map(node => `${node.kind}:${node.role ?? ""}:${node.id}:${project.parents.get(node.id) ?? ""}:${node.inactiveGroup?.expanded ? "expanded" : ""}`).join("\n");
+function topologySignature(project: ProjectDefinition, measureCollapseText?: (text: string) => number): string {
+  return project.definitions.map(node => {
+    const control = node.inactiveGroup?.expanded ? collapseControlMetrics(node.inactiveGroup.memberIds.length, measureCollapseText) : undefined;
+    return `${node.kind}:${node.role ?? ""}:${node.id}:${project.parents.get(node.id) ?? ""}:${control ? `${control.width}x${control.height}` : ""}`;
+  }).join("\n");
 }
 
 function collapseProject(project: ProjectDefinition, model: OverviewModel, options: CollapseOptions): { definition: ProjectDefinition; groups: readonly InactiveGroup[] } {
@@ -191,7 +194,7 @@ function collapseProject(project: ProjectDefinition, model: OverviewModel, optio
 }
 
 /** Reserve nested angular sectors; the root leaves a clear corridor for its name. */
-function localGeometry(project: ProjectDefinition): LocalGeometry {
+function localGeometry(project: ProjectDefinition, measureCollapseText?: (text: string) => number): LocalGeometry {
   const entries = new Map(project.definitions.map(node => [node.id, { id: node.id, children: [] } as TreeEntry]));
   const root = entries.get(project.id)!;
   for (const [child, parent] of project.parents) (entries.get(parent) ?? root).children.push(entries.get(child)!);
@@ -225,7 +228,7 @@ function localGeometry(project: ProjectDefinition): LocalGeometry {
   for (let iteration = 0; iteration < 40; iteration++) {
     nodes = project.definitions.map(definition => {
       const depth = depths.get(definition.id) ?? 0, radius = radii[depth] ?? 0, angle = angles.get(definition.id) ?? 0;
-      return positioned(definition, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
+      return positioned(definition, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }, undefined, measureCollapseText);
     });
     nodes = positionControls(nodes, project.parents);
     const byId = new Map(nodes.map(node => [node.id, node]));
@@ -332,6 +335,8 @@ export class StableLayout {
   private delegationGeometry?: { signature: string; edges: readonly RoutedEdge[] };
   private previous?: SceneLayout;
 
+  constructor(private readonly measureCollapseText?: (text: string) => number) {}
+
   private fitKey(projects: readonly ProjectLayout[], viewport: Rect): string {
     return JSON.stringify([viewport, projects.map(project => [project.id, project.bounds])]);
   }
@@ -340,9 +345,9 @@ export class StableLayout {
     const ids = new Set(definitions.map(project => project.id));
     for (const id of geometry.keys()) if (!ids.has(id)) geometry.delete(id);
     return definitions.map(project => {
-      const signature = topologySignature(project);
+      const signature = topologySignature(project, this.measureCollapseText);
       let cached = geometry.get(project.id);
-      if (!cached || cached.signature !== signature) { cached = { signature, value: localGeometry(project) }; geometry.set(project.id, cached); }
+      if (!cached || cached.signature !== signature) { cached = { signature, value: localGeometry(project, this.measureCollapseText) }; geometry.set(project.id, cached); }
       const nodes = project.definitions.map(node => positioned(node, cached!.value.positions.get(node.id)!, cached!.value.controls.get(node.id)));
       return { id: project.id, name: project.name, iconUrl: project.iconUrl, background: project.background,
         position: { x: 0, y: 0 }, scale: 1, bounds: cached.value.bounds,

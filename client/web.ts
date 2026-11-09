@@ -1,9 +1,17 @@
 import { Platform } from "react-native";
-import type { FloatingCardPositioner, OverviewMountOptions, OverviewRenderer } from "../shared/renderer";
+import type { FloatingCardPositioner, OverviewFullscreen, OverviewMountOptions, OverviewRenderer } from "../shared/renderer";
 
 declare const require: (path: string) => unknown;
 interface RendererModule {
   createOverviewRenderer(parent: unknown, options: OverviewMountOptions): OverviewRenderer;
+}
+
+export function mountGraphFullscreen(root: unknown, changed: (active: boolean) => void): OverviewFullscreen | null {
+  if (Platform.OS !== "web" || !root) return null;
+  const module = require("./scene/fullscreen") as {
+    createGraphFullscreen(root: unknown, changed: (active: boolean) => void): OverviewFullscreen;
+  };
+  return module.createGraphFullscreen(root, changed);
 }
 
 export function mountFloatingCard(parent: unknown, card: unknown, onDismiss: () => void): FloatingCardPositioner | null {

@@ -25,8 +25,14 @@ arrow keys move between parents, children and siblings. Escape or a background
 click closes details first; another returns to the full view. The graph has no
 wheel zoom or orbit controls; browser zoom remains available.
 
+**Fullscreen graph** expands the Overview container, including its header,
+bubbles and details, while leaving the surrounding Paseo navigation outside it.
+The existing graph stays mounted. **Exit fullscreen** or Escape restores the
+normal view with selection, focus and expansion intact. While fullscreen is
+active, Escape exits it first. The control is shown only on supported browsers.
+
 Quiet subordinate branches appear as **N inactive**. Click the count to expand;
-use the owner's collapse control to fold them again. Preferences survive focus,
+use **Collapse N** on the owner to fold them again. Preferences survive focus,
 tab suspension and reopening Overview during the same plugin session. Working,
 waiting, failed, unknown and attention-bearing agents remain visible, as do
 selected nodes and delegation endpoints. Groups explain their finished/idle
@@ -38,6 +44,22 @@ reported working state; it is not a claim that new output arrived. Events are
 coalesced to keep bursts readable. Short nearby bubbles show bounded commands,
 paths or message excerpts with explicit truncation. These limits are independent
 of Paseo's long-response chat setting. Selection does not create activity.
+
+Assistant text fragments are joined before formatting. Bubbles prefer complete
+sentences, paragraphs or lines, with a paced word-boundary fallback for continuous
+output. They show at most 240 graphemes and update about once a second; tiny
+unfinished fragments do not replace readable text. Storage is bounded, final
+excerpts accompany turn completion, and preview publication never adds activity.
+
+In the full view, recent owned activity gives projects a modest depth effect:
+busier graphs ease slightly forward and quiet graphs recede around fixed centres.
+Scale is constrained by viewport space, readability and delegation clearance.
+Inspection holds the affected graph steady; activity does not repack the layout.
+A few faint, slow background lights add depth without representing agent work.
+**Pause motion** freezes depth and background movement while live status and
+readable previews continue. Reduced motion starts with neutral depth and a static
+background. Hidden tabs stop rendering and discard transient effects; returning
+retains the coherent graph and reconciles current observations.
 
 Phones open a touch graph of collapsed project roots with live icons and activity
 halos. Tap a project, then a workspace, to reveal its connected branches. The
@@ -96,8 +118,10 @@ plugin Docker builder. The TypeScript configurations separately check the
 cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
 empty-to-populated loading, suspension, stable identity, explicit grouping,
-branch layout, routed geometry, preview bounds and once-only pulse arrivals. Activity and icon
-updates keep positions stable; structural changes may expand an affected branch.
+branch layout, routed geometry, preview assembly, fullscreen ownership, bounded
+depth and once-only pulse arrivals. Activity and icon updates preserve packed
+positions; activity depth changes only presentation. Structural changes may
+expand an affected branch.
 
 Managed workstation packaging uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.
@@ -125,7 +149,7 @@ Hermes check does not replace acceptance on an actual paired phone.
 - `client/transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: passive observation.
 - `client/normalize.ts`: ownership and display model.
 - `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.
-- `client/activity.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: activity and status.
+- `client/activity.ts`, `assistant-preview.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: activity and bounded previews.
 - `client/web.ts`, `client/scene/`: browser rendering and accessible overlays.
 - `index.server.ts`, `server/api.ts`, `shared/rpc.ts`: read-only host bridge.
 

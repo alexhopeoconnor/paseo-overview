@@ -68,6 +68,8 @@ export interface OverviewEvent {
   preview?: EventPreview;
   /** Stable source identity for coalescing successive updates to the same preview. */
   sourceKey?: string;
+  /** A paced preview of already-observed work; never contributes activity or pulses. */
+  displayOnly?: true;
   /** Unix time in milliseconds, established at observation rather than history import. */
   timestamp: number;
 }

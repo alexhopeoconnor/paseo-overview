@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOverviewStore } from "../client/store";
 import { observeDirectory, type DirectoryChange, type DirectoryPage, type Observation, type OverviewApi } from "../client/transport";
 import type { AgentRecord, NativeRecord, ProjectIcon, RosterSnapshot } from "../shared/observation";
+import { BubbleStore } from "../client/bubbles";
+import { ActivityTracker } from "../client/activity";
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -198,12 +200,16 @@ describe("Overview observations", () => {
     } });
     const fresh = { type: "agent.provider_subagents.update", payload: {
       kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "e", seq: 2,
-      item: { type: "assistant_message", text: "New child output" }, timestamp: new Date().toISOString(),
+      item: { type: "assistant_message", text: "New child output." }, timestamp: new Date().toISOString(),
     } };
     test.events.emit(fresh); test.events.emit(fresh); await vi.advanceTimersByTimeAsync(50);
     expect(test.store.model.events).toHaveLength(1);
-    expect(test.store.model.events[0].text).toBe("New child output");
+    expect(test.store.model.events[0].text).toBeUndefined();
     expect(test.store.model.events[0].nodeId).toContain(":native:");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(test.store.model.events.filter(event => event.displayOnly)).toMatchObject([
+      { preview: { detail: "New child output." } },
+    ]);
   });
 
   it("releases observations while hidden and ignores RPC completion after disposal", async () => {
@@ -394,14 +400,137 @@ describe("Overview observations", () => {
     await test.store.start(); await flush();
     const emit = (seq: number, item: unknown) => test.timelineHandlers.get("parent")?.({ epoch: "e", seq, event: { type: "timeline", item } });
     emit(1, { type: "tool_call", callId: "shell1", name: "shell", status: "completed", detail: { type: "shell", command: "npm test", exitCode: 0 } });
-    emit(2, { type: "assistant_message", messageId: "message1", text: "a".repeat(300) });
-    emit(3, { type: "assistant_message", messageId: "message1", text: "a".repeat(400) });
+    emit(2, { type: "assistant_message", messageId: "message1", text: "a ".repeat(300) });
+    emit(3, { type: "assistant_message", messageId: "message1", text: "a ".repeat(400) });
     await vi.advanceTimersByTimeAsync(50);
     const [tool, first, second] = test.store.model.events;
     expect(tool.preview).toEqual({ title: "Command finished", detail: "npm test · exit 0", truncated: false });
     expect(first.sourceKey).toBe(second.sourceKey);
-    expect(first.preview?.truncated).toBe(true);
-    expect(first.preview?.detail?.endsWith("…")).toBe(true);
+    expect(first.preview).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(800);
+    expect(test.store.model.events.find(event => event.displayOnly)?.preview).toMatchObject({ truncated: true });
+  });
+
+  it("assembles additive rows once, preserves whitespace, and keeps preview flushes out of activity", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    const emit = (seq: number, text: string, replayed = false) => test.timelineHandlers.get("parent")?.({ epoch: "e", seq, replayed,
+      event: { type: "timeline", item: { type: "assistant_message", messageId: "m", text } } });
+    emit(1, "Hel"); emit(1, "Hel"); emit(2, "lo"); emit(3, " "); emit(2, "wrong");
+    emit(9, "historical", true); emit(4, "world"); emit(5, ". ");
+    await vi.advanceTimersByTimeAsync(50);
+    const tracker = new ActivityTracker();
+    expect(test.store.model.events).toHaveLength(4); // Whitespace alone is not work.
+    expect(test.store.model.events.every(event => !event.preview && !event.text)).toBe(true);
+    tracker.ingest(test.store.model.events, Date.now());
+    const id = "host:agent:parent", initial = tracker.score(id, Date.now());
+    await vi.advanceTimersByTimeAsync(800);
+    expect(test.store.model.events.filter(event => event.displayOnly)).toMatchObject([
+      { preview: { detail: "Hello world." } },
+    ]);
+    expect(tracker.ingest(test.store.model.events, Date.now())).toEqual([]);
+    expect(tracker.score(id, Date.now())).toBeLessThan(initial);
+  });
+
+  it("does not guess delivery identity for legacy assistant chunks without sequence metadata", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    const handler = test.timelineHandlers.get("parent")!;
+    for (let index = 0; index < 2; index++) handler({ timestamp: "legacy", event: {
+      type: "timeline", item: { type: "assistant_message", text: "Repeated text." },
+    } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(test.store.model.events).toEqual([]);
+  });
+
+  it("ignores duplicate turn starts and gives a failure its real error instead of pending text", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    const handler = test.timelineHandlers.get("parent")!;
+    const started = { timestamp: "started", event: { type: "turn_started", turnId: "turn" } };
+    handler(started);
+    handler({ epoch: "e", seq: 1, event: { type: "timeline", item: { type: "assistant_message", text: "Pending." } } });
+    handler(started);
+    await vi.advanceTimersByTimeAsync(900);
+    expect(test.store.model.events.find(event => event.displayOnly)?.preview?.detail).toBe("Pending.");
+    handler({ epoch: "e", seq: 2, event: { type: "timeline", item: { type: "assistant_message", text: "Do not replace the error." } } });
+    handler({ timestamp: "failed", event: { type: "turn_failed", turnId: "turn", error: "Provider failed" } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(test.store.model.events.some(event => event.displayOnly)).toBe(false);
+    expect(test.store.model.events.find(event => event.kind === "error")?.text).toBe("Provider failed");
+  });
+
+  it("preserves equal deltas at distinct positions and attaches the final tail to completion", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    const handler = test.timelineHandlers.get("parent")!;
+    for (const [seq, text] of [[1, "ha"], [2, "ha"], [3, "."]] as const) handler({ epoch: "e", seq,
+      event: { type: "timeline", item: { type: "assistant_message", messageId: "m", text } } });
+    handler({ timestamp: "finished", event: { type: "turn_completed", turnId: "turn" } });
+    await vi.advanceTimersByTimeAsync(50);
+    const terminal = test.store.model.events.find(event => event.kind === "finished");
+    expect(terminal?.preview).toEqual({ title: "Turn finished", detail: "haha.", truncated: false });
+    const bubbles = new BubbleStore();
+    bubbles.ingest(test.store.model.events, new Map(test.store.model.nodes.map(node => [node.id, node])), Date.now());
+    expect(bubbles.current(Date.now())[0]).toMatchObject({ kind: "finished", preview: terminal?.preview });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(test.store.model.events.some(event => event.displayOnly)).toBe(false);
+  });
+
+  it("attaches a native final short reply to the one real completion event", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "e", seq: 1,
+      item: { type: "assistant_message", messageId: "m", text: "Done." }, timestamp: "now",
+    } });
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "upsert", subagent: { ...child, status: "completed", updatedAt: "finished" }, cursor: { generation: "one", revision: 2 },
+    } });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(test.store.model.events.filter(event => event.kind === "finished")).toMatchObject([
+      { preview: { title: "Subagent finished", detail: "Done." } },
+    ]);
+    expect(test.store.model.events.some(event => event.displayOnly)).toBe(false);
+  });
+
+  it.each(["hidden", "disconnected", "replacement", "subscription_restored", "removed", "disposed"])("cancels pending previews when %s", async mode => {
+    const test = setup(); await test.store.start(); await flush();
+    const handler = test.timelineHandlers.get("parent")!;
+    handler({ epoch: "e", seq: 1, event: { type: "timeline", item: { type: "assistant_message", text: "Pending text" } } });
+    if (mode === "hidden") test.store.setVisible(false);
+    else if (mode === "disconnected") test.store.setConnection("disconnected");
+    else if (mode === "disposed") test.store.dispose();
+    else if (mode === "removed") test.directory.emit({ type: "agent_update", payload: { kind: "remove", agentId: "parent" } });
+    else handler({ event: { type: mode } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(test.store.model.events.some(event => event.displayOnly)).toBe(false);
+  });
+
+  it("drops a removed native child's pending preview and resets assembly across epochs", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "e", seq: 1,
+      item: { type: "assistant_message", text: "Removed child" }, timestamp: "now",
+    } });
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "remove", parentAgentId: "parent", subagentId: "child", cursor: { generation: "one", revision: 2 },
+    } });
+    const handler = test.timelineHandlers.get("parent")!;
+    handler({ epoch: "old", seq: 1, event: { type: "timeline", item: { type: "assistant_message", messageId: "m", text: "Old " } } });
+    handler({ epoch: "new", seq: 1, event: { type: "timeline", item: { type: "assistant_message", messageId: "m", text: "New." } } });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(test.store.model.events.filter(event => event.displayOnly)).toMatchObject([{ nodeId: "host:agent:parent", preview: { detail: "New." } }]);
+  });
+
+  it("retains a readable preview through raw ring overflow without renewing it", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    const handler = test.timelineHandlers.get("parent")!;
+    handler({ epoch: "e", seq: 1, event: { type: "timeline", item: { type: "assistant_message", messageId: "m", text: "Readable." } } });
+    await vi.advanceTimersByTimeAsync(900);
+    const preview = test.store.model.events.find(event => event.displayOnly)!;
+    for (let seq = 2; seq <= 90; seq++) handler({ epoch: "e", seq, event: { type: "timeline", item: { type: "reasoning", text: "PRIVATE" } } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events.filter(event => !event.displayOnly)).toHaveLength(64);
+    expect(test.store.model.events.find(event => event.displayOnly)).toEqual(preview);
+    expect(JSON.stringify(test.store.model.events)).not.toContain("PRIVATE");
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(test.store.model.events.some(event => event.displayOnly)).toBe(false);
   });
 });
 

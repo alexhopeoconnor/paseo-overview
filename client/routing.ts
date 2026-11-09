@@ -222,23 +222,29 @@ export function routeDelegation(input: {
     // A detour must not turn back through its own endpoint's body or project label.
     inflateRect(source.body, 1), inflateRect(target.body, 1),
     ...[source.labelBounds, target.labelBounds].flatMap(rect => rect ? [inflateRect(rect, 5)] : []),
+    ...[source.controlBounds, target.controlBounds].flatMap(rect => rect ? [inflateRect(rect, 5)] : []),
   ];
-  const clear = (a: Point, b: Point) => !obstacles.some(rect => segmentIntersectsRect(a, b, rect));
-  const candidates: Point[][] = [[start, end]];
-  const margin = 10;
-  const xs = [input.viewport.x + margin, input.viewport.x + input.viewport.width - margin,
-    ...obstacles.flatMap(rect => [rect.x - margin, rect.x + rect.width + margin])];
-  const ys = [input.viewport.y + margin, input.viewport.y + input.viewport.height - margin,
-    ...obstacles.flatMap(rect => [rect.y - margin, rect.y + rect.height + margin])];
-  for (const x of xs) candidates.push([start, { x, y: start.y }, { x, y: end.y }, end]);
-  for (const y of ys) candidates.push([start, { x: start.x, y }, { x: end.x, y }, end]);
-  const usable = candidates.filter(points => points.slice(1, -1).every(point => pointInRect(point, input.viewport)) &&
-    points.slice(1).every((point, index) => clear(points[index]!, point)));
-  usable.sort((a, b) => a.slice(1).reduce((sum, point, index) => sum + distance(a[index]!, point), 0) -
-    b.slice(1).reduce((sum, point, index) => sum + distance(b[index]!, point), 0));
-  const path = usable[0] ?? visibilityPath(start, end, obstacles, input.viewport, clear);
+  const path = routeBetweenPoints(start, end, obstacles, input.viewport);
   // An unavailable corridor is explicit: no misleading line through an unrelated node.
   return routedEdge({ id: input.id, source: source.id, target: target.id, kind: "delegation", projectId: null,
     ...(!path ? { unroutable: true as const } : {}),
     segments: path ? path.slice(1).map((to, index) => ({ kind: "line" as const, from: path[index]!, to })) : [] });
+}
+
+/** Shared static corridor search; callers provide already-inflated obstacles. */
+export function routeBetweenPoints(start: Point, end: Point, obstacles: readonly Rect[], viewport: Rect): Point[] | null {
+  const clear = (a: Point, b: Point) => !obstacles.some(rect => segmentIntersectsRect(a, b, rect));
+  const candidates: Point[][] = [[start, end]];
+  const margin = 10;
+  const xs = [viewport.x + margin, viewport.x + viewport.width - margin,
+    ...obstacles.flatMap(rect => [rect.x - margin, rect.x + rect.width + margin])];
+  const ys = [viewport.y + margin, viewport.y + viewport.height - margin,
+    ...obstacles.flatMap(rect => [rect.y - margin, rect.y + rect.height + margin])];
+  for (const x of xs) candidates.push([start, { x, y: start.y }, { x, y: end.y }, end]);
+  for (const y of ys) candidates.push([start, { x: start.x, y }, { x: end.x, y }, end]);
+  const usable = candidates.filter(points => points.slice(1, -1).every(point => pointInRect(point, viewport)) &&
+    points.slice(1).every((point, index) => clear(points[index]!, point)));
+  usable.sort((a, b) => a.slice(1).reduce((sum, point, index) => sum + distance(a[index]!, point), 0) -
+    b.slice(1).reduce((sum, point, index) => sum + distance(b[index]!, point), 0));
+  return usable[0] ?? visibilityPath(start, end, obstacles, viewport, clear);
 }

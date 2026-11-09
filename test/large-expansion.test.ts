@@ -22,6 +22,8 @@ function validate(model: OverviewModel, parent: string, width = 1200, height = 1
     expect(Math.max(...project.nodes.map(node => Math.hypot(node.position.x, node.position.y)))).toBeLessThan(2000);
   }
   const control = expanded.nodes.get(parent)!.controlBounds!;
+  expect(control.width).toBeGreaterThan(70);
+  expect(control.height).toBeGreaterThanOrEqual(28);
   for (const edge of expanded.projects.find(project => project.id === expanded.nodes.get(parent)!.projectId)!.edges)
     expect(edge.points.slice(1).some((point, index) => segmentIntersectsRect(edge.points[index]!, point, control))).toBe(false);
   const updated = engine.update({ ...model, revision: model.revision + 1, nodes: model.nodes.map(node => ({ ...node, label: "Renamed agent" })) }, width, height, null, options);

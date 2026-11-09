@@ -13,15 +13,25 @@ path. **Open chat** deliberately returns to the normal Paseo chat. Escape or a
 background click closes details first, then returns to the full view. Arrow keys
 navigate relationships; browser zoom works and the graph has no wheel zoom.
 
+**Fullscreen graph** fills the display with Overview and its controls. Escape
+exits fullscreen first, preserving graph focus, selection and expanded groups.
+The button is available on supported browsers.
+
 **N inactive** represents quiet subordinate branches. Click to expand and use
-the parent's collapse control to fold them again. The choice survives focus and
+**Collapse N** on the parent to fold them again. The choice survives focus and
 refreshes. Running agents, blockers, errors and unread results remain visible.
 Counts include every represented agent.
 
 Light trails follow fresh observed activity along ownership paths, with ancestor
 responses on arrival. Quiet heartbeats also indicate reported working state.
 Brief, nearby bubbles show bounded activity previews; long text has an ellipsis.
-Use **Pause motion** when desired. Reduced motion preserves static status.
+Streaming text is assembled into readable sentences or chunks, updated about once
+a second, rather than displaying each token. Preview updates do not create work.
+
+Unfocused projects gain a small, bounded prominence from recent activity while
+their layout stays fixed. Inspection holds the graph steady. Faint, slow background
+light is decorative. **Pause motion** freezes these effects while status and
+readable previews continue. Reduced motion starts with static, neutral depth.
 
 Phones start with collapsed project roots. Tap into projects and workspaces,
 use Back to return, and tap an agent for details. The header follows the current

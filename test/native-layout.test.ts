@@ -89,6 +89,13 @@ describe("native spatial ownership graph", () => {
     const expanded = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360, { groups: new Map([[group.id, "expanded"]]) });
     expect(expanded.nodes.some(node => node.kind === "completed-group")).toBe(false);
     expect(expanded.nodes.filter(node => node.kind === "provider-subagent")).toHaveLength(18); valid(expanded);
+    const parent = expanded.nodes.find(node => node.id === "a0")!;
+    expect(parent.controlBounds!.height).toBeGreaterThanOrEqual(44);
+    expect(parent.controlBounds!.width).toBeGreaterThanOrEqual(44);
+    expect(rectsOverlap(parent.controlBounds!, parent.labelBounds!)).toBe(false);
+    expect(rectsOverlap(parent.controlBounds!, parent.body)).toBe(false);
+    for (const edge of expanded.edges) expect(edge.points.slice(1).some((point, index) =>
+      segmentIntersectsRect(edge.points[index]!, point, parent.controlBounds!))).toBe(false);
   });
   it("preserves actual ownership, including unknown workspaces, orphans and cycles", () => {
     const model = fixture();

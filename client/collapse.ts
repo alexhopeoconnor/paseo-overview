@@ -25,6 +25,10 @@ export function inactiveGroupId(parentId: string): string {
   return `overview:inactive:${encodeURIComponent(parentId)}`;
 }
 
+export function collapseLabel(count: number): string {
+  return `Collapse ${count}`;
+}
+
 export function quietAgent(node: OverviewNode): boolean {
   // A cached quiet state stays geometrically quiet during a passive refresh.
   // Status/coverage presentation still identifies its freshness separately.

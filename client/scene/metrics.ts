@@ -1,6 +1,7 @@
 import type { Rect } from "../geometry";
 import { nodeAppearance } from "../appearance";
 import type { AgentRole } from "../identity";
+import { collapseLabel } from "../collapse";
 
 export type LayoutNodeKind = "project" | "workspace" | "agent" | "provider-subagent" | "completed-group";
 
@@ -19,6 +20,14 @@ export const graphMetrics = {
 } as const;
 
 export interface NodeFootprint { body: Rect; bounds: Rect; labelBounds?: Rect }
+
+export const collapseControlFont = "600 11px system-ui, sans-serif";
+export interface CollapseControlMetrics { width: number; height: number }
+
+/** Browser layout supplies actual text measurement; headless geometry uses a conservative fallback. */
+export function collapseControlMetrics(count: number, measureText: (text: string) => number = text => text.length * 7): CollapseControlMetrics {
+  return { width: Math.ceil(measureText(collapseLabel(count))) + 18, height: 28 };
+}
 
 export function nodeFootprint(kind: LayoutNodeKind, role?: AgentRole): NodeFootprint {
   if (kind === "project") {

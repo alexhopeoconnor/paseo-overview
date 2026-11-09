@@ -14,9 +14,10 @@ export interface OverviewHeaderProps {
   onBack(): void;
   onAllProjects(): void;
   onMotion(): void;
+  fullscreen?: { active: boolean; toggle(): void };
 }
 
-export function OverviewHeader({ model, presentation, hostLabel, theme, compact, onBack, onAllProjects, onMotion }: OverviewHeaderProps) {
+export function OverviewHeader({ model, presentation, hostLabel, theme, compact, onBack, onAllProjects, onMotion, fullscreen }: OverviewHeaderProps) {
   const { scope, motion } = presentation;
   const nodes = scopedNodes(model, scope);
   const current = nodes.filter(node => !node.freshness || node.freshness === "current");
@@ -50,6 +51,9 @@ export function OverviewHeader({ model, presentation, hostLabel, theme, compact,
       <Pressable testID="overview-motion" accessibilityRole="button" accessibilityLabel={motion ? "Pause animation" : "Resume animation"} accessibilityState={{ selected: !motion }} onPress={onMotion} style={[styles.control, { borderRadius: 12, backgroundColor: theme.surface }]}>
         <Text style={{ color: theme.muted, fontSize: compact ? 18 : 12 }}>{compact ? motion ? "Ⅱ" : "▷" : motion ? "Pause motion" : "Resume motion"}</Text>
       </Pressable>
+      {fullscreen ? <Pressable testID="overview-fullscreen" accessibilityRole="button" accessibilityLabel={fullscreen.active ? "Exit fullscreen" : "Fullscreen graph"} onPress={fullscreen.toggle} style={[styles.control, { borderRadius: 12, backgroundColor: theme.surface }]}>
+        <Text style={{ color: theme.muted, fontSize: 12 }}>{fullscreen.active ? "Exit fullscreen" : "Fullscreen graph"}</Text>
+      </Pressable> : null}
     </View>
     <View style={styles.statusRow}>
       <Text style={[styles.status, { color: working ? theme.working : theme.muted }]}>● {working} working</Text>

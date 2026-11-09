@@ -9,6 +9,13 @@ export interface FloatingCardPositioner {
   dispose(): void;
 }
 
+export interface OverviewFullscreen {
+  readonly supported: boolean;
+  enter(): Promise<void>;
+  exit(): Promise<void>;
+  dispose(): void;
+}
+
 /** Deliberately free of DOM and Three.js types; native can import these contracts. */
 export interface OverviewTheme {
   background: string;

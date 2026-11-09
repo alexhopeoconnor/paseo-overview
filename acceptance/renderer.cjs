@@ -79,7 +79,10 @@ function checkRepresentation(nodes) {
     for (const id of group.members) assert.equal(await node(page, id).count(), 1);
     sameGeometry(background, backgroundGeometry(await inspect(page)));
     await page.screenshot({ path: `${output}/desktop-expanded.png` });
-    await page.locator(`[data-overview-collapse="${group.id}"]`).click();
+    const collapse = page.locator(`[data-overview-collapse="${group.id}"]`);
+    assert.equal(await collapse.innerText(), `Collapse ${group.members.length}`);
+    assert.equal(await collapse.evaluate(button => button.scrollWidth <= button.clientWidth), true, 'Measured control fits its full label');
+    await collapse.click();
     await page.waitForTimeout(100);
     assert.equal(await node(page, group.id).count(), 1);
     sameGeometry(background, backgroundGeometry(await inspect(page)));
@@ -132,6 +135,64 @@ function checkRepresentation(nodes) {
     await page.screenshot({ path: `${output}/desktop-compact.png` });
     await page.evaluate(() => window.overviewTest.dark());
     await page.screenshot({ path: `${output}/desktop-dark.png` });
+
+    // Exercise real scale transforms and pulse rendering together, without debug hooks in the product.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.setViewportSize({ width: 1516, height: 1220 });
+    await page.mouse.move(4, 4);
+    await page.evaluate(() => window.overviewTest.depthFixture());
+    await page.waitForTimeout(150);
+    const depthBefore = await inspect(page);
+    const graphBefore = (await page.evaluate(() => window.overviewTest.telemetry())).graphs;
+    await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.resetTelemetry(); window.overviewTest.burst(); });
+    await page.waitForTimeout(160);
+    assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).pulseUpdates >= 2, 'Activity depth preserves real travelling pulse updates');
+    await page.waitForTimeout(1800);
+    const depthAfter = await inspect(page);
+    assert.ok(depthAfter.find(item => item.id === 'p0').box.width > depthBefore.find(item => item.id === 'p0').box.width * 1.01, 'Busy project becomes modestly larger');
+    assert.ok(depthAfter.find(item => item.id === 'p1').box.width < depthBefore.find(item => item.id === 'p1').box.width * 0.99, 'Quiet project gently recedes');
+    const graphAfter = (await page.evaluate(() => window.overviewTest.telemetry())).graphs;
+    for (const before of graphBefore) {
+      const after = graphAfter.find(item => item.id === before.id);
+      assert.ok(Math.abs(after.x - before.x) < 0.1 && Math.abs(after.y - before.y) < 0.1, 'Packed graph centres stay fixed');
+      assert.ok(Math.abs(after.width - before.width) <= 16.01 && Math.abs(after.height - before.height) <= 16.01, 'Depth remains within eight pixels per side');
+    }
+    const inspecting = await node(page, 'depth-a').boundingBox();
+    await page.mouse.move(inspecting.x + inspecting.width / 2, inspecting.y + inspecting.height / 2);
+    await page.waitForTimeout(75);
+    const heldDepth = (await inspect(page)).filter(item => ['p0', 'depth-a'].includes(item.id));
+    await page.evaluate(() => window.overviewTest.burst());
+    await page.waitForTimeout(300);
+    sameGeometry(heldDepth, (await inspect(page)).filter(item => ['p0', 'depth-a'].includes(item.id)));
+    await node(page, 'depth-a').click();
+    await page.mouse.move(4, 4);
+    await page.waitForTimeout(250);
+    sameGeometry(heldDepth, (await inspect(page)).filter(item => ['p0', 'depth-a'].includes(item.id)));
+
+    // An empty connected scene isolates ambient scheduling from working heartbeats.
+    await page.evaluate(() => window.overviewTest.empty());
+    await page.waitForTimeout(150);
+    const ambientPixel = await page.evaluate(() => window.overviewTest.ambientPixel());
+    assert.ok(ambientPixel[3] > 0, 'Ambient planes contribute actual visible pixels with the orthographic camera');
+    await page.evaluate(() => window.overviewTest.resetTelemetry());
+    const ambientBefore = (await page.evaluate(() => window.overviewTest.telemetry())).ambient;
+    await page.waitForTimeout(500);
+    const ambientAfter = await page.evaluate(() => window.overviewTest.telemetry());
+    assert.ok(ambientAfter.frames >= 3 && ambientAfter.frames <= 12, `Ambient-only rendering stays at a low cadence (${ambientAfter.frames} frames)`);
+    assert.notDeepEqual(ambientAfter.ambient, ambientBefore);
+    for (const mode of ['pause', 'reduce', 'hidden', 'disconnected']) {
+      if (mode === 'pause') await page.evaluate(() => window.overviewTest.motion(false));
+      if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
+      if (mode === 'hidden') { await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.evaluate(() => window.overviewTest.visibility(false)); }
+      if (mode === 'disconnected') await page.evaluate(() => { window.overviewTest.visibility(true); window.overviewTest.connection('disconnected'); });
+      await page.waitForTimeout(100);
+      await page.evaluate(() => window.overviewTest.resetTelemetry());
+      await page.waitForTimeout(250);
+      assert.equal((await page.evaluate(() => window.overviewTest.telemetry())).frames, 0, `${mode} stops the ambient render loop`);
+    }
+    await page.evaluate(() => window.overviewTest.connection('connected'));
+    await page.waitForTimeout(150);
+    assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
     for (let index = 0; index < 4; index++) {
       await page.evaluate(() => window.overviewTest.dispose());
       assert.equal(await page.locator('#graph canvas,#graph button').count(), 0);
@@ -141,8 +202,8 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, themes, cleanup' }));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientPixel, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible ambient pixels, idle/paused/hidden/disconnected scheduler, themes, cleanup' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/renderer-failure.png` }).catch(() => {});

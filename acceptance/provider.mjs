@@ -21,6 +21,16 @@ new AgentSideConnection(connection => ({
   async prompt({ sessionId, prompt }) {
     record("prompt");
     const long = prompt?.some(item => item.type === "text" && item.text.includes("long preview"));
+    const fragmented = prompt?.some(item => item.type === "text" && item.text.includes("fragmented preview"));
+    if (fragmented) {
+      for (const text of ["The ", "tests have ", "passed. I am checking ", "the next operation. "]) {
+        await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+        await delay(250);
+      }
+      await delay(1400);
+      await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } } });
+      return { stopReason: "end_turn" };
+    }
     const text = long ? "Bounded Overview preview. ".repeat(1800) + "ACCEPTANCE_RESPONSE_END" : "Checking the Overview observation stream. ";
     await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
     await delay(1800);

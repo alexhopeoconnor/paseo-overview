@@ -7,7 +7,15 @@ import { boundaryPoint, type Rect, type Point } from "../geometry";
 import { agentIdentity } from "../identity";
 import { identityAccent, nodeAppearance, selectionColour } from "../appearance";
 import { placeNearby, type NearbyPlacement } from "../placement";
-import { graphMetrics } from "./metrics";
+import { collapseControlFont, graphMetrics } from "./metrics";
+import { collapseLabel } from "../collapse";
+
+export function createCollapseTextMeasure(): (text: string) => number {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return text => text.length * 7;
+  context.font = collapseControlFont;
+  return text => context.measureText(text).width;
+}
 
 interface Element {
   button: HTMLButtonElement; glyph: HTMLSpanElement; avatar: HTMLSpanElement; image: HTMLImageElement; activity: HTMLSpanElement;
@@ -69,14 +77,14 @@ export class GraphOverlay {
       let control = this.collapseControls.get(id);
       if (!control) {
         const button = document.createElement("button"); button.type = "button";
-        css(button, { position: "absolute", width: "36px", height: "24px", padding: "1px 5px", borderRadius: "8px", font: "inherit", fontSize: "11px", fontWeight: "600", pointerEvents: "auto", cursor: "pointer", zIndex: "8", boxSizing: "border-box", transformOrigin: "top left" });
+        css(button, { position: "absolute", padding: "2px 8px", borderRadius: "8px", font: collapseControlFont, whiteSpace: "nowrap", pointerEvents: "auto", cursor: "pointer", zIndex: "8", boxSizing: "border-box", transformOrigin: "top left" });
         button.dataset.overviewCollapse = id;
         button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.collapse(id); });
         this.element.appendChild(button);
         control = { button, parentId: group.parentId, count: group.memberIds.length }; this.collapseControls.set(id, control);
       }
       control.parentId = group.parentId; control.count = group.memberIds.length;
-      control.button.textContent = `−${control.count}`;
+      control.button.textContent = collapseLabel(control.count);
       control.button.setAttribute("aria-label", `Collapse ${control.count} inactive subagents`);
       control.button.setAttribute("aria-expanded", "true");
     }
