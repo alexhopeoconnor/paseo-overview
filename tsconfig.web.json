@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "lib": ["ES2023", "DOM", "DOM.Iterable"] },
-  "include": ["client/web.ts", "client/scene/**/*.ts", "test/browser/**/*.ts"],
+  "include": ["client/web.ts", "client/scene/**/*.ts", "test/placement.test.ts"],
   "exclude": ["node_modules"]
 }
