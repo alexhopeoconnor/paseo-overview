@@ -28,6 +28,8 @@ new AgentSideConnection(connection => ({
         await delay(250);
       }
       await delay(1400);
+      await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "\n---\n" } } });
+      await delay(1400);
       await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } } });
       return { stopReason: "end_turn" };
     }

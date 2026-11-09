@@ -361,6 +361,13 @@ function copyProvisionalSource(destination) {
     await waitFor(async () => await page.locator('[data-overview-bubble]').filter({ hasText: /The tests have passed|I am checking the next operation/ }).count() > 0, "readable additive streaming preview");
     const fragmentedPreview = await page.locator('[data-overview-bubble]').filter({ hasText: /The tests have passed|I am checking the next operation/ }).first().innerText();
     assert.ok(!/^Assistant response\s+\S+\s*$/.test(fragmentedPreview), "Token fragments do not replace readable text");
+    // A formatting-only line follows the prose while the turn is still running.
+    // Inspect the intermediate rendered bubbles, not just the terminal excerpt.
+    for (let sample = 0; sample < 16; sample++) {
+      await delay(150);
+      const previews = await page.locator('[data-overview-bubble]').allInnerTexts();
+      assert.ok(previews.every(text => !/Assistant update\s+---\s*$/.test(text)), "Markdown separators do not replace readable previews");
+    }
     await fragmentedPrompt;
     await delay(2800);
     const overviewRequests=browserRequests.slice(requestsBeforeFixtures);

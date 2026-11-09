@@ -75,6 +75,42 @@ describe("assistant previews", () => {
     expect(emit.mock.lastCall?.[2].detail).toBe("const value = 3.14; // public code still");
   });
 
+  it("keeps the last useful sentence when complete formatting lines follow it", async () => {
+    const { append, emit } = setup();
+    append("The checks have passed.\n---\n* * *\n___\n```typescript\n");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(emit).toHaveBeenCalledExactlyOnceWith("node", "message", {
+      title: "Assistant update", detail: "The checks have passed.", truncated: false,
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1); // No repeated preview deadline for consumed markers.
+  });
+
+  it("consumes formatting-only lines without a preview or a recurring deadline", async () => {
+    const { append, emit, buffer } = setup();
+    append("---\n```typescript\n~~~\n");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(emit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    append("const value = 3;\n```\n");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(emit.mock.lastCall?.[2].detail).toBe("const value = 3;");
+    expect(buffer.finish("node")?.detail).toBe("const value = 3;");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["---", "```typescript", "~~~"])("does not replace a useful final preview with %s", async marker => {
+    const { append, emit, buffer } = setup();
+    append("The final result is ready.");
+    await vi.advanceTimersByTimeAsync(800);
+    append(`\n${marker}`);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(buffer.finish("node")?.detail).toBe("The final result is ready.");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("keeps the deadline during continuous punctuation-free output and bounds visible excerpts", async () => {
     const { append, emit } = setup();
     for (let index = 0; index < 20; index++) {

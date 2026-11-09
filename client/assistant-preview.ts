@@ -15,6 +15,12 @@ interface Stream {
   shownAt?: number;
 }
 
+/** Standalone separators and fence markers are structure, not useful activity. */
+function formattingOnly(value: string): boolean {
+  const line = value.trim();
+  return /^([-*_])(?:\s*\1){2,}$/.test(line) || /^(?:`{3,}[^`\n]*|~{3,}[^~\n]*)$/.test(line);
+}
+
 /** The buffer contains raw deltas. Formatting happens only after choosing a boundary. */
 function latestExcerpt(stream: Stream, terminal: boolean): EventPreview | undefined {
   let start = 0, completed = "", consumed = 0;
@@ -25,20 +31,34 @@ function latestExcerpt(stream: Stream, terminal: boolean): EventPreview | undefi
   for (const match of stream.pending.matchAll(boundaries)) {
     const end = match.index! + match[0].length;
     const candidate = stream.pending.slice(start, end);
-    if (candidate.trim()) { completed = candidate; consumed = end; }
+    if (candidate.trim() && !formattingOnly(candidate)) completed = candidate;
+    // Consume ignored complete lines too, while retaining the last useful one.
+    consumed = end;
     start = end;
   }
   const tail = stream.pending.slice(consumed);
-  const ended = /[.!?。！？]["'’”)）\]]*\s*$/.test(tail);
-  let chosen = (terminal && tail.trim().length > 0) || ended ? tail : completed;
+  const usefulTail = tail.trim().length > 0 && !formattingOnly(tail);
+  const ended = usefulTail && /[.!?。！？]["'’”)）\]]*\s*$/.test(tail);
+  const clipped = stream.clipped;
+  // Make progress even when the buffer contains only ignored structure. Keep
+  // an unfinished tail intact, including whitespace and split words.
+  if (ended) {
+    stream.pending = "";
+    stream.clipped = false;
+  } else if (consumed) {
+    stream.pending = tail;
+    stream.clipped = false;
+  }
+  let chosen = (terminal && usefulTail) || ended ? tail : completed;
   let openChunk = false;
   if (!chosen && !terminal) {
+    if (!usefulTail) return undefined;
     // A timer is not evidence that the last word has finished. Keep tiny tails
     // behind the useful previous preview until more words or a terminal arrive.
-    const lastSpace = stream.pending.search(/\s\S*$/);
-    chosen = lastSpace >= 0 ? stream.pending.slice(0, lastSpace) : "";
+    const lastSpace = tail.search(/\s\S*$/);
+    chosen = lastSpace >= 0 ? tail.slice(0, lastSpace) : "";
     if (previewText(chosen).text.length < 24) {
-      const unspaced = stream.pending.trim();
+      const unspaced = tail.trim();
       if (/\s/.test(unspaced) || fallbackGraphemes(unspaced).length < 64) return undefined;
       // CJK and long code identifiers need a bounded fallback too. An ellipsis
       // makes the unbroken, still-streaming chunk explicit instead of inventing
@@ -46,7 +66,7 @@ function latestExcerpt(stream: Stream, terminal: boolean): EventPreview | undefi
       chosen = unspaced; openChunk = true;
     }
   }
-  if (!chosen) chosen = stream.pending;
+  if (!chosen) return undefined;
   const compact = previewText(chosen.replace(/[\uD800-\uDBFF]$/, ""), BUFFER_LIMIT);
   if (!compact.text) return undefined;
   const graphemes = fallbackGraphemes(compact.text);
@@ -57,20 +77,11 @@ function latestExcerpt(stream: Stream, terminal: boolean): EventPreview | undefi
     const space = detail.search(/\s/);
     if (space >= 0 && space < 80) detail = detail.slice(space + 1);
   }
-  const omitted = stream.clipped || shortened || compact.truncated;
+  const omitted = clipped || shortened || compact.truncated;
   if (omitted) detail = previewText(`… ${detail}`, 240).text;
   if (openChunk) {
     detail = previewText(detail, 239).text;
     if (!detail.endsWith("…")) detail += "…";
-  }
-  // Keep an unfinished tail intact, including whitespace and split words. A
-  // deadline preview must not turn later "rld" into a new message after "wo".
-  if (ended) {
-    stream.pending = "";
-    stream.clipped = false;
-  } else if (consumed) {
-    stream.pending = tail;
-    stream.clipped = false;
   }
   return { title: "Assistant update", detail, truncated: omitted || openChunk };
 }
