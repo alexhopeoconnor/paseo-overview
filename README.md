@@ -1,6 +1,7 @@
 # Paseo Overview
 
-> Developed and supported for the workstation fork. Build and install locally from reviewed source.
+> Developed and supported for the [workstation fork](https://github.com/alexhopeoconnor/paseo/tree/workstation).
+> Build and install locally from reviewed source. Binary release assets are not published.
 
 A read-only view of project, workspace and agent activity, contributed as a separate
 **Overview** page in Paseo. The existing workspace, chat and editor surfaces keep
@@ -108,6 +109,16 @@ host provides these additions. The managed deployment lock records exact tested
 host distribution, source revision and package hash. Missing APIs remain visible
 as coverage errors; there is no fallback to an operation that loads an agent.
 
+## Installation
+
+Follow the fork's
+[pinned local installation instructions](https://github.com/alexhopeoconnor/paseo/tree/workstation#optional-workstation-plugins).
+They select an exact source commit, install locked production dependencies in Docker
+and register the prepared directory with `paseo plugin add /absolute/plugin/directory`.
+A direct Git-source installation does not prepare those dependencies. Keep the
+registered directory in place and use a separate directory for each reviewed update.
+No private infrastructure repository or shared artifact registry is required.
+
 ## Development and packaging
 
 Three.js, D3 hierarchy and Floating UI DOM are locked production dependencies. Paseo's
@@ -125,7 +136,7 @@ depth and once-only pulse arrivals. Activity and icon updates preserve packed
 positions; activity depth changes only presentation. Structural changes may
 expand an affected branch.
 
-Managed workstation packaging uses lock schema 5 and recipe 1: signed source,
+An optional managed workstation installation uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.
 Build, deploy, status and rollback use the existing `paseo-plugin.sh --plugin
 overview` workflow. The plugin has no required persisted settings or companion.
