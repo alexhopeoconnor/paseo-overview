@@ -1,5 +1,7 @@
 # Paseo Overview
 
+> Developed and supported for the workstation fork. Build and install locally from reviewed source.
+
 A read-only view of project, workspace and agent activity, contributed as a separate
 **Overview** page in Paseo. The existing workspace, chat and editor surfaces keep
 their normal behaviour.
