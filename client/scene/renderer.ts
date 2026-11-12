@@ -588,6 +588,9 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   return {
     update(next) {
       if (disposed || failed) return;
+      // Offline time is not visible animation time. Reconnection must resume
+      // the retained grid phase without catching up the unscheduled interval.
+      if (next.connection !== model.connection) lastTime = 0;
       model = next;
       const nodeIds = new Set(model.nodes.map(node => node.id));
       activity.prune(nodeIds); bubbles.prune(nodeIds);

@@ -23,7 +23,7 @@ const percentile = (values, fraction) => {
       response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(script); return;
     }
     response.writeHead(200, { 'content-type': 'text/html' });
-    response.end('<!doctype html><html><style>*{box-sizing:border-box}html,body,#graph{margin:0;width:100%;height:100%;font-family:Arial,sans-serif;background:#f7f8fb}#graph{position:relative}</style><main id="graph"></main><script src="/fixture.js"></script></html>');
+    response.end('<!doctype html><html><style>*{box-sizing:border-box}html,body,#graph{margin:0;width:100%;height:100%;font-family:Arial,sans-serif}body{background:#f7f8fb}#graph{position:relative}</style><main id="graph"></main><script src="/fixture.js"></script></html>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let browser, context;

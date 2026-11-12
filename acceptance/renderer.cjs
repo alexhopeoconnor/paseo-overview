@@ -236,7 +236,17 @@ function checkRepresentation(nodes) {
       await page.waitForTimeout(250);
       assert.equal((await page.evaluate(() => window.overviewTest.telemetry())).frames, 0, `${mode} stops the ambient render loop`);
     }
-    await page.evaluate(() => window.overviewTest.connection('connected'));
+    await page.waitForTimeout(500);
+    const reconnectClock = await page.evaluate(async () => {
+      const before = window.overviewTest.telemetry().ambient[0];
+      window.overviewTest.connection('connected');
+      // The renderer's first requested frame runs before this callback, so the
+      // assertion measures resumption without including later visible frames.
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      return { before, after: window.overviewTest.telemetry().ambient[0] };
+    });
+    assert.ok(reconnectClock.after > reconnectClock.before && reconnectClock.after - reconnectClock.before <= 0.05,
+      `Reconnect advances only a fresh frame, not offline time: ${JSON.stringify(reconnectClock)}`);
     await page.waitForTimeout(150);
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
     await page.evaluate(() => window.overviewTest.loadNative());
@@ -262,7 +272,7 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, illuminationGain, resources, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
     console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {
