@@ -6,13 +6,18 @@ export interface CollapseOptions {
   protectedIds?: ReadonlySet<string>;
 }
 
-export interface InactiveGroup {
+export interface InactiveStatusCounts {
+  finished: number;
+  idle: number;
+  closed: number;
+  canceled: number;
+}
+
+export interface InactiveGroup extends InactiveStatusCounts {
   id: string;
   parentId: string;
   memberIds: readonly string[];
   expanded: boolean;
-  finished: number;
-  idle: number;
 }
 
 export interface InactiveGroups {
@@ -29,10 +34,27 @@ export function collapseLabel(count: number): string {
   return `Collapse ${count}`;
 }
 
+export function inactiveStatusCounts(nodes: readonly OverviewNode[]): InactiveStatusCounts {
+  const counts: InactiveStatusCounts = { finished: 0, idle: 0, closed: 0, canceled: 0 };
+  for (const node of nodes) {
+    if (node.state === "finished" || node.state === "idle" || node.state === "closed" || node.state === "canceled") {
+      counts[node.state]++;
+    }
+  }
+  return counts;
+}
+
+export function inactiveGroupSummary(counts: InactiveStatusCounts): string {
+  return (["finished", "idle", "closed", "canceled"] as const)
+    .filter(state => counts[state] > 0)
+    .map(state => `${counts[state]} ${state}`)
+    .join(" · ");
+}
+
 export function quietAgent(node: OverviewNode): boolean {
   // A cached quiet state stays geometrically quiet during a passive refresh.
   // Status/coverage presentation still identifies its freshness separately.
-  return (node.state === "finished" || node.state === "idle") &&
+  return (node.state === "finished" || node.state === "idle" || node.state === "closed" || node.state === "canceled") &&
     !node.attention && !hasError(node) && !needsInput(node);
 }
 
@@ -83,8 +105,7 @@ export function inactiveGroups(
       const id = inactiveGroupId(parent);
       expanded = options.groups?.get(id) === "expanded";
       groups.push({ id, parentId: parent, memberIds: members, expanded,
-        finished: members.filter(id => agents.get(id)!.state === "finished").length,
-        idle: members.filter(id => agents.get(id)!.state === "idle").length });
+        ...inactiveStatusCounts(members.map(id => agents.get(id)!)) });
       if (!expanded) for (const member of members) hidden.set(member, id);
     }
     for (const child of descendants) {

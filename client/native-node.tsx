@@ -7,7 +7,7 @@ import { identityAccent, nodeAppearance, selectionColour } from "./appearance";
 import { statusColour, statusLabel } from "./status";
 import type { NativeGraphNode, NativeSummary } from "./native-layout";
 import { useNativeHeartbeat } from "./native-motion";
-import { collapseLabel } from "./collapse";
+import { collapseLabel, inactiveGroupSummary } from "./collapse";
 
 function ProjectIcon({ url, name, theme }: { url?: string; name: string; theme: OverviewTheme }) {
   const [failedUrl, setFailedUrl] = useState<string>();
@@ -40,7 +40,7 @@ export function NativeNode({ node, summary, agent, theme, animated, delegated, s
   const testKind = root ? node.kind : workspace ? "workspace" : group ? "completed" : "agent";
   const action = root ? "Show workspaces" : workspace ? "Show agents" : group ? "Expand inactive subagents" : "Show agent details";
   const groupStatus = group && node.inactiveGroup
-    ? [node.inactiveGroup.finished ? `${node.inactiveGroup.finished} finished` : "", node.inactiveGroup.idle ? `${node.inactiveGroup.idle} idle` : ""].filter(Boolean).join(" · ")
+    ? inactiveGroupSummary(node.inactiveGroup)
     : summaryText(summary);
   const coverage = agent?.rosterAvailability === "not_resident" ? "Native subagents unavailable while unloaded." : agent?.rosterAvailability === "unknown" ? "Native subagent coverage unavailable." : "";
   const label = node.labelBounds;

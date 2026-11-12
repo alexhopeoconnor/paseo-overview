@@ -38,8 +38,8 @@ Quiet subordinate branches appear as **N inactive**. Click the count to expand;
 use **Collapse N** on the owner to fold them again. Preferences survive focus,
 tab suspension and reopening Overview during the same plugin session. Working,
 waiting, failed, unknown and attention-bearing agents remain visible, as do
-selected nodes and delegation endpoints. Groups explain their finished/idle
-composition and preserve original membership and activity totals.
+selected nodes and delegation endpoints. Groups explain their finished, idle,
+closed and canceled composition and preserve original membership and activity totals.
 
 Fresh observed events produce bounded light trails along ownership connections.
 Their arrival highlights each ancestor once. A quiet heartbeat also indicates
@@ -163,8 +163,9 @@ Artifact integrity and visual acceptance are verified separately.
 
 Reusable compiled browser, native-component and exact-package checks live in
 [`acceptance/`](acceptance/README.md). Run them in the pinned build environment;
-fixtures are sanitised and evidence stays outside Git. A native JavaScript or
-Hermes check does not replace acceptance on an actual paired phone.
+fixtures are sanitised and evidence stays outside Git. Native JavaScript and Hermes checks guard the browser/native boundary. Repeat
+physical-phone acceptance when native behaviour changes or a native regression
+is found; browser-only rendering changes do not add an unrelated device gate.
 
 ## Source layout
 

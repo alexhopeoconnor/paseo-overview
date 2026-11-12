@@ -134,6 +134,7 @@ function checkRepresentation(nodes) {
     checkRepresentation(await inspect(page));
     await page.screenshot({ path: `${output}/desktop-compact.png` });
     await page.evaluate(() => window.overviewTest.dark());
+    await page.waitForTimeout(100);
     await page.screenshot({ path: `${output}/desktop-dark.png` });
 
     // Exercise real scale transforms and pulse rendering together, without debug hooks in the product.
@@ -144,9 +145,20 @@ function checkRepresentation(nodes) {
     await page.waitForTimeout(150);
     const depthBefore = await inspect(page);
     const graphBefore = (await page.evaluate(() => window.overviewTest.telemetry())).graphs;
+    const regions = graphBefore.slice(0, 2).map(graph => ({ x: graph.x - 45, y: graph.y - 45, width: graph.width + 90, height: graph.height + 90 }));
+    const beforeIllumination = await page.evaluate(regions => window.overviewTest.ambientEvidence('local', 3, regions), regions);
     await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.resetTelemetry(); window.overviewTest.burst(); });
     await page.waitForTimeout(160);
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).pulseUpdates >= 2, 'Activity depth preserves real travelling pulse updates');
+    const pulseTheme = await page.evaluate(() => {
+      const before = window.overviewTest.pulseEvidence();
+      window.overviewTest.theme(false);
+      return { before, after: window.overviewTest.pulseEvidence() };
+    });
+    assert.ok(pulseTheme.before.length > 0, 'Theme acceptance observes an existing fibre journey');
+    assert.deepEqual(pulseTheme.after.map(item => item.id), pulseTheme.before.map(item => item.id), 'Theme change preserves existing journeys');
+    assert.notDeepEqual(pulseTheme.after.map(item => item.colours), pulseTheme.before.map(item => item.colours), 'Theme updates the materials of pulses already in flight');
+    await page.evaluate(() => window.overviewTest.theme(true));
     await page.waitForTimeout(1800);
     const depthAfter = await inspect(page);
     assert.ok(depthAfter.find(item => item.id === 'p0').box.width > depthBefore.find(item => item.id === 'p0').box.width * 1.01, 'Busy project becomes modestly larger');
@@ -164,6 +176,9 @@ function checkRepresentation(nodes) {
     const gridSummary = await page.evaluate(() => window.overviewTest.gridFieldSummary());
     assert.ok(localGrid.busy.intensity > localGrid.quiet.intensity, `Busy project receives stronger local grid illumination than a quiet project: ${JSON.stringify({ localGrid, gridSummary, graphAfter })}`);
     assert.ok(localGrid.busy.warp <= 12 && localGrid.quiet.warp <= 12, 'Displayed influence warp stays bounded');
+    const afterIllumination = await page.evaluate(regions => window.overviewTest.ambientEvidence('local', 3, regions), regions);
+    const illuminationGain = afterIllumination.local.map((region, index) => region.meanAlpha - beforeIllumination.local[index].meanAlpha);
+    assert.ok(illuminationGain[0] > 0.05 && illuminationGain[0] > illuminationGain[1], `Rendered grid brightens locally around real activity: ${JSON.stringify(illuminationGain)}`);
     const inspecting = await node(page, 'depth-a').boundingBox();
     await page.mouse.move(inspecting.x + inspecting.width / 2, inspecting.y + inspecting.height / 2);
     await page.waitForTimeout(75);
@@ -176,10 +191,20 @@ function checkRepresentation(nodes) {
     await page.waitForTimeout(250);
     sameGeometry(heldDepth, (await inspect(page)).filter(item => ['p0', 'depth-a'].includes(item.id)));
 
+    // Pause freezes influence values even when fresh work arrives; observations still update.
+    await page.evaluate(() => window.overviewTest.motion(false));
+    await page.waitForTimeout(100);
+    const frozenField = await page.evaluate(() => window.overviewTest.fieldEvidence());
+    await page.evaluate(() => window.overviewTest.burst());
+    await page.waitForTimeout(200);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.fieldEvidence()), frozenField, 'Fresh activity does not move the paused grid');
+    await page.evaluate(() => window.overviewTest.motion(true));
+
     // An empty connected scene isolates ambient scheduling from working heartbeats.
     await page.evaluate(() => window.overviewTest.empty());
     await page.waitForTimeout(150);
-    const ambientEvidence = await page.evaluate(() => window.overviewTest.ambientEvidence());
+    const ambientEvidence = await page.evaluate(() => window.overviewTest.ambientEvidence('moving'));
+    const fieldBeforeIdle = await page.evaluate(() => window.overviewTest.fieldEvidence());
     assert.ok(ambientEvidence.visiblePixels > 800, `Grid has meaningful visible structure (${JSON.stringify(ambientEvidence)})`);
     assert.ok(ambientEvidence.meanAlpha > 10, 'Grid lines remain visibly separated from the transparent canvas');
     await page.evaluate(() => window.overviewTest.resetTelemetry());
@@ -189,6 +214,18 @@ function checkRepresentation(nodes) {
     assert.ok(ambientAfter.frames >= 5 && ambientAfter.frames <= 18, `Ambient-only rendering stays at a low cadence (${ambientAfter.frames} frames)`);
     assert.notDeepEqual(ambientAfter.ambient, ambientBefore);
     assert.equal(ambientAfter.layoutBuilds, 0, 'Ambient-only ticks do not rebuild layout');
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.fieldEvidence()), fieldBeforeIdle, 'Unchanged ambient-only frames reuse GPU field attributes');
+    const renderedMovement = await page.evaluate(() => window.overviewTest.ambientEvidence('moving'));
+    assert.ok(renderedMovement.changedPixels > 100, `Actual grid pixels move, independently of the time uniform: ${renderedMovement.changedPixels}`);
+    await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.theme(false); });
+    await page.waitForTimeout(100);
+    const lightGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
+    await page.evaluate(() => window.overviewTest.theme(true));
+    await page.waitForTimeout(100);
+    const darkGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
+    assert.ok(lightGrid.visiblePixels > 800 && darkGrid.visiblePixels > 800, 'Both themes render visible grid structure');
+    assert.ok(darkGrid.changedPixels > 800 && Math.abs(lightGrid.meanColour - darkGrid.meanColour) > 1, 'Effective theme changes rendered grid colours');
+    await page.evaluate(() => window.overviewTest.motion(true));
     for (const mode of ['pause', 'reduce', 'hidden', 'disconnected']) {
       if (mode === 'pause') await page.evaluate(() => window.overviewTest.motion(false));
       if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
@@ -204,20 +241,28 @@ function checkRepresentation(nodes) {
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
     await page.evaluate(() => window.overviewTest.loadNative());
     await page.waitForTimeout(100);
+    await page.evaluate(() => window.overviewTest.installShaderObserver());
     assert.equal(await page.evaluate(() => window.overviewTest.injectAmbientShaderFailure()), true, 'Acceptance can inject an ambient-only shader failure');
     await page.waitForTimeout(150);
     assert.equal(await page.evaluate(() => window.overviewTest.gridPresent()), false, 'Failed grid material is removed independently');
     assert.ok(await page.locator('[data-overview-kind="project"]').count() > 0, 'Foreground graph remains usable after a grid shader failure');
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.shaderObserverEvidence()), { restored: true, unrelatedErrors: 0 }, 'Background compilation restores the existing shader-error handler');
+    const resources = [];
     for (let index = 0; index < 4; index++) {
       await page.evaluate(() => window.overviewTest.dispose());
       assert.equal(await page.locator('#graph canvas,#graph button').count(), 0);
       await page.evaluate(() => window.overviewTest.recreate());
       await page.waitForTimeout(75);
       assert.equal(await page.locator('canvas').count(), 1);
+      resources.push(await page.evaluate(() => window.overviewTest.resourceEvidence()));
+    }
+    for (const memory of resources.slice(1)) {
+      assert.ok(memory.geometries <= resources[0].geometries + 2 && memory.textures <= resources[0].textures + 2 && memory.programs <= resources[0].programs + 1,
+        `Repeated renderer creation retains bounded GPU resources: ${JSON.stringify(resources)}`);
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, illuminationGain, resources, ambientFrames: ambientAfter.frames, errors }, null, 2));
     console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {

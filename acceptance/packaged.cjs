@@ -48,6 +48,38 @@ function copyProvisionalSource(destination) {
     fs.cpSync(path.join("/plugin-source/node_modules", name), path.join(destination, "node_modules", name), { recursive: true });
 }
 
+// Decode actual compositor screenshots in the isolated browser, avoiding a new PNG
+// dependency and any private product debug interface. The initial empty graph
+// isolates grid pixels from foreground heartbeat/pulse animation.
+async function packagedGridPixels(page, key) {
+  const screenshot = await page.getByTestId("overview-canvas-host").locator("canvas").screenshot();
+  return page.evaluate(async ({ encoded, key }) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${encoded}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width; canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const captures = window.overviewAcceptancePixels ??= new Map();
+    const previous = captures.get(key);
+    const frequencies = new Map();
+    for (let index = 0; index < pixels.length; index += 16) {
+      const rgb = `${pixels[index]},${pixels[index + 1]},${pixels[index + 2]}`;
+      frequencies.set(rgb, (frequencies.get(rgb) ?? 0) + 1);
+    }
+    const base = [...frequencies].sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number);
+    let structurePixels = 0, changedPixels = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (Math.max(Math.abs(pixels[index] - base[0]), Math.abs(pixels[index + 1] - base[1]), Math.abs(pixels[index + 2] - base[2])) > 4) structurePixels++;
+      if (previous?.length === pixels.length && Math.max(Math.abs(pixels[index] - previous[index]), Math.abs(pixels[index + 1] - previous[index + 1]), Math.abs(pixels[index + 2] - previous[index + 2])) > 3) changedPixels++;
+    }
+    captures.set(key, pixels);
+    return { width: canvas.width, height: canvas.height, base, structurePixels, changedPixels };
+  }, { encoded: screenshot.toString("base64"), key });
+}
+
 async function run() {
   const expectation = readExpectation(process.env);
   const packageFile = process.env.OVERVIEW_TEST_PACKAGE_FILE;
@@ -179,6 +211,29 @@ async function run() {
     await page.getByTestId("overview-canvas-host").locator("canvas").waitFor({ state: "visible" });
     await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 0, "empty initial project graph");
     await page.screenshot({ path: path.join(output, "empty.png") });
+    await delay(250);
+    const gridLight = await packagedGridPixels(page, "motion");
+    await delay(600);
+    const gridMoved = await packagedGridPixels(page, "motion");
+    assert.ok(gridLight.structurePixels > 800, "Compiled artifact renders visible grid structure in the empty graph");
+    assert.ok(gridMoved.changedPixels > 100, "Compiled artifact changes actual background pixels over time");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await delay(250);
+    const gridDark = await packagedGridPixels(page, "dark");
+    assert.ok(gridDark.structurePixels > 800, "Compiled artifact retains visible structure in dark theme");
+    assert.ok(Math.abs(gridDark.base.reduce((sum, value) => sum + value, 0) - gridLight.base.reduce((sum, value) => sum + value, 0)) > 90,
+      "Application theme changes reach the packaged graph surface");
+    await page.getByTestId("overview-motion").click();
+    await delay(100);
+    await packagedGridPixels(page, "paused");
+    await delay(350);
+    const gridPaused = await packagedGridPixels(page, "paused");
+    assert.ok(gridPaused.changedPixels <= 20, "Pausing motion freezes the compiled background");
+    await page.getByTestId("overview-motion").click();
+    await page.emulateMedia({ colorScheme: "light" });
+    await delay(100);
+    const packagedGrid = { light: gridLight, moved: gridMoved, dark: gridDark, paused: gridPaused };
+    await page.evaluate(() => { delete window.overviewAcceptancePixels; });
     console.log(`Packaged fixture ready at ${output}`);
     const requestsBeforeFixtures = browserRequests.length;
     const projectNames = ["Projects", "public", "private", "private-web", "private-infra", "private-dev", "public-dev"];
@@ -443,7 +498,7 @@ async function run() {
     }
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,expectation,runtimeVersion:status.version,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","compiled grid visible in both themes","compiled grid rendered pixel movement","compiled grid pause","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, provisional: !artifact }));
   } catch (error) {

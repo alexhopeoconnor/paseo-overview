@@ -35,22 +35,19 @@ varying vec2 vPatternCss;
 varying float vIntensity;
 varying float vQuiet;
 
-float gridLine(vec2 gridPosition, float halfWidthPx) {
+vec2 gridAxes(vec2 gridPosition, float halfWidthPx) {
   vec2 distanceToLine = abs(fract(gridPosition + 0.5) - 0.5);
   vec2 footprint = max(fwidth(gridPosition), vec2(0.0001));
   vec2 distancePx = distanceToLine / footprint;
-  float nearest = min(distancePx.x, distancePx.y);
-  return 1.0 - smoothstep(halfWidthPx - 0.5, halfWidthPx + 0.5, nearest);
+  // Derivative antialiasing handles each stroke. Fade entire compressed axes
+  // before neighbouring strokes become indistinguishable or shimmer at zoom.
+  vec2 densityFade = smoothstep(vec2(2.0), vec2(5.0), 1.0 / footprint);
+  return (1.0 - smoothstep(vec2(halfWidthPx - 0.5), vec2(halfWidthPx + 0.5), distancePx)) * densityFade;
 }
 
-float lineX(vec2 gridPosition, float halfWidthPx) {
-  float distancePx = abs(fract(gridPosition.x + 0.5) - 0.5) / max(fwidth(gridPosition.x), 0.0001);
-  return 1.0 - smoothstep(halfWidthPx - 0.5, halfWidthPx + 0.5, distancePx);
-}
-
-float lineY(vec2 gridPosition, float halfWidthPx) {
-  float distancePx = abs(fract(gridPosition.y + 0.5) - 0.5) / max(fwidth(gridPosition.y), 0.0001);
-  return 1.0 - smoothstep(halfWidthPx - 0.5, halfWidthPx + 0.5, distancePx);
+float gridLine(vec2 gridPosition, float halfWidthPx) {
+  vec2 axes = gridAxes(gridPosition, halfWidthPx);
+  return max(axes.x, axes.y);
 }
 
 float hash21(vec2 value) {
@@ -71,13 +68,18 @@ void main() {
   float quiet = mix(1.0, 0.52, vQuiet);
   float grid = (major + minor) * quiet;
 
-  vec2 cell = floor(gridPosition);
-  float identity = hash21(cell);
-  float speed = mix(0.18, 0.42, hash21(cell + 18.7));
-  float verticalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.y * 0.52 - uTime * speed + identity) - 0.5));
-  float horizontalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.x * 0.52 - uTime * speed * 0.82 + identity) - 0.5));
-  float highlights = (step(identity, 0.075) * lineX(gridPosition, 0.85 * uPixelRatio) * verticalSegment +
-    step(0.925, identity) * lineY(gridPosition, 0.85 * uPixelRatio) * horizontalSegment);
+  // Identity belongs to an entire grid line, not each cell it crosses. A
+  // travelling highlight therefore keeps its phase and speed across junctions.
+  vec2 lineId = floor(gridPosition + 0.5);
+  float verticalIdentity = hash21(vec2(lineId.x, 17.0));
+  float horizontalIdentity = hash21(vec2(31.0, lineId.y));
+  float verticalSpeed = mix(0.18, 0.42, hash21(vec2(lineId.x, 18.7)));
+  float horizontalSpeed = mix(0.18, 0.42, hash21(vec2(43.7, lineId.y)));
+  float verticalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.y * 0.52 - uTime * verticalSpeed + verticalIdentity) - 0.5));
+  float horizontalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.x * 0.52 - uTime * horizontalSpeed + horizontalIdentity) - 0.5));
+  vec2 highlightAxes = gridAxes(gridPosition, 0.85 * uPixelRatio);
+  float highlights = step(verticalIdentity, 0.15) * highlightAxes.x * verticalSegment +
+    step(horizontalIdentity, 0.15) * highlightAxes.y * horizontalSegment;
   highlights *= quiet * (0.35 + 0.65 * vIntensity);
 
   float illumination = clamp(vIntensity, 0.0, 1.0);

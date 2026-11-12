@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ActivityTracker, aggregateOwnedActivity, decay, heartbeatBpm, normaliseActivity, PulseLimiter } from "../client/activity";
 import type { OverviewEvent } from "../shared/model";
+import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { buildOwnershipIndex, normalise } from "../client/normalize";
 
 describe("activity", () => {
@@ -48,8 +49,9 @@ describe("activity", () => {
     tracker.ingest([event], 1000);
     for (const freshness of ["refreshing", "stale"] as const) {
       const retained = { ...model, nodes: model.nodes.map(node => ({ ...node, freshness })) };
-      expect(aggregateOwnedActivity(retained, buildOwnershipIndex(retained), tracker, 6000).get(id))
-        .toMatchObject({ managed: 1, working: 0, score: 0.5 });
+      const totals = aggregateOwnedActivity(retained, buildOwnershipIndex(retained), tracker, 6000);
+      expect(totals.get(id)).toMatchObject({ managed: 1, working: 0, score: 0.5 });
+      expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual(totals.get(id));
     }
     expect(tracker.ingest([event], 6000)).toEqual([]);
     expect(aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 6000).get(id))
@@ -113,7 +115,46 @@ describe("activity", () => {
     expect(totals.get("h:project:p1")).toMatchObject({ score: 0, managed: 1, working: 0, waiting: 0, unread: 1 });
     expect(totals.get("h:project:p2")).toMatchObject({ score: 1, managed: 1, working: 0, waiting: 1, unread: 0 });
     expect(totals.get("h:agent:unassigned")).toMatchObject({ managed: 1, working: 1 });
-    expect(totals.size).toBe(7);
+    expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual(totals.get("h:agent:unassigned"));
+    expect(totals.size).toBe(8);
+  });
+
+  it("aggregates the displayed Unassigned area once without inventing a project", () => {
+    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(),
+      projects: [{ projectId: "known", projectDisplayName: "Known" }],
+      workspaces: [
+        { id: "known", projectId: "known", name: "Known", projectDisplayName: "Known" },
+        { id: "unresolved", projectId: "missing", name: "Unresolved", projectDisplayName: "Missing" },
+        { id: "empty", projectId: "missing", name: "Empty", projectDisplayName: "Missing" },
+      ],
+      agents: [
+        { id: "known", workspaceId: "known", title: null, provider: "codex", status: "idle" },
+        { id: "orphan", title: null, provider: "codex", status: "running" },
+        { id: "child", title: null, provider: "codex", status: "idle", labels: { "paseo.parent-agent-id": "orphan" } },
+        { id: "unresolved", workspaceId: "unresolved", title: null, provider: "codex", status: "running", labels: { "paseo.parent-agent-id": "known" } },
+      ],
+      rosters: new Map([["orphan", { availability: "resident", subagents: [
+        { id: "native", parentAgentId: "orphan", title: null, description: null, provider: "codex", status: "running" },
+      ] }]]),
+    });
+    const projectsBefore = [...model.projects];
+    const repeated = { ...model, nodes: [...model.nodes, model.nodes[1]!] };
+    const totals = aggregateOwnedActivity(repeated, buildOwnershipIndex(repeated), { score: () => 1 }, 1000);
+    expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual({ score: 4, working: 3, waiting: 0, errors: 0, unread: 0, managed: 3, native: 1 });
+    expect(totals.get("h:agent:orphan")).toMatchObject({ score: 3, working: 2, managed: 2, native: 1 });
+    expect(totals.get("h:workspace:unresolved")).toMatchObject({ score: 1, working: 1, managed: 1 });
+    expect(totals.get("h:project:known")).toMatchObject({ score: 1, working: 0, managed: 1 });
+    expect(totals.has("h:project:missing")).toBe(false);
+    expect(model.projects).toEqual(projectsBefore);
+
+    const empty = { ...model, nodes: [] };
+    expect(aggregateOwnedActivity(empty, buildOwnershipIndex(empty), { score: () => 0 }, 1000).get(UNASSIGNED_SCOPE_ID))
+      .toEqual({ score: 0, working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 });
+
+    const resolved = { ...model, projects: [...model.projects, { id: "h:project:missing", projectId: "missing", name: "Arrived", workspaceIds: ["h:workspace:unresolved", "h:workspace:empty"] }] };
+    const resolvedTotals = aggregateOwnedActivity(resolved, buildOwnershipIndex(resolved), { score: () => 1 }, 1000);
+    expect(resolvedTotals.get(UNASSIGNED_SCOPE_ID)).toMatchObject({ score: 3, working: 2, managed: 2, native: 1 });
+    expect(resolvedTotals.get("h:project:missing")).toMatchObject({ score: 1, working: 1, managed: 1 });
   });
 
   it("guards repeated node identities and invalid parent cycles without inventing aggregate owners", () => {
@@ -126,8 +167,8 @@ describe("activity", () => {
     const repeated = { ...model, nodes: [...model.nodes, model.nodes[0]] };
     const ownership = { ...buildOwnershipIndex(model), parentByNode: new Map([["h:agent:one", "h:agent:two"], ["h:agent:two", "h:agent:one"]]) };
     const totals = aggregateOwnedActivity(repeated, ownership, { score: () => 1 }, 1000);
-    expect([...totals.values()].map(total => total.score)).toEqual([2, 2]);
-    expect([...totals.values()].map(total => total.managed)).toEqual([2, 2]);
-    expect(totals.size).toBe(2);
+    expect([...totals.values()].map(total => total.score)).toEqual([2, 2, 2]);
+    expect([...totals.values()].map(total => total.managed)).toEqual([2, 2, 2]);
+    expect(totals.size).toBe(3);
   });
 });

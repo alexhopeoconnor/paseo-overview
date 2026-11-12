@@ -1,12 +1,14 @@
 import { activityDepth, advanceDepth, depthTransform, projectDepthRange, sweptBounds, transformRouteNode } from "../client/scene/depth";
 import { centre } from "../client/geometry";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as THREE from "three";
 import type { OverviewModel } from "../shared/model";
 import type { OverviewTheme } from "../shared/renderer";
 import { canRetainSelection, initialPresentation, parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation, scopedNodes } from "../client/presentation";
 import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { gridPalette, isDarkBackground } from "../client/appearance";
-import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, maximumWarp, sampleGridField } from "../client/scene/ambient-field";
+import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, GridInfluenceSmoother, maximumWarp, sampleGridField } from "../client/scene/ambient-field";
+import { ProceduralAmbientGrid } from "../client/scene/ambient";
 
 function fixture(): OverviewModel {
   return {
@@ -132,6 +134,9 @@ describe("project activity depth", () => {
 });
 
 describe("procedural ambient grid", () => {
+  const gridTheme: OverviewTheme = { background: "#f7f8fb", surface: "#fff", foreground: "#111", muted: "#667", border: "#dde", accent: "#38a", working: "#3a8", waiting: "#c92", error: "#c44" };
+  const influence = { id: "project", centreX: 50, centreY: 50, radiusX: 55, radiusY: 40, activity: 0.8, visibility: 1, focus: 0 };
+
   it("selects a muted palette from Paseo's effective background", () => {
     const theme = (background: string): OverviewTheme => ({ background, surface: "#fff", foreground: "#111", muted: "#667", border: "#dde", accent: "#38a", working: "#3a8", waiting: "#c92", error: "#c44" });
     expect(isDarkBackground("#121926")).toBe(true);
@@ -166,5 +171,113 @@ describe("procedural ambient grid", () => {
     sampleGridField(field, 100, 100, [], 5, 5);
     expect(Math.max(...field.intensity)).toBe(0);
     expect(maximumWarp(field)).toBe(0);
+  });
+
+  it("smooths illumination faster than distortion using elapsed time rather than frame count", () => {
+    const slow = new GridInfluenceSmoother(), fast = new GridInfluenceSmoother();
+    slow.setTargets([influence]); fast.setTargets([influence]);
+    slow.advance(0.5, true);
+    for (let index = 0; index < 30; index++) fast.advance(1 / 60, true);
+    const shown = slow.values[0]!;
+    expect(shown.activity).toBeGreaterThan(shown.distortion!);
+    expect(shown.activity).toBeLessThan(influence.activity);
+    expect(fast.values[0]!.activity).toBeCloseTo(shown.activity, 10);
+    expect(fast.values[0]!.distortion).toBeCloseTo(shown.distortion!, 10);
+  });
+
+  it("freezes activity while paused but aligns explicit focus and geometry changes", () => {
+    const smoother = new GridInfluenceSmoother();
+    smoother.setTargets([influence]); smoother.advance(0.5, true);
+    const before = { ...smoother.values[0]! };
+    smoother.setTargets([{ ...influence, activity: 1 }]);
+    expect(smoother.advance(10, false)).toBe(false);
+    expect(smoother.values[0]).toEqual(before);
+    smoother.setTargets([{ ...influence, centreX: 90, radiusX: 80, activity: 1, focus: 0.48 }]);
+    expect(smoother.advance(0, false)).toBe(true);
+    expect(smoother.values[0]).toMatchObject({ centreX: 90, radiusX: 80, focus: 0.48, activity: before.activity, distortion: before.distortion });
+    smoother.advance(0.5, true);
+    expect(smoother.values[0]!.activity).toBeGreaterThan(before.activity);
+  });
+
+  it("keeps a partially transitioned focus still when motion is paused", () => {
+    const smoother = new GridInfluenceSmoother();
+    smoother.setTargets([{ ...influence, focus: 0.6 }]); smoother.advance(0.05, true);
+    const focus = smoother.values[0]!.focus;
+    expect(focus).toBeGreaterThan(0); expect(focus).toBeLessThan(0.6);
+    smoother.setTargets([{ ...influence, focus: 0.6, activity: 0.1 }]);
+    smoother.advance(5, false);
+    expect(smoother.values[0]!.focus).toBe(focus);
+  });
+
+  it("keeps stable project state through directory reorder and removes absent influences", () => {
+    const smoother = new GridInfluenceSmoother();
+    const second = { ...influence, id: "another", activity: 0.2 };
+    smoother.setTargets([influence, second]); smoother.advance(0.5, true);
+    const before = smoother.values.map(value => ({ ...value }));
+    smoother.setTargets([second, influence]);
+    expect(smoother.advance(0, false)).toBe(false);
+    expect(smoother.values).toEqual(before);
+    smoother.setTargets([influence]);
+    expect(smoother.values.map(value => value.id)).toEqual([influence.id]);
+    smoother.setTargets([]);
+    expect(smoother.values).toEqual([]);
+  });
+
+  it("reuses paused and settled field buffers and keeps the ambient clock uncapped", () => {
+    const scene = new THREE.Scene();
+    const renderer = { debug: { onShaderError: null, checkShaderErrors: true } } as unknown as THREE.WebGLRenderer;
+    const ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
+    ambient.resize(100, 100, 1); ambient.updateField([influence]); ambient.advanceTime(0.5, true);
+    const mesh = scene.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
+    const attributes = ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet"].map(name => mesh.geometry.getAttribute(name) as THREE.BufferAttribute);
+    const versions = attributes.map(attribute => attribute.version);
+    const values = attributes.map(attribute => Array.from(attribute.array));
+    ambient.updateField([{ ...influence, activity: 1 }]); ambient.advanceTime(5, false);
+    expect(attributes.map(attribute => attribute.version)).toEqual(versions);
+    expect(attributes.map(attribute => Array.from(attribute.array))).toEqual(values);
+    expect(mesh.material.uniforms.uTime!.value).toBe(0.5);
+    ambient.advanceTime(0.75, true);
+    expect(mesh.material.uniforms.uTime!.value).toBe(1.25);
+    ambient.updateField([]); ambient.advanceTime(1 / 24, true);
+    const cleared = attributes.map(attribute => attribute.version);
+    ambient.advanceTime(1, true);
+    expect(attributes.map(attribute => attribute.version)).toEqual(cleared);
+    expect(attributes.every(attribute => Array.from(attribute.array).every(value => value === 0))).toBe(true);
+    ambient.dispose(); expect(scene.children).toHaveLength(0);
+  });
+
+  it("isolates background shader failure and restores the renderer diagnostic settings", () => {
+    const previous = vi.fn();
+    const renderer = { debug: { onShaderError: previous, checkShaderErrors: false } } as unknown as THREE.WebGLRenderer;
+    const scene = new THREE.Scene(), ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
+    const gl = { getShaderSource: () => "#define SHADER_NAME paseo-overview-ambient-grid" };
+    let renders = 0;
+    ambient.renderWithBackgroundFallback(() => {
+      renders++;
+      if (scene.children.length) renderer.debug.onShaderError!(gl as never, {} as never, {} as never, {} as never);
+    });
+    expect(renders).toBe(2);
+    expect(scene.children).toHaveLength(0);
+    expect(previous).not.toHaveBeenCalled();
+    expect(renderer.debug.onShaderError).toBe(previous);
+    expect(renderer.debug.checkShaderErrors).toBe(false);
+    const later = vi.fn(); renderer.debug.onShaderError = later;
+    ambient.dispose();
+    expect(renderer.debug.onShaderError).toBe(later);
+  });
+
+  it("preserves unrelated shader diagnostics and restores callbacks even when rendering throws", () => {
+    const failure = new Error("foreground failure"), previous = vi.fn(() => { throw failure; });
+    const renderer = { debug: { onShaderError: previous, checkShaderErrors: false } } as unknown as THREE.WebGLRenderer;
+    const scene = new THREE.Scene(), ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
+    const gl = { getShaderSource: () => "#define SHADER_NAME foreground" };
+    expect(() => ambient.renderWithBackgroundFallback(() => {
+      renderer.debug.onShaderError!(gl as never, {} as never, {} as never, {} as never);
+    })).toThrow(failure);
+    expect(previous).toHaveBeenCalledOnce();
+    expect(renderer.debug.onShaderError).toBe(previous);
+    expect(renderer.debug.checkShaderErrors).toBe(false);
+    expect(scene.children).toHaveLength(1);
+    ambient.dispose();
   });
 });

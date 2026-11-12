@@ -17,8 +17,10 @@ export function statusLabel(node: OverviewNode): string {
   if (hasError(node)) return "Error";
   if (needsInput(node)) return "Waiting for permission";
   if (node.state === "working") return "Working";
-  if (node.attention && node.attentionReason === "finished") return "Finished · unread result";
-  if (node.attention) return "Needs review";
+  const outcome = node.state === "closed" ? "Closed" : node.state === "canceled" ? "Canceled" : undefined;
+  if (node.attention && node.attentionReason === "finished") return `${outcome ?? "Finished"} · unread result`;
+  if (node.attention) return outcome ? `${outcome} · needs review` : "Needs review";
+  if (outcome) return outcome;
   if (node.state === "finished") return "Finished";
   if (node.state === "idle") return "Idle";
   return "Status unavailable";

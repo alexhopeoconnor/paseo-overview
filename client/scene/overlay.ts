@@ -8,7 +8,7 @@ import { agentIdentity } from "../identity";
 import { identityAccent, nodeAppearance, selectionColour } from "../appearance";
 import { placeNearby, type NearbyPlacement } from "../placement";
 import { collapseControlFont, graphMetrics } from "./metrics";
-import { collapseLabel } from "../collapse";
+import { collapseLabel, inactiveGroupSummary, inactiveStatusCounts } from "../collapse";
 
 export function createCollapseTextMeasure(): (text: string) => number {
   const context = document.createElement("canvas").getContext("2d");
@@ -163,7 +163,7 @@ export class GraphOverlay {
       item.badge.style.display = item.badge.textContent ? "block" : "none";
       item.badgeTone = stale ? "muted" : errors ? "error" : waiting ? "waiting" : active ? "working" : "accent";
       const summary = agent ? statusLabel(agent) : completedGroup
-        ? `${members.filter(member => member.state === "finished").length} finished · ${members.filter(member => member.state === "idle").length} idle`
+        ? inactiveGroupSummary(inactiveStatusCounts(members))
         : `${active} working · ${waiting} waiting · ${errors} errors · ${unread} unread`;
       item.summary = summary;
       const delegations = this.delegationDescriptions.get(node.id)?.join(". ");

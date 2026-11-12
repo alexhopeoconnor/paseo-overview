@@ -1,5 +1,5 @@
 /** Display identities are host-qualified. managedAgentId stays a daemon ID. */
-export type OverviewState = "working" | "waiting" | "idle" | "finished" | "error" | "unknown";
+export type OverviewState = "working" | "waiting" | "idle" | "finished" | "closed" | "canceled" | "error" | "unknown";
 export type RosterAvailability = "resident" | "not_resident" | "unknown";
 export type AttentionReason = "finished" | "permission" | "error" | null;
 export type ObservationFreshness = "current" | "refreshing" | "stale";

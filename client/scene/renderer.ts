@@ -98,6 +98,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   glowContext.fillStyle = gradient; glowContext.fillRect(0, 0, 64, 64);
   const glowTexture = new THREE.CanvasTexture(glowCanvas);
   const ambient = new ProceduralAmbientGrid(scene, renderer, theme);
+  const renderScene = (): void => renderer.render(scene, camera);
   const point = new THREE.Vector3();
   const material = (colour: string, glow = false) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, ...(glow ? { map: glowTexture } : {}) });
   const requestFrame = (dirty = true) => {
@@ -330,13 +331,17 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     frame = 0;
     if (wakeTimer !== undefined) { clearTimeout(wakeTimer); wakeTimer = undefined; }
     if (!canRender()) return;
-    const now = Date.now(), dt = lastTime ? Math.min(0.05, (time - lastTime) / 1000) : 1 / 60;
+    const now = Date.now();
+    const elapsedSeconds = lastTime ? Math.max(0, (time - lastTime) / 1000) : 1 / 60;
+    // Keep graph integration bounded without slowing the ambient clock on a
+    // busy frame. Visibility restoration resets lastTime before either resumes.
+    const dt = Math.min(0.05, elapsedSeconds);
     lastTime = time;
     const animate = motion(), smooth = animate ? 1 - Math.exp(-dt * 12) : 1;
     const live = model.connection === "connected";
     if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
-      ambient.advanceTime(dt, animate && live);
-      renderer.render(scene, camera); scheduleFrame(now); return;
+      ambient.advanceTime(elapsedSeconds, animate && live);
+      ambient.renderWithBackgroundFallback(renderScene); scheduleFrame(now); return;
     }
     graphDirty = false;
     nextActivityUpdate = Infinity;
@@ -430,7 +435,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         centreY: displayedBounds.y + displayedBounds.height / 2,
         radiusX: Math.max(80, displayedBounds.width / 2 + 72),
         radiusY: Math.max(72, displayedBounds.height / 2 + 62),
-        activity: cluster.layout.background ? 0 : Math.max(workingFloor, live ? intensity : 0),
+        activity: Math.max(workingFloor, live ? intensity : 0),
         visibility: cluster.opacity,
         focus: foreground ? (focused?.kind === "workspace" ? 0.62 : 0.48) : 0,
       });
@@ -439,7 +444,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     // The field follows the presentation transform rather than the packed layout.
     // An unchanged influence list leaves its typed-array attributes untouched.
     ambient.updateField(influences);
-    ambient.advanceTime(dt, animate && live);
+    ambient.advanceTime(elapsedSeconds, animate && live);
     if (structuralTransition && !transitioning) { structuralTransition = false; continuous = true; }
     if (transitioning) { delegationDirty = true; continuous = true; }
     else if (delegationDirty) rebuildDelegations();
@@ -501,7 +506,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     }
     const shown = [...displayedBubbles.values()];
     overlay.finishPositions(shown, width, height);
-    renderer.render(scene, camera);
+    ambient.renderWithBackgroundFallback(renderScene);
     graphAnimating = continuous && animate;
     nextBubbleExpiry = shown.reduce((expiry, bubble) => selected === bubble.nodeId || held.has(bubble.nodeId)
       ? expiry : Math.min(expiry, bubble.expiresAt), Infinity);

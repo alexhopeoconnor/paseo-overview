@@ -55,6 +55,21 @@ describe("graph ownership", () => {
     expect(result.nodes[1].attention).toBe(true);
   });
 
+  it("preserves closed managed agents and canceled native children as distinct outcomes", () => {
+    const result = model([agent("parent", "one", { status: "closed" })], [workspace("one")], new Map([["parent", {
+      availability: "resident", subagents: [
+        { id: "canceled", parentAgentId: "parent", provider: "codex", title: null, description: null, status: "canceled" },
+        { id: "completed", parentAgentId: "parent", provider: "codex", title: null, description: null, status: "completed" },
+      ],
+    }]]));
+    expect(result.nodes.map(node => [node.id, node.state])).toEqual([
+      ["host:agent:parent", "closed"],
+      ["host:native:parent:canceled", "canceled"],
+      ["host:native:parent:completed", "finished"],
+    ]);
+    expect(result.nodes.every(node => !node.attention)).toBe(true);
+  });
+
   it("creates a distinct root for every actual project, including empty and nested-name projects", () => {
     const projects = [
       { projectId: "root", projectDisplayName: "Anything" },

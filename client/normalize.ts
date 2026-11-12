@@ -9,7 +9,7 @@ export function agentState(agent: AgentRecord): OverviewState {
   if (agent.status === "error") return "error";
   if (agent.providerUnavailable) return "unknown";
   if (agent.status === "running" || agent.status === "initializing") return "working";
-  if (agent.status === "closed") return "finished";
+  if (agent.status === "closed") return "closed";
   if (agent.status === "idle") return "idle";
   return "unknown";
 }
@@ -61,7 +61,8 @@ export function normalise(input: {
         parentId: child.parentSubagentId && child.parentSubagentId !== child.id
           ? displayId(hostId, "native", parentId, child.parentSubagentId) : parent.id,
         label: child.title || child.description || "Subagent", provider: child.provider,
-        state: child.status === "running" ? "working" : child.status === "failed" ? "error" : "finished",
+        state: child.status === "running" ? "working" : child.status === "failed" ? "error"
+          : child.status === "canceled" ? "canceled" : "finished",
         attention: child.status === "failed", attentionReason: child.status === "failed" ? "error" : null,
         detail: child.subtitle || child.description || undefined,
         freshness: input.freshness && input.freshness !== "current" ? input.freshness : roster.freshness ?? "current",

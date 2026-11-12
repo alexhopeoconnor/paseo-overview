@@ -32,11 +32,20 @@ describe("status presentation", () => {
     expect(hasError(error)).toBe(true);
   });
 
-  it("keeps working, finished, idle and unavailable states distinguishable without attention", () => {
-    const states = ["working", "finished", "idle", "unknown"] as const;
-    expect(states.map(state => statusLabel(node({ state })))).toEqual(["Working", "Finished", "Idle", "Status unavailable"]);
-    expect(states.map(state => statusColour(node({ state }), theme))).toEqual([theme.working, theme.muted, theme.muted, theme.muted]);
+  it("keeps working, finished, closed, canceled, idle and unavailable states distinguishable without attention", () => {
+    const states = ["working", "finished", "closed", "canceled", "idle", "unknown"] as const;
+    expect(states.map(state => statusLabel(node({ state })))).toEqual(["Working", "Finished", "Closed", "Canceled", "Idle", "Status unavailable"]);
+    expect(states.map(state => statusColour(node({ state }), theme))).toEqual([theme.working, theme.muted, theme.muted, theme.muted, theme.muted, theme.muted]);
     expect(statusLabel(node({ state: "working", attention: true, attentionReason: "finished" }))).toBe("Working");
+  });
+
+  it("preserves terminal outcomes while explaining unread, stale and refreshing information", () => {
+    for (const [state, label] of [["closed", "Closed"], ["canceled", "Canceled"]] as const) {
+      expect(statusLabel(node({ state, attention: true, attentionReason: "finished" }))).toBe(`${label} · unread result`);
+      expect(statusLabel(node({ state, attention: true }))).toBe(`${label} · needs review`);
+      expect(statusLabel(node({ state, freshness: "stale" }))).toBe(`Last known · ${label.toLowerCase()}`);
+      expect(statusLabel(node({ state, freshness: "refreshing" }))).toBe(`Updating · ${label.toLowerCase()}`);
+    }
   });
 
   it("presents legacy unspecified attention as review without inventing a permission request", () => {

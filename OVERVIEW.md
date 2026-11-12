@@ -17,7 +17,8 @@ navigate relationships; browser zoom works and the graph has no wheel zoom.
 exits fullscreen first, preserving graph focus, selection and expanded groups.
 The button is available on supported browsers.
 
-**N inactive** represents quiet subordinate branches. Click to expand and use
+**N inactive** represents quiet subordinate branches, with finished, idle, closed
+and canceled counts kept distinct. Click to expand and use
 **Collapse N** on the parent to fold them again. The choice survives focus and
 refreshes. Running agents, blockers, errors and unread results remain visible.
 Counts include every represented agent.

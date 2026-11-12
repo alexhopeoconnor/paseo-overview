@@ -1,14 +1,24 @@
 import * as THREE from "three";
 import { gridPalette, type GridPalette } from "../appearance";
 import type { OverviewTheme } from "../../shared/renderer";
-import { createGridField, GRID_COLUMNS, GRID_ROWS, sampleGridField, type GridField, type ProjectGridInfluence } from "./ambient-field";
+import { createGridField, GRID_COLUMNS, GRID_ROWS, GridInfluenceSmoother, sampleGridField, type GridField, type ProjectGridInfluence } from "./ambient-field";
 import { ambientFragmentShader, ambientVertexShader } from "./ambient-shader";
+
+// Native-facing TypeScript configurations intentionally omit the DOM library.
+// Describe only the WebGL diagnostic surface used inside this browser module.
+type ShaderErrorArguments = Parameters<NonNullable<THREE.WebGLRenderer["debug"]["onShaderError"]>>;
+interface ShaderDiagnostics {
+  getShaderSource(shader: ShaderErrorArguments[2]): string | null;
+  getProgramInfoLog(program: ShaderErrorArguments[1]): string | null;
+  getShaderInfoLog(shader: ShaderErrorArguments[2]): string | null;
+}
 
 export interface AmbientGrid {
   advanceTime(elapsedSeconds: number, moving: boolean): void;
   updateField(influences: readonly ProjectGridInfluence[]): void;
   updateTheme(theme: OverviewTheme): void;
   resize(width: number, height: number, pixelRatio: number): void;
+  renderWithBackgroundFallback(renderScene: () => void): void;
   isAnimating(): boolean;
   dispose(): void;
 }
@@ -28,8 +38,10 @@ export class ProceduralAmbientGrid implements AmbientGrid {
   private readonly field: GridField = createGridField();
   private readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private readonly material: THREE.ShaderMaterial;
-  private readonly previousShaderError: typeof this.renderer.debug.onShaderError;
+  private readonly influences = new GridInfluenceSmoother();
   private previous: ProjectGridInfluence[] = [];
+  private fieldDirty = true;
+  private validatedVersion = -1;
   private width = 1;
   private height = 1;
   private phase = 0;
@@ -64,12 +76,6 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     this.mesh.renderOrder = -10;
     this.mesh.frustumCulled = false;
     this.mesh.userData.overviewAmbientGrid = true;
-    this.previousShaderError = renderer.debug.onShaderError;
-    renderer.debug.onShaderError = (gl, program, vertex, fragment) => {
-      const source = `${gl.getShaderSource(vertex) ?? ""}\n${gl.getShaderSource(fragment) ?? ""}`;
-      if (source.includes("aOverviewGridQuiet")) this.disable();
-      else this.previousShaderError?.(gl, program, vertex, fragment);
-    };
     scene.add(this.mesh);
   }
 
@@ -90,18 +96,26 @@ export class ProceduralAmbientGrid implements AmbientGrid {
   }
 
   advanceTime(elapsedSeconds: number, moving: boolean): void {
-    if (this.failed || this.disposed || !moving) return;
-    this.phase += Math.min(0.25, Math.max(0, elapsedSeconds));
-    this.material.uniforms.uTime!.value = this.phase;
+    if (this.failed || this.disposed) return;
+    const seconds = Math.max(0, Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0);
+    if (moving) {
+      this.phase += seconds;
+      this.material.uniforms.uTime!.value = this.phase;
+    }
+    const changed = this.influences.advance(seconds, moving);
+    if (!changed && !this.fieldDirty) return;
+    sampleGridField(this.field, this.width, this.height, this.influences.values);
+    this.geometry.getAttribute("aOverviewGridWarp").needsUpdate = true;
+    this.geometry.getAttribute("aOverviewGridIntensity").needsUpdate = true;
+    this.geometry.getAttribute("aOverviewGridQuiet").needsUpdate = true;
+    this.fieldDirty = false;
   }
 
   updateField(influences: readonly ProjectGridInfluence[]): void {
     if (this.failed || this.disposed || sameInfluences(this.previous, influences)) return;
     this.previous = influences.map(influence => ({ ...influence }));
-    sampleGridField(this.field, this.width, this.height, influences);
-    this.geometry.getAttribute("aOverviewGridWarp").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridIntensity").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridQuiet").needsUpdate = true;
+    const membershipChanged = this.influences.setTargets(this.previous);
+    this.fieldDirty ||= membershipChanged;
   }
 
   updateTheme(theme: OverviewTheme): void {
@@ -118,7 +132,44 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     (this.material.uniforms.uViewport!.value as THREE.Vector2).set(this.width, this.height);
     this.material.uniforms.uPixelRatio!.value = Math.max(1, pixelRatio);
     // A CSS-pixel resize changes sample coordinates even when project data did not.
-    this.previous = [];
+    this.fieldDirty = true;
+  }
+
+  /** Three.js validates a program on first use, so compile() alone is insufficient.
+   * Guard only a render that can introduce a new background program. Never leave
+   * a global error handler installed or hide another material's diagnostics.
+   */
+  renderWithBackgroundFallback(renderScene: () => void): void {
+    if (this.failed || this.disposed || this.validatedVersion === this.material.version) {
+      renderScene();
+      return;
+    }
+    const debug = this.renderer.debug;
+    const previousHandler = debug.onShaderError;
+    const previousCheck = debug.checkShaderErrors;
+    let backgroundFailed = false;
+    debug.checkShaderErrors = true;
+    debug.onShaderError = (gl, program, vertex, fragment) => {
+      const diagnostics = gl as typeof gl & ShaderDiagnostics;
+      const source = `${diagnostics.getShaderSource(vertex) ?? ""}\n${diagnostics.getShaderSource(fragment) ?? ""}`;
+      if (source.includes("#define SHADER_NAME paseo-overview-ambient-grid")) {
+        backgroundFailed = true;
+      } else if (previousHandler) {
+        previousHandler(gl, program, vertex, fragment);
+      } else {
+        console.error("THREE.WebGLProgram: Shader Error", diagnostics.getProgramInfoLog(program),
+          diagnostics.getShaderInfoLog(vertex), diagnostics.getShaderInfoLog(fragment));
+      }
+    };
+    try {
+      renderScene();
+    } finally {
+      debug.onShaderError = previousHandler;
+      debug.checkShaderErrors = previousCheck;
+      if (backgroundFailed) this.disable();
+    }
+    if (backgroundFailed) renderScene();
+    else this.validatedVersion = this.material.version;
   }
 
   isAnimating(): boolean { return !this.failed && !this.disposed; }
@@ -126,9 +177,9 @@ export class ProceduralAmbientGrid implements AmbientGrid {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.renderer.debug.onShaderError !== this.previousShaderError) this.renderer.debug.onShaderError = this.previousShaderError;
     this.mesh.removeFromParent();
     if (!this.failed) { this.material.dispose(); this.geometry.dispose(); }
     this.previous = [];
+    this.influences.setTargets([]);
   }
 }

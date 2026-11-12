@@ -1,4 +1,5 @@
 import type { OverviewEvent, OverviewModel, OwnershipIndex } from "../shared/model";
+import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { hasError, needsInput } from "./status";
 
 export function decay(value: number, elapsedSeconds: number, halfLifeSeconds = 5): number {
@@ -70,6 +71,16 @@ function emptyActivity(): OwnedActivity {
   return { score: 0, working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 };
 }
 
+function addActivity(total: OwnedActivity, contribution: OwnedActivity): void {
+  total.score += contribution.score;
+  total.working += contribution.working;
+  total.waiting += contribution.waiting;
+  total.errors += contribution.errors;
+  total.unread += contribution.unread;
+  total.managed += contribution.managed;
+  total.native += contribution.native;
+}
+
 /**
  * Roll original node activity up its ownership path exactly once. A parent's
  * already-aggregated total is never an input, and delegation is not traversed.
@@ -86,6 +97,12 @@ export function aggregateOwnedActivity(
   for (const workspace of model.workspaces) totals.set(workspace.id, emptyActivity());
   const sources = new Map(model.nodes.map(node => [node.id, node]));
   for (const node of sources.values()) totals.set(node.id, emptyActivity());
+  // Match the displayed Unassigned area, including workspaces whose project is
+  // unresolved. It is a presentation aggregate, never a manufactured project.
+  if (model.workspaces.some(workspace => !ownership.projectByNode.has(workspace.id)) ||
+    model.nodes.some(node => !ownership.projectByNode.has(node.id))) {
+    totals.set(UNASSIGNED_SCOPE_ID, emptyActivity());
+  }
   for (const node of sources.values()) {
     const error = hasError(node);
     const waiting = !error && needsInput(node);
@@ -105,14 +122,11 @@ export function aggregateOwnedActivity(
       visited.add(owner);
       const total = totals.get(owner);
       if (!total) break; // Do not manufacture a project from an unresolved ID.
-      total.score += contribution.score;
-      total.working += contribution.working;
-      total.waiting += contribution.waiting;
-      total.errors += contribution.errors;
-      total.unread += contribution.unread;
-      total.managed += contribution.managed;
-      total.native += contribution.native;
+      addActivity(total, contribution);
       owner = ownership.parentByNode.get(owner);
+    }
+    if (!ownership.projectByNode.has(node.id) && !visited.has(UNASSIGNED_SCOPE_ID)) {
+      addActivity(totals.get(UNASSIGNED_SCOPE_ID)!, contribution);
     }
   }
   return totals;
