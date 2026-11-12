@@ -99,7 +99,9 @@ void main() {
 
   float illumination = clamp(vIntensity, 0.0, 1.0);
   vec3 gridColour = mix(uLine, uGlow, illumination * 0.72);
-  gridColour = mix(gridColour, uHighlight, highlights);
+  // Crossing traces can add brightness, but must not extrapolate past the
+  // highlight colour (particularly the darker light-theme palette).
+  gridColour = mix(gridColour, uHighlight, min(highlights, 1.0));
   float gridAlpha = grid * (uLineOpacity + illumination * 0.11) + highlights * uHighlightOpacity;
   gl_FragColor = vec4(gridColour, clamp(gridAlpha, 0.0, 0.72));
   #include <colorspace_fragment>
