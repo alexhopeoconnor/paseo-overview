@@ -30,13 +30,15 @@ export interface GridPalette {
   glow: string;
   lineOpacity: number;
   highlightOpacity: number;
+  highlightBaseline: number;
+  highlightQuiet: number;
 }
 
-/** Deliberately muted in light mode, while retaining enough contrast to read as a grid. */
+/** Keep the base grid quiet; moving ink needs stronger contrast against a light surface. */
 export function gridPalette(theme: OverviewTheme): GridPalette {
   return isDarkBackground(theme.background)
-    ? { line: "#507b9e", highlight: "#59c8ec", glow: "#397bb5", lineOpacity: 0.18, highlightOpacity: 0.38 }
-    : { line: "#617f9b", highlight: "#247fa8", glow: "#5e8eb5", lineOpacity: 0.12, highlightOpacity: 0.24 };
+    ? { line: "#507b9e", highlight: "#59c8ec", glow: "#397bb5", lineOpacity: 0.18, highlightOpacity: 0.38, highlightBaseline: 0.35, highlightQuiet: 0.52 }
+    : { line: "#617f9b", highlight: "#1f6285", glow: "#5e8eb5", lineOpacity: 0.12, highlightOpacity: 0.45, highlightBaseline: 0.7, highlightQuiet: 0.8 };
 }
 
 /** A separate blue selection cue prevents green activity from implying selection. */

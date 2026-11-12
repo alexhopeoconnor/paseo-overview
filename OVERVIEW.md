@@ -33,6 +33,8 @@ Unfocused projects gain a small, bounded prominence from recent activity while
 their layout stays fixed. Inspection holds the graph steady. A browser-only
 cyberspace grid follows Paseo's effective light or dark theme: thin perspective
 lines and sparse travelling highlights are decorative, never activity or pulses.
+Light-mode motion uses darker, higher-contrast strokes while the base grid stays
+restrained. Long-running animation keeps a bounded, continuous phase.
 Every displayed project supplies a bounded local field from its current displayed
 bounds; owned activity brightens and gently bends nearby grid coordinates, while
 focus strengthens its branch and calms surrounding interiors. **Pause motion**

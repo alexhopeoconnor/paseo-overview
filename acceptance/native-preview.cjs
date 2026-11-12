@@ -47,7 +47,7 @@ const inspect = page => page.evaluate(() => {
     await page.waitForTimeout(150);
     const workspace = await inspect(page);
     assert.equal(workspace.title, 'Deployment and release review');
-    assert.match(workspace.counts, /4 agents/);
+    assert.match(workspace.counts, /5 agents/);
     assert.match(workspace.nodes.find(node => node.id === 'overview-native-agent:a0-3').label, /Subagent\./);
     const primary = workspace.nodes.find(node => node.id === 'overview-native-agent:a0-0');
     const primaryCentre = primary.box.x + primary.box.width / 2;
@@ -56,9 +56,22 @@ const inspect = page => page.evaluate(() => {
     const count = page.locator('[data-testid^="overview-native-completed:"]').first();
     await count.scrollIntoViewIfNeeded();
     const groupId = (await count.getAttribute('data-testid')).slice('overview-native-completed:'.length);
-    assert.match(await count.getAttribute('aria-label'), /finished/);
+    const inactiveLabel = await count.getAttribute('aria-label');
+    for (const outcome of ['finished', '1 idle', '1 closed', '1 canceled']) assert.ok(inactiveLabel.includes(outcome), `Mixed group describes ${outcome}`);
     await count.tap();
     await page.waitForTimeout(100);
+    const closed = page.getByTestId('overview-native-agent:closed-child');
+    const canceled = page.getByTestId('overview-native-agent:n10');
+    assert.match(await closed.innerText(), /Closed/);
+    assert.match(await closed.getAttribute('aria-label'), /Closed/);
+    assert.match(await canceled.innerText(), /Canceled/);
+    assert.match(await canceled.getAttribute('aria-label'), /Canceled/);
+    await closed.scrollIntoViewIfNeeded();
+    await closed.tap();
+    assert.equal(await page.evaluate(() => window.nativePreview.state.selected), 'closed-child');
+    await canceled.scrollIntoViewIfNeeded();
+    await canceled.tap();
+    assert.equal(await page.evaluate(() => window.nativePreview.state.selected), 'n10');
     const collapse = page.getByTestId(`overview-native-collapse:${groupId}`);
     await collapse.scrollIntoViewIfNeeded();
     const collapseBox = await collapse.boundingBox();
@@ -80,8 +93,8 @@ const inspect = page => page.evaluate(() => {
     assert.equal(await page.getByTestId('overview-motion').getAttribute('aria-label'), 'Resume animation');
     await page.screenshot({ path: `${output}/phone-reset.png` });
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', initial, project, workspace, reset, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, actual emoji nodes, group expansion/collapse, 44px targets, parent selection, reset and motion controls' }));
+    await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', inactiveLabel, terminalLabels: ['Closed', 'Canceled'], initial, project, workspace, reset, errors }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion/collapse, 44px targets, parent selection, reset and motion controls' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/native-preview-failure.png` }).catch(() => {});

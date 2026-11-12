@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { gridPalette, type GridPalette } from "../appearance";
 import type { OverviewTheme } from "../../shared/renderer";
 import { createGridField, GRID_COLUMNS, GRID_ROWS, GridInfluenceSmoother, sampleGridField, type GridField, type ProjectGridInfluence } from "./ambient-field";
-import { ambientFragmentShader, ambientVertexShader } from "./ambient-shader";
+import { ambientFragmentShader, ambientVertexShader, GRID_PHASE_PERIOD_SECONDS } from "./ambient-shader";
 
 // Native-facing TypeScript configurations intentionally omit the DOM library.
 // Describe only the WebGL diagnostic surface used inside this browser module.
@@ -64,6 +64,7 @@ export class ProceduralAmbientGrid implements AmbientGrid {
         uLine: { value: new THREE.Color(palette.line) }, uHighlight: { value: new THREE.Color(palette.highlight) },
         uGlow: { value: new THREE.Color(palette.glow) }, uLineOpacity: { value: palette.lineOpacity },
         uHighlightOpacity: { value: palette.highlightOpacity },
+        uHighlightBaseline: { value: palette.highlightBaseline }, uHighlightQuiet: { value: palette.highlightQuiet },
       },
       transparent: true,
       depthTest: false,
@@ -85,6 +86,8 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     (this.material.uniforms.uGlow!.value as THREE.Color).set(palette.glow);
     this.material.uniforms.uLineOpacity!.value = palette.lineOpacity;
     this.material.uniforms.uHighlightOpacity!.value = palette.highlightOpacity;
+    this.material.uniforms.uHighlightBaseline!.value = palette.highlightBaseline;
+    this.material.uniforms.uHighlightQuiet!.value = palette.highlightQuiet;
   }
 
   private disable(): void {
@@ -99,7 +102,10 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     if (this.failed || this.disposed) return;
     const seconds = Math.max(0, Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0);
     if (moving) {
-      this.phase += seconds;
+      // Every shader trace has an integer number of cycles per period. Reduce
+      // the elapsed step first as well, keeping both CPU and GPU phase bounded
+      // during long-lived dashboards without catching up paused/offline time.
+      this.phase = (this.phase + seconds % GRID_PHASE_PERIOD_SECONDS) % GRID_PHASE_PERIOD_SECONDS;
       this.material.uniforms.uTime!.value = this.phase;
     }
     const changed = this.influences.advance(seconds, moving);

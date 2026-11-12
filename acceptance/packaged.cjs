@@ -70,13 +70,18 @@ async function packagedGridPixels(page, key) {
       frequencies.set(rgb, (frequencies.get(rgb) ?? 0) + 1);
     }
     const base = [...frequencies].sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number);
-    let structurePixels = 0, changedPixels = 0;
+    let structurePixels = 0, changedPixels = 0, strongChangedPixels = 0, maximumDelta = 0;
     for (let index = 0; index < pixels.length; index += 4) {
       if (Math.max(Math.abs(pixels[index] - base[0]), Math.abs(pixels[index + 1] - base[1]), Math.abs(pixels[index + 2] - base[2])) > 4) structurePixels++;
-      if (previous?.length === pixels.length && Math.max(Math.abs(pixels[index] - previous[index]), Math.abs(pixels[index + 1] - previous[index + 1]), Math.abs(pixels[index + 2] - previous[index + 2])) > 3) changedPixels++;
+      if (previous?.length === pixels.length) {
+        const delta = Math.max(Math.abs(pixels[index] - previous[index]), Math.abs(pixels[index + 1] - previous[index + 1]), Math.abs(pixels[index + 2] - previous[index + 2]));
+        maximumDelta = Math.max(maximumDelta, delta);
+        if (delta > 3) changedPixels++;
+        if (delta > 18) strongChangedPixels++;
+      }
     }
     captures.set(key, pixels);
-    return { width: canvas.width, height: canvas.height, base, structurePixels, changedPixels };
+    return { width: canvas.width, height: canvas.height, base, structurePixels, changedPixels, strongChangedPixels, maximumDelta };
   }, { encoded: screenshot.toString("base64"), key });
 }
 
@@ -217,6 +222,7 @@ async function run() {
     const gridMoved = await packagedGridPixels(page, "motion");
     assert.ok(gridLight.structurePixels > 800, "Compiled artifact renders visible grid structure in the empty graph");
     assert.ok(gridMoved.changedPixels > 100, "Compiled artifact changes actual background pixels over time");
+    assert.ok(gridMoved.strongChangedPixels > 100, "Light-theme motion has clear compositor contrast, beyond barely changing pixels");
     await page.emulateMedia({ colorScheme: "dark" });
     await delay(250);
     const gridDark = await packagedGridPixels(page, "dark");

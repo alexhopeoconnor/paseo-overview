@@ -61,6 +61,9 @@ lines and darker blue highlights. Thin, antialiased perspective lines and sparse
 travelling segments remain visibly present without camera motion, flashes or a
 moving tunnel. The grid is decorative: its highlights never create activity,
 bubbles or ownership pulses.
+Light-mode travelling strokes use stronger dark-blue contrast independently of
+the quiet base grid. Their phase stays bounded during long-running sessions,
+with continuous movement across the repeating clock boundary.
 
 Every displayed project, including an empty project, contributes a bounded local
 field after its current depth and focus transforms are applied. Recent unique

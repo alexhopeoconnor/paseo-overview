@@ -1,7 +1,7 @@
 {
   "name": "paseo-overview",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "A live, read-only spatial overview of Paseo projects, workspaces and agents.",
   "type": "module",
   "license": "MIT",

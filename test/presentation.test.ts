@@ -9,6 +9,7 @@ import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { gridPalette, isDarkBackground } from "../client/appearance";
 import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, GridInfluenceSmoother, maximumWarp, sampleGridField } from "../client/scene/ambient-field";
 import { ProceduralAmbientGrid } from "../client/scene/ambient";
+import { GRID_PHASE_PERIOD_SECONDS, GRID_TRACE_CYCLE_COUNT, GRID_TRACE_MIN_CYCLES } from "../client/scene/ambient-shader";
 
 function fixture(): OverviewModel {
   return {
@@ -141,7 +142,9 @@ describe("procedural ambient grid", () => {
     const theme = (background: string): OverviewTheme => ({ background, surface: "#fff", foreground: "#111", muted: "#667", border: "#dde", accent: "#38a", working: "#3a8", waiting: "#c92", error: "#c44" });
     expect(isDarkBackground("#121926")).toBe(true);
     expect(gridPalette(theme("#121926")).lineOpacity).toBe(0.18);
-    expect(gridPalette(theme("#f7f8fb"))).toMatchObject({ line: "#617f9b", highlightOpacity: 0.24 });
+    const light = gridPalette(theme("#f7f8fb"));
+    expect(light).toMatchObject({ line: "#617f9b", lineOpacity: 0.12, highlightOpacity: 0.45 });
+    expect(light.highlightOpacity * light.highlightBaseline * light.highlightQuiet).toBeGreaterThan(0.2);
   });
 
   it("samples every overlapping displayed influence into finite, bounded attributes", () => {
@@ -223,7 +226,7 @@ describe("procedural ambient grid", () => {
     expect(smoother.values).toEqual([]);
   });
 
-  it("reuses paused and settled field buffers and keeps the ambient clock uncapped", () => {
+  it("reuses paused and settled field buffers without dropping visible elapsed time", () => {
     const scene = new THREE.Scene();
     const renderer = { debug: { onShaderError: null, checkShaderErrors: true } } as unknown as THREE.WebGLRenderer;
     const ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
@@ -244,6 +247,43 @@ describe("procedural ambient grid", () => {
     expect(attributes.map(attribute => attribute.version)).toEqual(cleared);
     expect(attributes.every(attribute => Array.from(attribute.array).every(value => value === 0))).toBe(true);
     ambient.dispose(); expect(scene.children).toHaveLength(0);
+  });
+
+  it("bounds long-lived shader time while pause and resize retain the same visible phase", () => {
+    const scene = new THREE.Scene();
+    const renderer = { debug: { onShaderError: null, checkShaderErrors: true } } as unknown as THREE.WebGLRenderer;
+    const ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
+    const mesh = scene.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
+    const phase = () => mesh.material.uniforms.uTime!.value as number;
+    ambient.advanceTime(GRID_PHASE_PERIOD_SECONDS - 0.25, true);
+    ambient.advanceTime(0.5, true);
+    expect(phase()).toBe(0.25);
+    ambient.advanceTime(86400 * 365, true);
+    expect(phase()).toBe(128.25);
+    ambient.advanceTime(86400 * 30, false);
+    ambient.resize(1800, 1200, 2); ambient.advanceTime(0, false);
+    expect(phase()).toBe(128.25);
+    ambient.advanceTime(1 / 60, true);
+    expect(phase()).toBeCloseTo(128.25 + 1 / 60, 10);
+    ambient.advanceTime(Infinity, true); ambient.advanceTime(Number.NaN, true);
+    expect(phase()).toBeCloseTo(128.25 + 1 / 60, 10);
+    expect(phase()).toBeLessThan(GRID_PHASE_PERIOD_SECONDS);
+    ambient.dispose();
+  });
+
+  it("keeps every trace continuous through a common phase wrap at GPU float precision", () => {
+    const step = 1 / 1024;
+    const fract = (value: number) => value - Math.floor(value);
+    for (let cycles = GRID_TRACE_MIN_CYCLES; cycles < GRID_TRACE_MIN_CYCLES + GRID_TRACE_CYCLE_COUNT; cycles++) {
+      const speed = cycles / GRID_PHASE_PERIOD_SECONDS;
+      expect(Math.fround(speed)).toBe(speed);
+      for (const coordinate of [0.23, 7.5, 31.875]) {
+        const phase = (time: number) => fract(Math.fround(coordinate - Math.fround(time * speed)));
+        expect(phase(GRID_PHASE_PERIOD_SECONDS)).toBeCloseTo(phase(0), 5);
+        const distance = fract(phase(GRID_PHASE_PERIOD_SECONDS - step) - phase(step));
+        expect(distance).toBeCloseTo(2 * step * speed, 4);
+      }
+    }
   });
 
   it("isolates background shader failure and restores the renderer diagnostic settings", () => {

@@ -1,3 +1,10 @@
+// Each trace completes an integer number of cycles in this common period.
+// The power-of-two denominator keeps the shader speeds exactly representable,
+// so a bounded time uniform wraps without changing any line's visible phase.
+export const GRID_PHASE_PERIOD_SECONDS = 256;
+export const GRID_TRACE_MIN_CYCLES = 46;
+export const GRID_TRACE_CYCLE_COUNT = 62;
+
 /** One CSS-pixel grid surface. Geometry coverage stays fixed; aWarp bends only pattern coordinates. */
 export const ambientVertexShader = /* glsl */ `
 uniform vec2 uViewport;
@@ -30,6 +37,8 @@ uniform float uPixelRatio;
 uniform float uTime;
 uniform float uLineOpacity;
 uniform float uHighlightOpacity;
+uniform float uHighlightBaseline;
+uniform float uHighlightQuiet;
 varying vec2 vCss;
 varying vec2 vPatternCss;
 varying float vIntensity;
@@ -56,6 +65,10 @@ float hash21(vec2 value) {
   return fract(value.x * value.y);
 }
 
+float traceSpeed(float identity) {
+  return (${GRID_TRACE_MIN_CYCLES.toFixed(1)} + floor(identity * ${GRID_TRACE_CYCLE_COUNT.toFixed(1)})) / ${GRID_PHASE_PERIOD_SECONDS.toFixed(1)};
+}
+
 void main() {
   float viewportHeight = max(1.0, uViewport.y);
   float depth = clamp(vPatternCss.y / viewportHeight, 0.0, 1.0);
@@ -68,19 +81,21 @@ void main() {
   float quiet = mix(1.0, 0.52, vQuiet);
   float grid = (major + minor) * quiet;
 
-  // Identity belongs to an entire grid line, not each cell it crosses. A
-  // travelling highlight therefore keeps its phase and speed across junctions.
+  // Identity follows the same warped coordinates as the rendered line. A
+  // vertical contour has gridPosition.x = n throughout its bends, so its ID
+  // stays n even as it crosses horizontal cells. Screen-space IDs would detach
+  // the highlight from that contour when the field moves.
   vec2 lineId = floor(gridPosition + 0.5);
   float verticalIdentity = hash21(vec2(lineId.x, 17.0));
   float horizontalIdentity = hash21(vec2(31.0, lineId.y));
-  float verticalSpeed = mix(0.18, 0.42, hash21(vec2(lineId.x, 18.7)));
-  float horizontalSpeed = mix(0.18, 0.42, hash21(vec2(43.7, lineId.y)));
+  float verticalSpeed = traceSpeed(hash21(vec2(lineId.x, 18.7)));
+  float horizontalSpeed = traceSpeed(hash21(vec2(43.7, lineId.y)));
   float verticalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.y * 0.52 - uTime * verticalSpeed + verticalIdentity) - 0.5));
   float horizontalSegment = 1.0 - smoothstep(0.09, 0.19, abs(fract(gridPosition.x * 0.52 - uTime * horizontalSpeed + horizontalIdentity) - 0.5));
   vec2 highlightAxes = gridAxes(gridPosition, 0.85 * uPixelRatio);
   float highlights = step(verticalIdentity, 0.15) * highlightAxes.x * verticalSegment +
     step(horizontalIdentity, 0.15) * highlightAxes.y * horizontalSegment;
-  highlights *= quiet * (0.35 + 0.65 * vIntensity);
+  highlights *= mix(1.0, uHighlightQuiet, vQuiet) * mix(uHighlightBaseline, 1.0, vIntensity);
 
   float illumination = clamp(vIntensity, 0.0, 1.0);
   vec3 gridColour = mix(uLine, uGlow, illumination * 0.72);

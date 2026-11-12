@@ -15,6 +15,8 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   the field unchanged. Theme checks compare pixels after a rendered frame and
   verify the colours of already-running fibre journeys. Instrumentation stays in the
   fixture, outside the product bundle.
+  A rendered phase-boundary comparison verifies that the bounded clock does not
+  visibly jump when it wraps.
 - `performance.cjs` connects to an explicitly supplied isolated hardware-browser
   CDP endpoint. It records frame intervals, browser main-thread/script work,
   resource counts and automated pointer-selection timing. It rejects software
@@ -24,6 +26,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
   initial primary-agent framing.
+  The native-only fixture includes a mixed finished/idle/closed/canceled group;
+  both native runners check its accessibility summary and the expanded visible
+  outcomes and member selection.
 - `native-interaction.cjs` runs the same native components without a DOM or
   Three.js. Native primitives and animation scheduling are mocked so phase
   continuity, obsolete callbacks, visibility, AppState, reduced motion and
@@ -40,6 +45,8 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
   tests use a real user click and inspect `document.fullscreenElement`; controller
   mocks alone are not fullscreen acceptance.
+  Light-mode movement must change enough composited pixels with a meaningful
+  contrast delta; merely changing a few pixel values is insufficient.
 
 Browser screenshots and JSON results go under `/out` in the container, or the
 path selected by `OVERVIEW_ACCEPTANCE_OUTPUT`. Keep outputs outside Git. Chromium

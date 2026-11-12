@@ -8,7 +8,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 
 (async () => {
-  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { full, lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
+  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { nativeFixture } from "/plugin/acceptance/native-fixture"; export { lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
   const listeners = { app: new Set(), motion: new Set() };
   const active = new Map(), animationCalls = [];
   let animationId = 0;
@@ -65,7 +65,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
     assert.equal(module.exports.mountFloatingCard(nativeRoot, nativeRoot, unexpectedCallback), null);
   }
   native.Platform.OS = 'android';
-  let model = { ...module.exports.full, nodes: module.exports.full.nodes.map(node => node.id === "a9-0" ? { ...node, state: "working" } : node) };
+  let model = { ...module.exports.nativeFixture, nodes: module.exports.nativeFixture.nodes.map(node => node.id === "a9-0" ? { ...node, state: "working" } : node) };
   let visible = true, state, tree;
   const onState = next => { state = next; };
   const element = () => React.createElement(module.exports.NativeHarness, { model, theme: module.exports.lightTheme, visible, onState });
@@ -115,11 +115,19 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   for (const id of ['n0', 'n1', 'n2', 'n6']) assert.ok(byId(`overview-native-agent:${id}`));
   const group = prefixed('overview-native-completed:')[0];
   assert.ok(group);
-  assert.match(group.props.accessibilityLabel, /finished/);
+  for (const outcome of ['finished', '1 idle', '1 closed', '1 canceled']) assert.ok(group.props.accessibilityLabel.includes(outcome), `Mixed group describes ${outcome}`);
   const groupId = group.props.testID.slice('overview-native-completed:'.length);
   await press(group.props.testID);
   assert.equal(state.groups.get(groupId), 'expanded');
   assert.ok(byId('overview-native-agent:n10'));
+  assert.match(text(byId('overview-native-agent:closed-child')), /Closed/);
+  assert.match(byId('overview-native-agent:closed-child').props.accessibilityLabel, /Closed/);
+  assert.match(text(byId('overview-native-agent:n10')), /Canceled/);
+  assert.match(byId('overview-native-agent:n10').props.accessibilityLabel, /Canceled/);
+  await press('overview-native-agent:closed-child');
+  assert.equal(state.selectedId, 'closed-child');
+  await press('overview-native-agent:n10');
+  assert.equal(state.selectedId, 'n10');
   const collapse = byId(`overview-native-collapse:${groupId}`);
   assert.equal(collapse.props.style.minWidth, 44);
   assert.equal(collapse.props.style.minHeight, 44);
@@ -157,6 +165,6 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.equal(active.size, 0); assert.equal(listeners.app.size, 0); assert.equal(listeners.motion.size, 0);
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(`${output}/native-interaction-results.json`, JSON.stringify({ ok: true, actualComponents: true, nativePrimitivesAndAnimationMocked: true, withoutDOM: true, withoutThree: true,
-    checks: ['android/iOS browser fullscreen/renderer/positioner guards', 'controlled header scope', 'stable role-aware emoji nodes', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
+    checks: ['android/iOS browser fullscreen/renderer/positioner guards', 'controlled header scope', 'stable role-aware emoji nodes', 'mixed inactive group outcomes', 'visible closed/canceled statuses and selection', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
   console.log(JSON.stringify({ ok: true, output, animationsObserved: animationCalls.length }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

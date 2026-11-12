@@ -220,6 +220,9 @@ function checkRepresentation(nodes) {
     await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.theme(false); });
     await page.waitForTimeout(100);
     const lightGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
+    await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 0));
+    const wrappedGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 256));
+    assert.equal(wrappedGrid.changedPixels, 0, 'Common phase wrap preserves actual rendered trace positions');
     await page.evaluate(() => window.overviewTest.theme(true));
     await page.waitForTimeout(100);
     const darkGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
@@ -272,7 +275,7 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, wrappedGrid, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
     console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {
