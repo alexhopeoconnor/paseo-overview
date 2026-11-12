@@ -2,8 +2,11 @@ import { activityDepth, advanceDepth, depthTransform, projectDepthRange, sweptBo
 import { centre } from "../client/geometry";
 import { describe, expect, it } from "vitest";
 import type { OverviewModel } from "../shared/model";
+import type { OverviewTheme } from "../shared/renderer";
 import { canRetainSelection, initialPresentation, parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation, scopedNodes } from "../client/presentation";
 import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import { gridPalette, isDarkBackground } from "../client/appearance";
+import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, maximumWarp, sampleGridField } from "../client/scene/ambient-field";
 
 function fixture(): OverviewModel {
   return {
@@ -125,5 +128,43 @@ describe("project activity depth", () => {
       expect(transformed.controlBounds!.x + transformed.controlBounds!.width).toBeLessThanOrEqual(envelope.x + envelope.width + 1e-8);
       expect(transformed.controlBounds!.y + transformed.controlBounds!.height).toBeLessThanOrEqual(envelope.y + envelope.height + 1e-8);
     }
+  });
+});
+
+describe("procedural ambient grid", () => {
+  it("selects a muted palette from Paseo's effective background", () => {
+    const theme = (background: string): OverviewTheme => ({ background, surface: "#fff", foreground: "#111", muted: "#667", border: "#dde", accent: "#38a", working: "#3a8", waiting: "#c92", error: "#c44" });
+    expect(isDarkBackground("#121926")).toBe(true);
+    expect(gridPalette(theme("#121926")).lineOpacity).toBe(0.18);
+    expect(gridPalette(theme("#f7f8fb"))).toMatchObject({ line: "#617f9b", highlightOpacity: 0.24 });
+  });
+
+  it("samples every overlapping displayed influence into finite, bounded attributes", () => {
+    const field = createGridField(9);
+    const influences = [
+      { id: "quiet-empty", centreX: 50, centreY: 50, radiusX: 55, radiusY: 40, activity: 0, visibility: 1, focus: 0 },
+      { id: "busy-a", centreX: 64, centreY: 48, radiusX: 65, radiusY: 50, activity: 1, visibility: 1, focus: 0.5 },
+      { id: "busy-b", centreX: 55, centreY: 60, radiusX: 65, radiusY: 50, activity: 1, visibility: 1, focus: 0.5 },
+    ];
+    sampleGridField(field, 100, 100, influences, 3, 3);
+    expect(fieldContainsOnlyFiniteValues(field)).toBe(true);
+    expect(maximumWarp(field)).toBeLessThanOrEqual(12);
+    expect(Math.max(...field.intensity)).toBeGreaterThan(0.5);
+    expect(Math.max(...field.quietMask)).toBeGreaterThan(0.5);
+    expect(gridFalloff(50, 50, influences[0]!)).toBe(1);
+    expect(gridFalloff(106, 50, influences[0]!)).toBe(0);
+  });
+
+  it("uses no hidden project-count cutoff and resets reusable arrays for removals", () => {
+    const field = createGridField(25);
+    const projects = Array.from({ length: 23 }, (_, index) => ({
+      id: `project-${index}`, centreX: 5 + index * 4, centreY: 50, radiusX: 10, radiusY: 20,
+      activity: index === 22 ? 0.8 : 0, visibility: 1, focus: 0,
+    }));
+    sampleGridField(field, 100, 100, projects, 5, 5);
+    expect(Math.max(...field.intensity)).toBeGreaterThan(0);
+    sampleGridField(field, 100, 100, [], 5, 5);
+    expect(Math.max(...field.intensity)).toBe(0);
+    expect(maximumWarp(field)).toBe(0);
   });
 });

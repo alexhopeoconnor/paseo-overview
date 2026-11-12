@@ -7,9 +7,11 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
 - `renderer.cjs` bundles the real Three.js renderer and checks delayed loading,
   ownership roles, animal identities, explicit groups, selected ancestors,
   background framing, visibility restoration, bounded bubbles and disposal. It
-  also observes real depth transforms, fixed centres, pulse continuity, ambient
-  pixels and the low-rate idle scheduler, with pause/visibility/reduced-motion
-  checks. Instrumentation stays in the fixture, outside the product bundle.
+  also observes real depth transforms, fixed centres, pulse continuity, visible
+  grid structure and timed movement, stronger local busy treatment, bounded
+  field warp, cached ambient-only scheduling and the shader-failure fallback,
+  with pause/visibility/reduced-motion checks. Instrumentation stays in the
+  fixture, outside the product bundle.
 - `native-preview.cjs` renders the actual native graph and shared header through
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
@@ -36,19 +38,24 @@ uses software rendering for these checks, so its timings do not establish GPU
 performance on a user's workstation. Native Web rendering and mocked component
 checks do not substitute for an actual paired-phone check.
 
+Inspect the saved full, selected, activity and dark-theme captures after a pass:
+the grid must be noticeable at normal browser zoom while labels, ownership links,
+bubbles and details remain readable. Use the normal workstation browser for
+hardware frame-time, draw-call and pointer-response conclusions.
+
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-v05` in this example:
+`/tmp/overview-v06` in this example:
 
 ```bash
-mkdir -p /tmp/overview-v05
+mkdir -p /tmp/overview-v06
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-v05,dst=/out \
+  --mount type=bind,src=/tmp/overview-v06,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \
@@ -102,7 +109,7 @@ docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --env "OVERVIEW_EXPECT_RUNTIME_VERSION=$OVERVIEW_EXPECT_RUNTIME_VERSION" \
   --env "OVERVIEW_EXPECT_PACKAGE_SHA256=$OVERVIEW_EXPECT_PACKAGE_SHA256" \
   --env OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS=required \
-  --mount type=bind,src=/tmp/overview-v05,dst=/out \
+  --mount type=bind,src=/tmp/overview-v06,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \

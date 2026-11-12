@@ -54,15 +54,28 @@ output. They show at most 240 graphemes and update about once a second; tiny
 unfinished fragments do not replace readable text. Storage is bounded, final
 excerpts accompany turn completion, and preview publication never adds activity.
 
-In the full view, recent owned activity gives projects a modest depth effect:
-busier graphs ease slightly forward and quiet graphs recede around fixed centres.
-Scale is constrained by viewport space, readability and delegation clearance.
-Inspection holds the affected graph steady; activity does not repack the layout.
-A few faint, slow background lights add depth without representing agent work.
-**Pause motion** freezes depth and background movement while live status and
-readable previews continue. Reduced motion starts with neutral depth and a static
-background. Hidden tabs stop rendering and discard transient effects; returning
-retains the coherent graph and reconciles current observations.
+In the browser full view, one procedural cyberspace grid replaces the former
+background washes. It follows Paseo's effective theme, including explicit app
+overrides: dark surfaces use cool luminous lines; light surfaces use muted slate
+lines and darker blue highlights. Thin, antialiased perspective lines and sparse
+travelling segments remain visibly present without camera motion, flashes or a
+moving tunnel. The grid is decorative: its highlights never create activity,
+bubbles or ownership pulses.
+
+Every displayed project, including an empty project, contributes a bounded local
+field after its current depth and focus transforms are applied. Recent unique
+owned work brightens and gently bends nearby pattern coordinates; quiet working
+agents retain only a small baseline. Project and workspace focus strengthen the
+displayed branch while calming surrounding interiors. Existing graph depth,
+ownership links and fibre pulses remain the primary activity presentation. The
+field does not repack graphs, alter routes, hit targets or camera controls.
+
+**Pause motion** freezes the grid phase and field presentation while live status
+and readable previews continue. Reduced motion uses a static restrained grid;
+hidden tabs and disconnected sessions schedule no ambient animation. Resize,
+fullscreen, focus and theme changes can still redraw the static field. The grid
+uses only the browser Three.js renderer, reuses a bounded typed-array field and
+falls away independently if its shader cannot compile, leaving the graph usable.
 
 Phones open a touch graph of collapsed project roots with live icons and activity
 halos. Tap a project, then a workspace, to reveal its connected branches. The
@@ -132,9 +145,9 @@ cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
 empty-to-populated loading, suspension, stable identity, explicit grouping,
 branch layout, routed geometry, preview assembly, fullscreen ownership, bounded
-depth and once-only pulse arrivals. Activity and icon updates preserve packed
-positions; activity depth changes only presentation. Structural changes may
-expand an affected branch.
+depth, once-only pulse arrivals and the browser grid field. Activity and icon
+updates preserve packed positions; ambient-only frames reuse their field without
+layout or route work. Structural changes may expand an affected branch.
 
 An optional managed workstation installation uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.

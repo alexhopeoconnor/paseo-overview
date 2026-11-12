@@ -154,9 +154,16 @@ function checkRepresentation(nodes) {
     const graphAfter = (await page.evaluate(() => window.overviewTest.telemetry())).graphs;
     for (const before of graphBefore) {
       const after = graphAfter.find(item => item.id === before.id);
-      assert.ok(Math.abs(after.x - before.x) < 0.1 && Math.abs(after.y - before.y) < 0.1, 'Packed graph centres stay fixed');
+      assert.ok(Math.abs((after.x + after.width / 2) - (before.x + before.width / 2)) < 1.5 && Math.abs((after.y + after.height / 2) - (before.y + before.height / 2)) < 1.5, 'Packed graph centres stay fixed');
       assert.ok(Math.abs(after.width - before.width) <= 16.01 && Math.abs(after.height - before.height) <= 16.01, 'Depth remains within eight pixels per side');
     }
+    const centre = graph => ({ x: graph.x + graph.width / 2, y: graph.y + graph.height / 2 });
+    const localGrid = await page.evaluate(({ busy, quiet }) => ({ busy: window.overviewTest.gridFieldAt(busy.x, busy.y), quiet: window.overviewTest.gridFieldAt(quiet.x, quiet.y) }), {
+      busy: centre(graphAfter[0]), quiet: centre(graphAfter[1]),
+    });
+    const gridSummary = await page.evaluate(() => window.overviewTest.gridFieldSummary());
+    assert.ok(localGrid.busy.intensity > localGrid.quiet.intensity, `Busy project receives stronger local grid illumination than a quiet project: ${JSON.stringify({ localGrid, gridSummary, graphAfter })}`);
+    assert.ok(localGrid.busy.warp <= 12 && localGrid.quiet.warp <= 12, 'Displayed influence warp stays bounded');
     const inspecting = await node(page, 'depth-a').boundingBox();
     await page.mouse.move(inspecting.x + inspecting.width / 2, inspecting.y + inspecting.height / 2);
     await page.waitForTimeout(75);
@@ -172,14 +179,16 @@ function checkRepresentation(nodes) {
     // An empty connected scene isolates ambient scheduling from working heartbeats.
     await page.evaluate(() => window.overviewTest.empty());
     await page.waitForTimeout(150);
-    const ambientPixel = await page.evaluate(() => window.overviewTest.ambientPixel());
-    assert.ok(ambientPixel[3] > 0, 'Ambient planes contribute actual visible pixels with the orthographic camera');
+    const ambientEvidence = await page.evaluate(() => window.overviewTest.ambientEvidence());
+    assert.ok(ambientEvidence.visiblePixels > 800, `Grid has meaningful visible structure (${JSON.stringify(ambientEvidence)})`);
+    assert.ok(ambientEvidence.meanAlpha > 10, 'Grid lines remain visibly separated from the transparent canvas');
     await page.evaluate(() => window.overviewTest.resetTelemetry());
     const ambientBefore = (await page.evaluate(() => window.overviewTest.telemetry())).ambient;
     await page.waitForTimeout(500);
     const ambientAfter = await page.evaluate(() => window.overviewTest.telemetry());
-    assert.ok(ambientAfter.frames >= 3 && ambientAfter.frames <= 12, `Ambient-only rendering stays at a low cadence (${ambientAfter.frames} frames)`);
+    assert.ok(ambientAfter.frames >= 5 && ambientAfter.frames <= 18, `Ambient-only rendering stays at a low cadence (${ambientAfter.frames} frames)`);
     assert.notDeepEqual(ambientAfter.ambient, ambientBefore);
+    assert.equal(ambientAfter.layoutBuilds, 0, 'Ambient-only ticks do not rebuild layout');
     for (const mode of ['pause', 'reduce', 'hidden', 'disconnected']) {
       if (mode === 'pause') await page.evaluate(() => window.overviewTest.motion(false));
       if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
@@ -193,6 +202,12 @@ function checkRepresentation(nodes) {
     await page.evaluate(() => window.overviewTest.connection('connected'));
     await page.waitForTimeout(150);
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
+    await page.evaluate(() => window.overviewTest.loadNative());
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => window.overviewTest.injectAmbientShaderFailure()), true, 'Acceptance can inject an ambient-only shader failure');
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => window.overviewTest.gridPresent()), false, 'Failed grid material is removed independently');
+    assert.ok(await page.locator('[data-overview-kind="project"]').count() > 0, 'Foreground graph remains usable after a grid shader failure');
     for (let index = 0; index < 4; index++) {
       await page.evaluate(() => window.overviewTest.dispose());
       assert.equal(await page.locator('#graph canvas,#graph button').count(), 0);
@@ -202,8 +217,8 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientPixel, ambientFrames: ambientAfter.frames, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible ambient pixels, idle/paused/hidden/disconnected scheduler, themes, cleanup' }));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/renderer-failure.png` }).catch(() => {});

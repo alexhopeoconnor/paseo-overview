@@ -29,9 +29,15 @@ Streaming text is assembled into readable sentences or chunks, updated about onc
 a second, rather than displaying each token. Preview updates do not create work.
 
 Unfocused projects gain a small, bounded prominence from recent activity while
-their layout stays fixed. Inspection holds the graph steady. Faint, slow background
-light is decorative. **Pause motion** freezes these effects while status and
-readable previews continue. Reduced motion starts with static, neutral depth.
+their layout stays fixed. Inspection holds the graph steady. A browser-only
+cyberspace grid follows Paseo's effective light or dark theme: thin perspective
+lines and sparse travelling highlights are decorative, never activity or pulses.
+Every displayed project supplies a bounded local field from its current displayed
+bounds; owned activity brightens and gently bends nearby grid coordinates, while
+focus strengthens its branch and calms surrounding interiors. **Pause motion**
+freezes these effects while status and readable previews continue. Reduced motion,
+hidden tabs and disconnection use a static or unscheduled grid. If its shader is
+unavailable, the grid is removed independently and the graph remains usable.
 
 Phones start with collapsed project roots. Tap into projects and workspaces,
 use Back to return, and tap an agent for details. The header follows the current

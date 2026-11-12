@@ -3,22 +3,24 @@ import { initialPresentation, reducePresentation } from "../client/presentation"
 import type { OverviewModel } from "../shared/model";
 import type { OverviewScope, PresentationAction } from "../shared/presentation";
 import { addEdges, darkTheme, full, icon, lightTheme, managed, projects, workspaces } from "./fixture";
-import { Scene, Vector3, type Camera, type WebGLRenderer, type Group, type Mesh } from "three";
+import { Box3, Scene, type Camera, type WebGLRenderer, type Group, type Mesh, type ShaderMaterial } from "three";
 import { FibreLight } from "../client/scene/lines";
+import { StableLayout } from "../client/layout";
 
 // Fixture-only observation of the actual renderer, without a production debug API.
-const telemetry = { frames: 0, pulseUpdates: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number }[], ambient: [] as number[] };
+const telemetry = { frames: 0, pulseUpdates: 0, layoutBuilds: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number }[], ambient: [] as number[] };
+const layoutUpdate = StableLayout.prototype.update;
+StableLayout.prototype.update = function (...args) { telemetry.layoutBuilds++; return layoutUpdate.apply(this, args as Parameters<typeof layoutUpdate>); };
 let observedScene: Scene | undefined, observedRenderer: WebGLRenderer | undefined, observedCamera: Camera | undefined;
 const beforeRender = Scene.prototype.onBeforeRender;
 Scene.prototype.onBeforeRender = function (...args) {
   beforeRender.apply(this, args);
   observedScene = this; observedRenderer = args[0]; observedCamera = args[2]; telemetry.frames++;
   telemetry.graphs = this.children.filter(child => child.type === "Group").map(child => {
-    const group = child as Group, wash = group.children[0] as Mesh;
-    const point = group.localToWorld(new Vector3(wash.position.x, wash.position.y, 0));
-    return { id: group.id, x: point.x, y: point.y, width: wash.scale.x * group.scale.x / 1.15, height: wash.scale.y * group.scale.y / 1.15 };
-  });
-  telemetry.ambient = this.children.filter(child => child.renderOrder === -10).flatMap(child => [child.position.x, child.position.y]);
+    const box = new Box3().setFromObject(child as Group);
+    return { id: child.id, x: box.min.x, y: box.min.y, width: box.max.x - box.min.x, height: box.max.y - box.min.y };
+  }).filter(graph => Number.isFinite(graph.x) && Number.isFinite(graph.y));
+  telemetry.ambient = this.children.filter(child => child.userData.overviewAmbientGrid).flatMap(child => [((child as Mesh).material as ShaderMaterial).uniforms.uTime?.value ?? 0]);
 };
 const pulseUpdate = FibreLight.prototype.update;
 FibreLight.prototype.update = function (...args) { telemetry.pulseUpdates++; pulseUpdate.apply(this, args); };
@@ -70,16 +72,49 @@ function update(value: OverviewModel, stage: string) {
   burst() { update({ ...current, events: Array.from({ length: 40 }, (_, index) => ({ id: `depth-${Date.now()}-${index}`, nodeId: "depth-a", kind: "activity", timestamp: Date.now() })) }, "depth"); },
   connection(connection: OverviewModel["connection"]) { update({ ...current, connection }, "connection"); },
   telemetry() { return telemetry; },
-  resetTelemetry() { telemetry.frames = 0; telemetry.pulseUpdates = 0; },
-  ambientPixel() {
+  resetTelemetry() { telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; },
+  ambientEvidence() {
     const scene = observedScene!, renderer = observedRenderer!, camera = observedCamera!;
+    const grids = scene.children.filter(child => child.userData.overviewAmbientGrid);
     const visibility = scene.children.map(child => child.visible);
-    scene.children.forEach(child => { child.visible = child.renderOrder === -10; });
+    scene.children.forEach(child => { child.visible = !!child.userData.overviewAmbientGrid; });
     renderer.render(scene, camera);
-    const context = renderer.getContext(), pixel = new Uint8Array(4);
-    context.readPixels(Math.floor(renderer.domElement.width * 0.19), Math.floor(renderer.domElement.height * 0.78), 1, 1, context.RGBA, context.UNSIGNED_BYTE, pixel);
+    const context = renderer.getContext(), pixels = new Uint8Array(renderer.domElement.width * renderer.domElement.height * 4);
+    context.readPixels(0, 0, renderer.domElement.width, renderer.domElement.height, context.RGBA, context.UNSIGNED_BYTE, pixels);
+    let visiblePixels = 0, alphaTotal = 0;
+    for (let index = 3; index < pixels.length; index += 4) if (pixels[index]! > 8) { visiblePixels++; alphaTotal += pixels[index]!; }
     scene.children.forEach((child, index) => { child.visible = visibility[index]!; }); renderer.render(scene, camera);
-    return [...pixel];
+    return { grids: grids.length, drawCalls: renderer.info.render.calls, visiblePixels, meanAlpha: visiblePixels ? alphaTotal / visiblePixels : 0 };
+  },
+  injectAmbientShaderFailure() {
+    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
+    if (!grid) return false;
+    const material = grid.material as ShaderMaterial;
+    material.fragmentShader = "void main() { gl_FragColor = vec4(overviewInjectedFailure); }";
+    material.needsUpdate = true;
+    return true;
+  },
+  gridPresent() { return !!observedScene!.children.find(child => child.userData.overviewAmbientGrid); },
+  gridFieldAt(x: number, y: number) {
+    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
+    if (!grid) return null;
+    const position = grid.geometry.getAttribute("position"), intensity = grid.geometry.getAttribute("aOverviewGridIntensity"), warp = grid.geometry.getAttribute("aOverviewGridWarp");
+    let nearest = 0, distance = Infinity;
+    for (let index = 0; index < position.count; index++) {
+      const dx = (position.getX(index) * 0.5 + 0.5) * parent.clientWidth - x;
+      const dy = (0.5 - position.getY(index) * 0.5) * parent.clientHeight - y;
+      const next = dx * dx + dy * dy;
+      if (next < distance) { distance = next; nearest = index; }
+    }
+    return { intensity: intensity.getX(nearest), warp: Math.hypot(warp.getX(nearest), warp.getY(nearest)), version: intensity.version };
+  },
+  gridFieldSummary() {
+    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
+    if (!grid) return null;
+    const position = grid.geometry.getAttribute("position"), intensity = grid.geometry.getAttribute("aOverviewGridIntensity");
+    let index = 0;
+    for (let next = 1; next < intensity.count; next++) if (intensity.getX(next) > intensity.getX(index)) index = next;
+    return { maximum: intensity.getX(index), x: (position.getX(index) * 0.5 + 0.5) * parent.clientWidth, y: (0.5 - position.getY(index) * 0.5) * parent.clientHeight };
   },
   empty() { update({ ...full, projects: [], workspaces: [], nodes: [], edges: [] }, "empty"); },
   dispose() { renderer.dispose(); },

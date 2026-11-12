@@ -17,11 +17,12 @@ import { advancePulseJourney, createPulseJourney, type PulseJourney } from "./pu
 import type { Line2 } from "three/addons/lines/Line2.js";
 import { activityDepth, advanceDepth, depthTransform, transformRouteNode, type DepthRange } from "./depth";
 import { planDepthDelegations, updateMovingDelegation, type CachedDelegation } from "./delegation";
-import { AmbientField } from "./ambient";
+import { ProceduralAmbientGrid } from "./ambient";
+import type { ProjectGridInfluence } from "./ambient-field";
 
 interface VisualNode { halo: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; phase: number }
 interface Cluster {
-  layout: ProjectLayout; group: THREE.Group; wash: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  layout: ProjectLayout; group: THREE.Group;
   nodes: Map<string, VisualNode>; lines: Map<string, Line2>;
   signature: string; opacity: number; routedAt: number;
   depth: number; depthHeld: boolean; depthRange: DepthRange;
@@ -64,7 +65,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   let requestedMotion = options.motion !== false, frame = 0, lastTime = 0;
   let wakeTimer: ReturnType<typeof setTimeout> | undefined;
   let delegationDirty = true, delegationPlanDirty = true, structuralTransition = true;
-  let graphDirty = true, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity, lastAmbientTime = 0;
+  let graphDirty = true, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity;
   let depthRoutes = new Map<string, CachedDelegation>();
   const media = window.matchMedia("(prefers-reduced-motion: reduce)");
   const motion = () => requestedMotion && !media.matches;
@@ -96,7 +97,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   gradient.addColorStop(0, "#ffffffff"); gradient.addColorStop(0.4, "#ffffff88"); gradient.addColorStop(1, "#ffffff00");
   glowContext.fillStyle = gradient; glowContext.fillRect(0, 0, 64, 64);
   const glowTexture = new THREE.CanvasTexture(glowCanvas);
-  const ambient = new AmbientField(scene, plane, glowTexture);
+  const ambient = new ProceduralAmbientGrid(scene, renderer, theme);
   const point = new THREE.Vector3();
   const material = (colour: string, glow = false) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, ...(glow ? { map: glowTexture } : {}) });
   const requestFrame = (dirty = true) => {
@@ -108,7 +109,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   function scheduleFrame(now: number): void {
     if (!canRender()) return;
     if (graphAnimating && motion()) { requestFrame(false); return; }
-    const delay = Math.min(motion() && model.connection === "connected" ? 1000 / 15 : Infinity,
+    const delay = Math.min(motion() && model.connection === "connected" && ambient.isAnimating() ? 1000 / 24 : Infinity,
       Math.min(nextBubbleExpiry, nextActivityUpdate) - now + 1);
     if (Number.isFinite(delay)) wakeTimer = setTimeout(() => { wakeTimer = undefined; requestFrame(false); }, Math.max(16, delay));
   }
@@ -178,7 +179,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   function removeCluster(cluster: Cluster): void {
     for (const node of cluster.nodes.values()) node.halo.material.dispose();
     for (const line of cluster.lines.values()) { line.geometry.dispose(); line.material.dispose(); }
-    cluster.wash.material.dispose(); scene.remove(cluster.group);
+    scene.remove(cluster.group);
   }
   function rememberFocusAnchors(resized = false): void {
     focusAnchors.clear();
@@ -202,14 +203,12 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       let cluster = clusters.get(project.id);
       if (!cluster) {
         const group = new THREE.Group(); group.position.set(project.position.x, project.position.y, 0); group.scale.setScalar(project.scale);
-        const wash = new THREE.Mesh(plane, material(theme.accent, true)); wash.position.z = -8; group.add(wash); scene.add(group);
-        cluster = { layout: project, group, wash, nodes: new Map(), lines: new Map(), signature: "", opacity: 1, routedAt: 0,
+        scene.add(group);
+        cluster = { layout: project, group, nodes: new Map(), lines: new Map(), signature: "", opacity: 1, routedAt: 0,
           depth: 1, depthHeld: false, depthRange: { min: 1, max: 1 } }; clusters.set(project.id, cluster);
       }
       cluster.layout = project;
       if (focused && !focusAnchors.has(project.id)) focusAnchors.set(project.id, { ...project.position, scale: project.scale });
-      cluster.wash.position.set(project.bounds.x + project.bounds.width / 2, project.bounds.y + project.bounds.height / 2, -8);
-      cluster.wash.scale.set(project.bounds.width * 1.15, project.bounds.height * 1.15, 1);
       const nodeIds = new Set(project.nodes.map(node => node.id));
       for (const [id, visual] of cluster.nodes) if (!nodeIds.has(id)) { cluster.group.remove(visual.halo); visual.halo.material.dispose(); cluster.nodes.delete(id); }
       for (const node of project.nodes) {
@@ -334,15 +333,13 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const now = Date.now(), dt = lastTime ? Math.min(0.05, (time - lastTime) / 1000) : 1 / 60;
     lastTime = time;
     const animate = motion(), smooth = animate ? 1 - Math.exp(-dt * 12) : 1;
-    ambient.update(width, height, theme, lastAmbientTime ? (time - lastAmbientTime) / 1000 : 0,
-      animate && model.connection === "connected", !!focused);
-    lastAmbientTime = time;
+    const live = model.connection === "connected";
     if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
+      ambient.advanceTime(dt, animate && live);
       renderer.render(scene, camera); scheduleFrame(now); return;
     }
     graphDirty = false;
     nextActivityUpdate = Infinity;
-    const live = model.connection === "connected";
     const summaries = aggregateOwnedActivity(model, ownership, activity, now);
     const agentById = new Map(model.nodes.map(node => [node.id, node]));
     const focusNode = focused ? layout.nodes.get(focused.id) : undefined;
@@ -354,6 +351,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       .map(id => layout.nodes.get(layout.memberToDisplay.get(id) ?? id)?.projectId));
     let continuous = false, transitioning = false;
     const opacityByNode = new Map<string, number>();
+    const influences: ProjectGridInfluence[] = [];
     for (const [id, cluster] of clusters) {
       const summary = summaries.get(id), intensity = live ? normaliseActivity(summary?.score ?? 0) : 0;
       if (animate && intensity > 0.001) nextActivityUpdate = now + 250;
@@ -392,7 +390,6 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       cluster.group.position.z += (z - cluster.group.position.z) * smooth;
       cluster.group.scale.setScalar(cluster.group.scale.x + (scale - cluster.group.scale.x) * transformSmooth);
       cluster.opacity += (alpha - cluster.opacity) * smooth;
-      cluster.wash.material.color.set(theme.accent); cluster.wash.material.opacity = cluster.opacity * (0.028 + intensity * 0.035);
       for (const node of cluster.layout.nodes) {
         const visual = cluster.nodes.get(node.id)!, count = summaries.get(node.id), agent = agentById.get(node.id);
         const working = live && (count?.working ?? 0) > 0;
@@ -419,8 +416,30 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         line.material.linewidth = highlighted ? 2.1 : 1.35;
         line.material.opacity = Math.min(opacityByNode.get(edge.source) ?? 1, opacityByNode.get(edge.target) ?? 1) * (highlighted ? 0.9 : 0.36) * reveal;
       }
+      const displayedScale = Math.abs(cluster.group.scale.x);
+      const displayedBounds = {
+        x: cluster.group.position.x + bounds.x * cluster.group.scale.x,
+        y: cluster.group.position.y + bounds.y * cluster.group.scale.y,
+        width: bounds.width * displayedScale,
+        height: bounds.height * displayedScale,
+      };
+      const workingFloor = live && (summary?.working ?? 0) > 0 ? 0.12 : 0;
+      influences.push({
+        id,
+        centreX: displayedBounds.x + displayedBounds.width / 2,
+        centreY: displayedBounds.y + displayedBounds.height / 2,
+        radiusX: Math.max(80, displayedBounds.width / 2 + 72),
+        radiusY: Math.max(72, displayedBounds.height / 2 + 62),
+        activity: cluster.layout.background ? 0 : Math.max(workingFloor, live ? intensity : 0),
+        visibility: cluster.opacity,
+        focus: foreground ? (focused?.kind === "workspace" ? 0.62 : 0.48) : 0,
+      });
     }
     scene.updateMatrixWorld(true);
+    // The field follows the presentation transform rather than the packed layout.
+    // An unchanged influence list leaves its typed-array attributes untouched.
+    ambient.updateField(influences);
+    ambient.advanceTime(dt, animate && live);
     if (structuralTransition && !transitioning) { structuralTransition = false; continuous = true; }
     if (transitioning) { delegationDirty = true; continuous = true; }
     else if (delegationDirty) rebuildDelegations();
@@ -501,6 +520,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     width = logicalWidth; height = logicalHeight; pixelRatio = nextPixelRatio;
     camera.left = 0; camera.right = width; camera.top = 0; camera.bottom = height; camera.updateProjectionMatrix();
     renderer.setPixelRatio(pixelRatio); renderer.setSize(width, height, false);
+    ambient.resize(width, height, pixelRatio);
     if (sizeChanged) { rebuildLayout(); if (focused) rememberFocusAnchors(true); }
     requestFrame();
   }
@@ -516,7 +536,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     event.preventDefault(); event.stopPropagation(); dismiss();
   };
   const onVisibility = () => {
-    lastTime = 0; lastAmbientTime = 0;
+    lastTime = 0;
     if (!canRender()) {
       if (frame) cancelAnimationFrame(frame); frame = 0;
       if (wakeTimer !== undefined) { clearTimeout(wakeTimer); wakeTimer = undefined; }
@@ -530,7 +550,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   };
   const onMotion = () => {
     if (!motion() && !focused && !structuralTransition) for (const cluster of clusters.values()) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
-    lastTime = 0; lastAmbientTime = 0;
+    lastTime = 0;
     clearPulses(); requestFrame();
   };
   const onContextLost = (event: Event) => { event.preventDefault(); failed = true; options.onError?.("The graphics context was lost. Showing the simple view."); };
@@ -569,7 +589,14 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       try { rebuildLayout(); acceptEvents(); requestFrame(); }
       catch (error) { failed = true; options.onError?.(error instanceof Error ? error.message : "The graph layout is unavailable."); }
     },
-    updateTheme(next) { theme = next; overlay.updateTheme(next); requestFrame(); },
+    updateTheme(next) {
+      theme = next; overlay.updateTheme(next); ambient.updateTheme(next);
+      for (const pulse of pulses) {
+        const node = model.nodes.find(candidate => candidate.id === pulse.nodeId);
+        if (node) pulse.light.setColour(statusColour(node, next));
+      }
+      requestFrame();
+    },
     setFocus, setSelection,
     setGroups(next) {
       const same = next.size === groupPreferences.size && [...next].every(([id, state]) => groupPreferences.get(id) === state);

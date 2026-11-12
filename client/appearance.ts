@@ -19,14 +19,34 @@ function luminance(hex: string): number | undefined {
   return components[0]! * 0.2126 + components[1]! * 0.7152 + components[2]! * 0.0722;
 }
 
+/** The supplied Paseo background remains the authoritative effective theme. */
+export function isDarkBackground(background: string): boolean {
+  return (luminance(background) ?? 1) < 0.35;
+}
+
+export interface GridPalette {
+  line: string;
+  highlight: string;
+  glow: string;
+  lineOpacity: number;
+  highlightOpacity: number;
+}
+
+/** Deliberately muted in light mode, while retaining enough contrast to read as a grid. */
+export function gridPalette(theme: OverviewTheme): GridPalette {
+  return isDarkBackground(theme.background)
+    ? { line: "#507b9e", highlight: "#59c8ec", glow: "#397bb5", lineOpacity: 0.18, highlightOpacity: 0.38 }
+    : { line: "#617f9b", highlight: "#247fa8", glow: "#5e8eb5", lineOpacity: 0.12, highlightOpacity: 0.24 };
+}
+
 /** A separate blue selection cue prevents green activity from implying selection. */
 export function selectionColour(theme: OverviewTheme): string {
-  return (luminance(theme.background) ?? 1) < 0.35 ? "#9cbdff" : "#315fc4";
+  return isDarkBackground(theme.background) ? "#9cbdff" : "#315fc4";
 }
 
 export function identityAccent(index: number, theme: OverviewTheme): string {
   const light = ["#6c7698", "#87647b", "#6b7a55", "#997652", "#547d8c", "#7e6c9c"];
   const dark = ["#adb9e0", "#d9abc5", "#b6ca99", "#dfbd92", "#a0cad7", "#c6b2e4"];
-  const palette = (luminance(theme.background) ?? 1) < 0.35 ? dark : light;
+  const palette = isDarkBackground(theme.background) ? dark : light;
   return palette[Math.abs(index) % palette.length]!;
 }
