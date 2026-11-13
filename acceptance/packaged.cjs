@@ -369,6 +369,9 @@ async function run() {
     assert.equal(await node.getAttribute("data-overview-role"), "agent");
     const child = page.locator(`[data-overview-kind="provider-subagent"][data-overview-workspace$=":${encodeURIComponent(denseWorkspace.workspaceId)}"]`).first();
     assert.equal(await child.getAttribute("data-overview-role"), "subagent");
+    // A floating card may legitimately cover a nearby child in a dense graph.
+    // Dismiss it through the real control before inspecting another node.
+    await page.getByTestId("overview-details-close").click();
     await child.click();
     const childId = await child.getAttribute("data-overview-id");
     const fullscreenButton = page.getByTestId("overview-fullscreen");
