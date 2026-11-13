@@ -245,7 +245,7 @@ describe("Overview observations", () => {
     const release = test.timelineReleases.get("parent");
     ready.reject(new Error("Temporary timeline failure")); await flush();
     expect(release).toHaveBeenCalledOnce();
-    expect(test.failed).toHaveBeenCalledWith("Temporary timeline failure");
+    expect(test.failed).toHaveBeenCalledWith("Temporary timeline failure", "detail");
     expect(test.subscribeTimeline).toHaveBeenCalledOnce();
     test.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: parent } });
     await flush();
@@ -356,6 +356,7 @@ describe("Overview observations", () => {
     expect(test.store.model.nodes.find(node => node.kind === "provider-subagent")).toMatchObject({
       id: "host:native:parent:child", state: "working", freshness: "stale",
     });
+    expect(test.failed).toHaveBeenCalledWith("Temporary roster failure", "detail");
     test.events.emit({ type: "agent.provider_subagents.update", payload: {
       kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "new", seq: 4,
       item: { type: "assistant_message", text: "Unverified old child" }, timestamp: "now",
@@ -610,6 +611,8 @@ describe("multi-host coordinator", () => {
     const timelineReleases = new Map<string, ReturnType<typeof vi.fn>>();
     const roster: RosterSnapshot = { parentAgentId: "same", availability: "resident",
       cursor: { generation: hostId, revision: 1 }, subagents: [] };
+    const providerSnapshot = vi.fn(async () => roster);
+    const getIcon = vi.fn(async (_projectId: string) => null);
     const api = {
       observeEvents: vi.fn(() => events),
       agents: {
@@ -622,17 +625,17 @@ describe("multi-host coordinator", () => {
             return Object.assign(() => { void release(); }, { ready: Promise.resolve(), release });
           });
           return { timeline: { subscribe, refetch: vi.fn() },
-            providerSubagents: { snapshot: vi.fn(async () => roster) } };
+            providerSubagents: { snapshot: providerSnapshot } };
         }),
       },
       workspaces: { list: vi.fn(async () => ({ ...(await workspace.ready), subscription: workspace })) },
       projects: {
         list: vi.fn(async () => ({ projects: [{ projectId: "project", projectDisplayName: `Project ${hostId}`, projectIconRevision: "one" }] })),
-        getIcon: vi.fn(async () => null),
+        getIcon,
       },
     };
     return { api: api as unknown as OverviewApi, observations: [directory, workspace, events],
-      directory, workspace, events, timelineHandlers, timelineReleases };
+      directory, workspace, events, timelineHandlers, timelineReleases, providerSnapshot, getIcon };
   }
 
   it("retries failed startup on a later online reconciliation without disturbing other hosts", async () => {
@@ -644,16 +647,64 @@ describe("multi-host coordinator", () => {
     const summaries = [{ id: "one", label: "One", status: "online" as const }, { id: "two", label: "Two", status: "online" as const }];
     hosts.setHosts(summaries); await flush();
     expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("disconnected");
+    expect(hosts.model.hosts.find(host => host.id === "one")?.error).toBe("Temporary initial directory failure");
     expect(hosts.model.hosts.find(host => host.id === "two")?.connection).toBe("connected");
     const otherReads = vi.mocked(two.api.agents.list).mock.calls.length;
     vi.mocked(one.api.agents.list).mockRejectedValueOnce(new Error("Second transient failure"));
     hosts.setHosts(summaries); await flush();
     expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("disconnected");
+    expect(hosts.model.hosts.find(host => host.id === "one")?.error).toBe("Second transient failure");
     hosts.setHosts(summaries); await flush();
     expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("connected");
+    expect(hosts.model.hosts.find(host => host.id === "one")?.error).toBeUndefined();
     expect(hosts.model.nodes.some(node => node.hostId === "one")).toBe(true);
     expect(vi.mocked(two.api.agents.list).mock.calls.length).toBe(otherReads);
     hosts.dispose();
+  });
+
+  it("keeps roster and icon detail failures as diagnostics without a host-wide error", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const child: NativeRecord = { id: "child", parentAgentId: "same", provider: "codex",
+      title: "Child", description: null, status: "running" };
+    one.providerSnapshot.mockResolvedValueOnce({ parentAgentId: "same", availability: "resident",
+      cursor: { generation: "one", revision: 1 }, subagents: [child] })
+      .mockRejectedValue(new Error("Temporary roster failure"));
+    one.getIcon.mockRejectedValue(new Error("Temporary icon failure"));
+    const changed = vi.fn(), failed = vi.fn();
+    const hosts = createOverviewHosts({
+      acquire: id => id === "one" ? one.api : two.api, observeActivity: false,
+      onChange: changed, onError: failed,
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts.find(host => host.id === "one")?.error).toBeUndefined();
+    expect(hosts.model.nodes.find(node => node.id === "one:native:same:child")).toMatchObject({
+      state: "working", freshness: "current",
+    });
+    expect(failed).toHaveBeenCalledWith("one", "Temporary icon failure");
+
+    const invalidate = { type: "agent.provider_subagents.update", payload: {
+      kind: "remove", parentAgentId: "same", subagentId: "missing",
+    } };
+    one.events.emit(invalidate); await flush(); await vi.advanceTimersByTimeAsync(50);
+    one.events.emit(invalidate); await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.nodes.find(node => node.id === "one:native:same:child")).toMatchObject({
+      state: "working", freshness: "stale",
+    });
+    expect(hosts.model.hosts.find(host => host.id === "one")?.error).toBeUndefined();
+    expect(failed.mock.calls).toEqual(expect.arrayContaining([
+      ["one", "Temporary roster failure"], ["one", "Temporary icon failure"],
+    ]));
+    for (const [model] of changed.mock.calls) {
+      expect(model.hosts.find((host: { id: string }) => host.id === "one")?.error).toBeUndefined();
+    }
+    expect(hosts.model.hosts.find(host => host.id === "two")).toMatchObject({ connection: "connected" });
+    expect(hosts.model.nodes.some(node => node.hostId === "two")).toBe(true);
+    expect(hosts.model.hosts.find(host => host.id === "two")?.error).toBeUndefined();
   });
 
   it("isolates duplicate raw IDs and event sequences across two hosts", async () => {

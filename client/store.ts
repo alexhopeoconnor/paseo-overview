@@ -8,13 +8,15 @@ import { previewSummary, previewText, timelinePreview } from "./event-preview";
 import { createOverviewReader } from "./host-api";
 import { ReadQueue, errorText, observeDirectory, record, type DirectoryChange, type DirectoryPage, type OverviewApi, type ReadGate } from "./transport";
 
+export type OverviewErrorScope = "host" | "detail";
+
 interface Options {
   hostId: string;
   paseo: OverviewApi;
   readRoster?(parentAgentId: string): Promise<RosterSnapshot>;
   readIcon?(projectId: string): Promise<ProjectIcon | null>;
   onChange(model: OverviewHostSnapshot): void;
-  onError(message: string): void;
+  onError(message: string, scope: OverviewErrorScope): void;
   /** Older phone parsers can strip replay markers; metadata remains safe there. */
   observeActivity?: boolean;
   /** Shared admission gate so many hosts cannot multiply passive read pressure. */
@@ -129,7 +131,9 @@ export function createOverviewStore(options: Options) {
     readiness[key] = state === "current";
     schedule();
   }
-  function report(error: unknown) { if (!disposed && visible && connection === "connected") options.onError(errorText(error)); }
+  function report(error: unknown, scope: OverviewErrorScope = "detail") {
+    if (!disposed && visible && connection === "connected") options.onError(errorText(error), scope);
+  }
   function claimEvent(key: string): boolean {
     if (!active() || options.observeActivity === false) return false;
     const now = Date.now();
@@ -295,7 +299,7 @@ export function createOverviewStore(options: Options) {
     directoryFreshness = { projects: "refreshing", workspaces: "refreshing", agents: "refreshing" };
     const alive = () => !disposed && visible && connection === "connected" && generation === run;
     const ownedQueue = new ReadQueue(4, options.gate); queue = ownedQueue;
-    const failed = (error: unknown) => { if (alive()) report(error); };
+    const failed = (error: unknown) => { if (alive()) report(error, "host"); };
     rosters ??= new RosterTracker({
       queue: ownedQueue, read: readRoster,
       changed: () => { if (active()) { pruneAssistant(); schedule(); } }, failed: report,

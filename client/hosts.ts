@@ -111,9 +111,15 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
         }
         emit();
       },
-      onError: message => {
+      onError: (message, scope) => {
         if (disposed || entry.token !== token || entries.get(entry.summary.id) !== entry) return;
-        entry.error = message; options.onError?.(entry.summary.id, message); emit();
+        if (scope === "host") {
+          entry.error = message;
+          emit();
+        }
+        // Partial read failures do not mean the host failed. Roster freshness
+        // and retained records still describe any unavailable detail data.
+        options.onError?.(entry.summary.id, message);
       },
     });
     entry.store = store;
