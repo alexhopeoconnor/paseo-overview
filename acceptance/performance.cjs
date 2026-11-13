@@ -57,6 +57,12 @@ const percentile = (values, fraction) => {
         frameIntervalMs: { median: percentile(intervals, 0.5), p95: percentile(intervals, 0.95), maximum: Math.max(0, ...intervals) },
         mainThreadMsPerSecond: (after.TaskDuration - before.TaskDuration) * 1000 / elapsed,
         scriptMsPerSecond: (after.ScriptDuration - before.ScriptDuration) * 1000 / elapsed,
+        mainThreadMsPerFrame: (after.TaskDuration - before.TaskDuration) * 1000 / Math.max(1, telemetry.frames),
+        styleMsPerSecond: (after.RecalcStyleDuration - before.RecalcStyleDuration) * 1000 / elapsed,
+        layoutMsPerSecond: (after.LayoutDuration - before.LayoutDuration) * 1000 / elapsed,
+        fieldBuilds: telemetry.fieldBuilds, fieldUploads: telemetry.fieldUploads,
+        maximumFieldBuildsPerFrame: telemetry.maximumFieldBuildsPerFrame,
+        transformCommits: telemetry.transformCommits, routeSyncs: telemetry.routeSyncs, domAttributes: telemetry.domAttributes,
         layoutBuilds: telemetry.layoutBuilds, overlayPositions: telemetry.overlayPositions,
         overlayFinishes: telemetry.overlayFinishes, resources: await page.evaluate(() => window.overviewTest.resourceEvidence()) };
     }
@@ -114,6 +120,7 @@ const percentile = (values, fraction) => {
     assert.ok(results.find(item => item.name === 'empty-online-room').framesPerSecond <= 17,
       'Sparse transit in an empty online room stays on the ambient cadence');
     assert.equal(results.find(item => item.name === 'hidden').frames, 0);
+    assert.ok(results.every(item => item.maximumFieldBuildsPerFrame <= 1), 'Background changes flush the field at most once per render');
     assert.ok(results.filter(item => item.name !== 'active-streaming').every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${output}/performance-results.json`, JSON.stringify({ gpu, viewport: { width: 1516, height: 1100 },

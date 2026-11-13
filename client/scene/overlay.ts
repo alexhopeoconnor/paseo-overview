@@ -195,7 +195,7 @@ export class GraphOverlay {
   sync(layout: SceneLayout, model: OverviewModel): void {
     this.model = model;
     for (const [id, item] of this.nodes) if (!layout.nodes.has(id)) {
-      item.button.remove(); this.nodes.delete(id); this.nodeGeometryRevision++;
+      item.button.remove(); this.nodes.delete(id); this.positions.delete(id); this.bodies.delete(id); this.nodeGeometryRevision++;
     }
     if (this.hovered && !layout.nodes.has(this.hovered)) this.hover(null);
     this.delegationDescriptions.clear();
@@ -429,7 +429,9 @@ export class GraphOverlay {
     }
   }
 
-  beginPositions(): void { this.occupied = []; this.positions.clear(); this.bodies.clear(); }
+  // The renderer may update one project only; other anchors keep their last
+  // committed geometry. Removed identities are pruned by sync().
+  beginPositions(): void { this.occupied.length = 0; }
   anchor(id: string): Rect | null { return this.bodies.get(id) ?? null; }
   positionNode(id: string, x: number, y: number, scale: number, presentation: NodePresentation, selected: boolean, focused: boolean, highlighted: boolean, foreground = false): void {
     const item = this.nodes.get(id); if (!item) return;

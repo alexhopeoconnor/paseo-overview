@@ -111,9 +111,12 @@ function checkRepresentation(nodes) {
     await settle(page);
     sameGeometry(beforeWheel, await inspect(page));
     const beforeIcon = await inspect(page);
-    await page.evaluate(() => window.overviewTest.updateIcon());
+    await page.evaluate(() => { window.overviewTest.resetTelemetry(); window.overviewTest.updateIcon(); });
     await settle(page);
     sameGeometry(beforeIcon, await inspect(page));
+    const metadataUpdate = await page.evaluate(() => window.overviewTest.telemetry());
+    assert.ok(metadataUpdate.layoutBuilds > 0, 'Metadata acceptance exercises rematerialized layout nodes');
+    assert.equal(metadataUpdate.routeSyncs, 0, 'Metadata-only changes retain unchanged project route geometry');
 
     await node(page, 'w0').click();
     await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.activity(); });
@@ -158,7 +161,7 @@ function checkRepresentation(nodes) {
     const regions = graphBefore.slice(0, 2).map(graph => ({ x: graph.x - 45, y: graph.y - 45, width: graph.width + 90, height: graph.height + 90 }));
     const beforeIllumination = await page.evaluate(regions => window.overviewTest.ambientEvidence('local', 3, regions), regions);
     await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.resetTelemetry(); window.overviewTest.burst(); });
-    await page.waitForTimeout(160);
+    await settle(page);
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).pulseUpdates >= 2, 'Activity depth preserves real travelling pulse updates');
     const pulseTheme = await page.evaluate(() => {
       const before = window.overviewTest.pulseEvidence();
@@ -171,6 +174,10 @@ function checkRepresentation(nodes) {
     await page.evaluate(() => window.overviewTest.theme(true));
     await page.waitForTimeout(1800);
     const depthAfter = await inspect(page);
+    const depthTelemetry = await page.evaluate(() => window.overviewTest.telemetry());
+    assert.ok(depthTelemetry.maximumFieldBuildsPerFrame <= 1, 'Project updates, clock advance and arrivals share one field flush per render');
+    assert.ok((await page.evaluate(() => window.overviewTest.geometryEvidence())).maximumNodeError < 0.001,
+      'HTML nodes use the exact committed Three.js project transforms');
     assert.ok(depthAfter.find(item => item.id === 'p0').box.width > depthBefore.find(item => item.id === 'p0').box.width * 1.01, 'Busy project becomes modestly larger');
     assert.ok(depthAfter.find(item => item.id === 'p1').box.width < depthBefore.find(item => item.id === 'p1').box.width * 0.99, 'Quiet project gently recedes');
     const graphAfter = (await page.evaluate(() => window.overviewTest.telemetry())).graphs;
@@ -291,6 +298,8 @@ function checkRepresentation(nodes) {
     const ambientAfter = await page.evaluate(() => window.overviewTest.telemetry());
     assert.ok(ambientAfter.frames <= 18, `Background scheduling stays bounded (${ambientAfter.frames} frames)`);
     assert.equal(ambientAfter.layoutBuilds, 0, 'Background ticks do not rebuild layout');
+    assert.equal(ambientAfter.fieldBuilds, 0, 'Particle phase and empty-room transit do not rebuild the field');
+    assert.equal(ambientAfter.fieldUploads, 0, 'Unchanged fields are not uploaded');
     for (const mode of ['pause', 'reduce', 'hidden', 'disconnected']) {
       if (mode === 'pause') await page.evaluate(() => window.overviewTest.motion(false));
       if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
@@ -323,13 +332,16 @@ function checkRepresentation(nodes) {
     assert.ok(steady.frames > 0, 'Working hosts retain their animated status');
     assert.equal(steady.overlayPositions, 0, 'Steady heartbeat frames do not rewrite node DOM');
     assert.equal(steady.overlayFinishes, 0, 'Steady heartbeat frames do not repeat bubble placement');
+    assert.equal(steady.routeSyncs, 0, 'Unchanged projects retain projected routes');
     assert.equal((await page.evaluate(() => window.overviewTest.resourceEvidence())).zeroOpacityDrawables, 0, 'Transparent halo meshes are excluded from draws');
     await page.evaluate(() => { window.overviewTest.hostActivity('first'); window.overviewTest.hostActivity('second'); });
     await page.waitForTimeout(120);
     await node(page, 'second:native:same:child').click();
     const beforeDisconnect = await inspect(page);
     await page.evaluate(() => window.overviewTest.hostConnection('first', 'disconnected'));
-    await page.waitForTimeout(120);
+    // Software rendering can defer the requested paint beyond a short wall-clock
+    // delay. Observe the updated frame before inspecting transient DOM cleanup.
+    await settle(page);
     assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'second:native:same:child');
     assert.ok(await page.getByText('second command finished', { exact: true }).count(), 'The other host retains its held bubble');
     assert.equal(await page.getByText('first command finished', { exact: true }).count(), 0, 'Disconnected host previews are cleared');
@@ -366,7 +378,9 @@ function checkRepresentation(nodes) {
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/renderer-failure.png` }).catch(() => {});
-      await fs.writeFile(`${output}/renderer-failure.json`, JSON.stringify({ message: error.message, errors, nodes: await inspect(page).catch(() => []) }, null, 2));
+      await fs.writeFile(`${output}/renderer-failure.json`, JSON.stringify({ message: error.message, errors,
+        telemetry: await page.evaluate(() => window.overviewTest.telemetry()).catch(() => null),
+        nodes: await inspect(page).catch(() => []) }, null, 2));
     }
     throw error;
   } finally { await browser.close(); }

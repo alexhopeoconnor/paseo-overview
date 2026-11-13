@@ -11,6 +11,7 @@ import type { ProjectSpatialPresentation } from "../client/scene/spatial";
 import { FibreLight } from "../client/scene/lines";
 import { StableLayout, type ProjectLayout } from "../client/layout";
 import { GraphOverlay } from "../client/scene/overlay";
+import { RoomField } from "../client/scene/room-field";
 
 // Fixture-only observation of the actual renderer, without a production debug API.
 const performanceMode = new URLSearchParams(location.search).get("performance") === "1";
@@ -22,10 +23,25 @@ WebGL2RenderingContext.prototype.getShaderInfoLog = function (shader) {
   return log;
 };
 const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, overlayPositions: 0, overlayFinishes: 0,
+  fieldBuilds: 0, fieldUploads: 0, maximumFieldBuildsPerFrame: 0, routeSyncs: 0, transformCommits: 0, domAttributes: 0,
   graphs: [] as { id: number; x: number; y: number; width: number; height: number; neutralWidth: number; neutralHeight: number }[], graphFrames: [] as { id: number; width: number }[][], ambient: [] as number[] };
 const positionNode = GraphOverlay.prototype.positionNode, finishPositions = GraphOverlay.prototype.finishPositions;
 GraphOverlay.prototype.positionNode = function (...args) { telemetry.overlayPositions++; return positionNode.apply(this, args); };
 GraphOverlay.prototype.finishPositions = function (...args) { telemetry.overlayFinishes++; return finishPositions.apply(this, args); };
+const fieldUpdate = RoomField.prototype.updateProjects;
+let fieldBuildsSinceFrame = 0;
+RoomField.prototype.updateProjects = function (...args) {
+  const version = this.texture.version;
+  const changed = fieldUpdate.apply(this, args);
+  if (changed) { telemetry.fieldBuilds++; fieldBuildsSinceFrame++; }
+  if (this.texture.version !== version) telemetry.fieldUploads++;
+  return changed;
+};
+const setRoutes = GraphOverlay.prototype.setRoutes;
+GraphOverlay.prototype.setRoutes = function (...args) { telemetry.routeSyncs++; return setRoutes.apply(this, args); };
+const displayedTransforms = new Map<number, string>();
+new MutationObserver(records => { telemetry.domAttributes += records.filter(record => record.type === "attributes").length; })
+  .observe(document.getElementById("graph")!, { subtree: true, attributes: true });
 const layoutUpdate = StableLayout.prototype.update;
 let displayedProjects = new Map<string, ProjectLayout>();
 StableLayout.prototype.update = function (...args) {
@@ -63,8 +79,14 @@ Scene.prototype.onBeforeRender = function (...args) {
   }
   if (this.name !== "overview-foreground") return;
   observedScene = this; observedRenderer = args[0]; observedCamera = args[2]; telemetry.frames++;
+  telemetry.maximumFieldBuildsPerFrame = Math.max(telemetry.maximumFieldBuildsPerFrame, fieldBuildsSinceFrame);
+  fieldBuildsSinceFrame = 0;
   telemetry.frameTimes.push(performance.now());
   if (telemetry.frameTimes.length > 4096) telemetry.frameTimes.splice(0, 2048);
+  for (const group of this.children) if (group.type === "Group") {
+    const transform = `${group.position.x}:${group.position.y}:${group.scale.x}`;
+    if (displayedTransforms.get(group.id) !== transform) { telemetry.transformCommits++; displayedTransforms.set(group.id, transform); }
+  }
   if (performanceMode) return;
   const projects = [...displayedProjects.values()];
   telemetry.graphs = this.children.filter(child => child.type === "Group").map((child, index) => {
@@ -117,6 +139,21 @@ function update(value: OverviewModel, stage: string) {
   state,
   appearance(value: Partial<OverviewAppearance>) { appearance = { ...appearance, ...value }; renderer.setAppearance(appearance); },
   spatialEvidence() { return spatialProjects; },
+  geometryEvidence() {
+    const groups = observedScene!.children.filter(child => child.type === "Group");
+    let maximumNodeError = 0;
+    [...displayedProjects.values()].forEach((project, index) => {
+      const group = groups[index]!;
+      for (const node of project.nodes) {
+        const button = parent.querySelector<HTMLElement>(`[data-overview-id="${CSS.escape(node.id)}"]`)!;
+        maximumNodeError = Math.max(maximumNodeError, Math.hypot(
+          parseFloat(button.style.left) - (group.position.x + node.position.x * group.scale.x),
+          parseFloat(button.style.top) - (group.position.y + node.position.y * group.scale.x),
+        ));
+      }
+    });
+    return { maximumNodeError };
+  },
   feedEvidence() { return { ...feeds }; },
   shaderLogs() { return [...shaderLogs]; },
   presentation: () => ({ ...presentation, groups: [...presentation.groups] }),
@@ -149,7 +186,7 @@ function update(value: OverviewModel, stage: string) {
   burst() { update({ ...current, events: Array.from({ length: 40 }, (_, index) => ({ hostId: fixtureHost.id, id: `depth-${Date.now()}-${index}`, nodeId: "depth-a", kind: "activity", timestamp: Date.now() })) }, "depth"); },
   connection(connection: OverviewHostState["connection"]) { update({ ...current, hosts: current.hosts.map(host => ({ ...host, connection })) }, "connection"); },
   telemetry() { return telemetry; },
-  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; telemetry.overlayPositions = 0; telemetry.overlayFinishes = 0; },
+  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; telemetry.overlayPositions = 0; telemetry.overlayFinishes = 0; telemetry.fieldBuilds = 0; telemetry.fieldUploads = 0; telemetry.maximumFieldBuildsPerFrame = 0; fieldBuildsSinceFrame = 0; telemetry.routeSyncs = 0; telemetry.transformCommits = 0; telemetry.domAttributes = 0; },
   ambientEvidence(key = "default", time?: number, regions: { x: number; y: number; width: number; height: number }[] = []) {
     const scene = backgroundScene!, renderer = observedRenderer!, camera = backgroundCamera!;
     const grids = scene.children.filter(child => child.userData.overviewAmbientGrid);

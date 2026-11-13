@@ -258,6 +258,30 @@ describe("incremental graph overlay", () => {
     expect(overlay.anchor("agent")).toEqual({ x: 188, y: 128, width: 64, height: 64 });
   });
 
+  it("retains another project's anchors and bubble obstacles during a partial update", () => {
+    const { overlay } = graphFixture();
+    const first = positionedNode("agent"), other = positionedNode("other", { projectId: "other-project" });
+    overlay.sync(sceneLayout([first, other]), modelWith(["agent", "other"]));
+    overlay.beginPositions();
+    overlay.positionNode("agent", 200, 200, 1, presentation, false, false, false);
+    overlay.positionNode("other", 500, 200, 1, presentation, false, false, false);
+    overlay.finishPositions([activityBubble("other")], 800, 500);
+    const anchor = overlay.anchor("other"), otherButton = nodeButton(overlay, "other");
+    const bubble = bubbleButton(overlay, "other");
+    otherButton.styleWrites.length = 0; bubble.styleWrites.length = 0;
+
+    overlay.beginPositions();
+    overlay.positionNode("agent", 210, 200, 1, presentation, false, false, false);
+    overlay.finishPositions([activityBubble("other")], 800, 500);
+    expect(overlay.anchor("other")).toBe(anchor);
+    expect(otherButton.styleWrites).toEqual([]);
+    expect(bubble.styleWrites).toEqual([]);
+    expect(overlay.anchor("agent")?.x).toBe(194);
+
+    overlay.sync(sceneLayout([first]), modelWith(["agent"]));
+    expect(overlay.anchor("other")).toBeNull();
+  });
+
   it("reindexes collapse controls when a group changes parent", () => {
     const { overlay } = graphFixture();
     const controlBounds = { x: 10, y: 10, width: 74, height: 28 };

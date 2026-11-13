@@ -155,6 +155,7 @@ export class ProceduralAmbientGrid implements AmbientGrid {
    * Root owns the normal clear; a failed pass needs its own complete retry clear.
    */
   renderWithBackgroundFallback(renderForeground: () => void): void {
+    if (!this.failed && !this.disposed && this.appearance.background !== "off") this.clouds.flushState();
     let renderingBackground = false;
     let backgroundFailed = false;
     const composite = (guard = false): void => {

@@ -12,7 +12,7 @@ import { AMBIENT_PHASE_PERIOD_SECONDS } from "../client/scene/ambient-shader";
 import { ProjectParticleClouds, CLOUD_GLOBAL_POINT_BUDGET, cloudPointBufferBudget, cloudPointsPerProject, cloudSeed } from "../client/scene/clouds";
 import { OverviewProjection, ROOM_VERTICAL_FOV_DEGREES } from "../client/scene/projection";
 import { PerspectiveRoom, ROOM_SEAM_SCREEN_FRACTION, ROOM_WALL_VIEW_DEPTH } from "../client/scene/room";
-import { ROOM_FIELD_MAX_CSS_DISPLACEMENT } from "../client/scene/room-field";
+import { ROOM_FIELD_MAX_CSS_DISPLACEMENT, RoomField } from "../client/scene/room-field";
 import { NEUTRAL_VIEW_DISTANCE, type ProjectSpatialPresentation } from "../client/scene/spatial";
 
 function fixture(): OverviewModel {
@@ -134,6 +134,53 @@ function cloudState(clouds: ProjectParticleClouds, index = 0): Float32Array {
   return clouds.stateData.subarray(index * 16, index * 16 + 16);
 }
 
+/** Original full-lattice formula used only to verify the bounded implementation. */
+function referenceFieldData(room: PerspectiveRoom, projection: OverviewProjection,
+  projects: readonly ProjectSpatialPresentation[]): Float32Array {
+  const size = room.fieldUniforms.uRoomFieldSize.value, origin = room.fieldUniforms.uRoomFieldOrigin.value;
+  const width = Math.max(1, Math.round(size.x)), height = Math.max(1, Math.round(size.y));
+  const originX = Math.round(origin.x), originY = Math.round(origin.y), count = width * height;
+  const screenX = new Float32Array(count), screenY = new Float32Array(count), worldPerPixel = new Float32Array(count);
+  for (let row = 0; row < height; row++) for (let column = 0; column < width; column++) {
+    const index = row * width + column, fieldV = originY + row;
+    const point = room.baseSurfacePoint({ surface: fieldV < 0 ? "wall" : "floor", u: originX + column, v: Math.abs(fieldV) });
+    const screen = projection.screenPoint(point);
+    screenX[index] = screen.x; screenY[index] = screen.y;
+    worldPerPixel[index] = Math.max(0.000001, -point.z) / projection.focalPixels;
+  }
+  const sums = new Float32Array(count * 2);
+  for (const project of projects) {
+    const energy = Math.max(Math.max(0, Math.min(1, project.energy)), project.focused ? 0.5 : 0, project.inspected ? 0.25 : 0);
+    const weight = Math.max(0, Math.min(1, project.visibility)) * energy;
+    if (weight <= 0) continue;
+    const radius = 190 + energy * 70, centreX = project.screenCentre.x, centreY = project.screenCentre.y;
+    for (let index = 0; index < count; index++) {
+      const dx = centreX - screenX[index]!, dy = centreY - screenY[index]!;
+      const distance = Math.hypot(dx, dy);
+      if (!(distance < radius)) continue;
+      const falloff = 1 - distance / radius, influence = falloff * falloff * weight;
+      const direction = distance > 0.0001 ? 1 / distance : 0;
+      sums[index * 2]! += dx * direction * influence;
+      sums[index * 2 + 1]! += dy * direction * influence;
+    }
+  }
+  const data = new Float32Array(count * 4);
+  for (let index = 0; index < count; index++) {
+    const row = Math.floor(index / width), v = originY + row;
+    const amount = Math.max(0, Math.min(1, Math.abs(v) / 2.5)), seamDamping = amount * amount * (3 - 2 * amount);
+    let x = sums[index * 2]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
+    let y = sums[index * 2 + 1]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
+    const length = Math.hypot(x, y);
+    if (length > ROOM_FIELD_MAX_CSS_DISPLACEMENT) {
+      x *= ROOM_FIELD_MAX_CSS_DISPLACEMENT / length;
+      y *= ROOM_FIELD_MAX_CSS_DISPLACEMENT / length;
+    }
+    const scale = worldPerPixel[index]!, offset = index * 4;
+    data[offset] = x * scale; data[offset + 1] = -y * scale; data[offset + 3] = 1;
+  }
+  return data;
+}
+
 function shaderHarness() {
   const rendered: THREE.Scene[] = [];
   const renderer = {
@@ -183,9 +230,11 @@ describe("perspective room and projection", () => {
     expect(room.diagnostics.floorNearViewDepth).toBeGreaterThan(0);
     expect(room.diagnostics.floorNearViewDepth).toBeLessThan(ROOM_WALL_VIEW_DEPTH);
     const revision = room.revision;
+    const fieldData = (room.fieldUniforms.uRoomField.value.image as { data: Float32Array }).data;
     room.resize(2);
     expect(room.mesh.material.uniforms.uPixelRatio!.value).toBe(2);
     expect(room.revision).toBe(revision + 1);
+    expect((room.fieldUniforms.uRoomField.value.image as { data: Float32Array }).data).toBe(fieldData);
     room.dispose(); expect(scene.children).toHaveLength(0);
   });
 
@@ -263,6 +312,52 @@ describe("perspective room and projection", () => {
     room.dispose();
   });
 
+  it("matches the full reference deformation across seams, offscreen centres, boundaries and overlaps", () => {
+    const projection = new OverviewProjection(640, 440, 1);
+    const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
+    const seamY = projection.height * ROOM_SEAM_SCREEN_FRACTION;
+    const cases: ProjectSpatialPresentation[][] = [
+      [spatialProject("seam", { screenCentre: { x: 320, y: seamY }, energy: 1 })],
+      [spatialProject("above", { screenCentre: { x: -120, y: -90 }, energy: 0.7, visibility: 0.8 }),
+        spatialProject("below", { screenCentre: { x: 760, y: 520 }, energy: 0.4 })],
+      [spatialProject("corner", { screenCentre: { x: 0, y: 0 }, energy: 1 }),
+        spatialProject("edge", { screenCentre: { x: 640, y: 440 }, energy: 0.5 })],
+      [spatialProject("overlap-a", { screenCentre: { x: 300, y: 250 }, energy: 1, visibility: 0.9 }),
+        spatialProject("overlap-b", { screenCentre: { x: 330, y: 270 }, energy: 0.6, visibility: 0.7, focused: true })],
+    ];
+    for (const projects of cases) {
+      expect(room.updateProjects(projects)).toBe(true);
+      const actual = (room.fieldUniforms.uRoomField.value.image as { data: Float32Array }).data;
+      const expected = referenceFieldData(room, projection, projects);
+      let maximumDifference = 0;
+      for (let index = 0; index < actual.length; index++) {
+        maximumDifference = Math.max(maximumDifference, Math.abs(actual[index]! - expected[index]!));
+      }
+      expect(maximumDifference).toBeLessThan(1e-9);
+    }
+    room.dispose();
+  });
+
+  it("ignores order and irrelevant changes but honors the effective focused/inspected floor", () => {
+    const projection = new OverviewProjection(640, 440, 1);
+    const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
+    const project = spatialProject("active", { energy: 1 });
+    expect(room.updateProjects([project])).toBe(true);
+    expect(room.updateProjects([{ ...project }])).toBe(false);
+    expect(room.updateProjects([{
+      ...project, viewDepth: 2500, scaleMultiplier: 2, elevation: 0.8,
+      screenBounds: { x: -40, y: -30, width: 900, height: 700 }, live: false,
+    }])).toBe(false);
+    const focused = { ...project, energy: 0.2, focused: true };
+    expect(room.updateProjects([focused])).toBe(true);
+    expect(room.updateProjects([{ ...focused, energy: 0.4 }])).toBe(false);
+    expect(room.updateProjects([{ ...focused, energy: 0.9, focused: false }])).toBe(true);
+    expect(room.updateProjects([{ ...focused, energy: 0.9, visibility: 2 }])).toBe(false);
+    expect(room.updateProjects([{ ...project, energy: 0.5 }, { ...project, projectId: "other" }])).toBe(true);
+    expect(room.updateProjects([{ ...project, projectId: "other" }, { ...project, energy: 0.5 }])).toBe(false);
+    room.dispose();
+  });
+
   it("matches interior mesh barycentric warp on both surface orientations", () => {
     const projection = new OverviewProjection(1200, 800, 1);
     const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
@@ -305,6 +400,7 @@ describe("project particle clouds", () => {
     const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
     const scene = new THREE.Scene(), clouds = new ProjectParticleClouds(scene, projection, room, gridTheme);
     clouds.updateProjects(projects);
+    clouds.flushState();
     return { projection, room, scene, clouds };
   }
 
@@ -321,6 +417,7 @@ describe("project particle clouds", () => {
     expect(clouds.lines.geometry.index!.count).toBeGreaterThan(projects.length);
     expect(projects.map(() => count).every(value => value === count)).toBe(true);
     clouds.advance(0.5, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]).toBe(0);
     const activeSlot = projects.map(project => project.projectId).sort().indexOf("project-69");
     expect(activeSlot).toBeGreaterThanOrEqual(0);
@@ -340,6 +437,7 @@ describe("project particle clouds", () => {
     expect(positions.count).toBeLessThanOrEqual(cloudPointBufferBudget(count));
     expect(clouds.lines.geometry.index!.count).toBe(0);
     clouds.advance(0.5, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]).toBeGreaterThan(0);
     expect(cloudState(clouds)[7]).toBeLessThan(1 / CLOUD_GLOBAL_POINT_BUDGET);
     const expectedX = (325 + (count - 1) * 320) / count;
@@ -347,9 +445,33 @@ describe("project particle clouds", () => {
     expect(projection.screenPoint(centre).x).toBeCloseTo(expectedX, 4);
     const before = [...positions.array], stateBefore = [...clouds.stateData], geometry = clouds.points.geometry;
     clouds.updateProjects([...projects].reverse());
+    clouds.flushState();
     expect(clouds.points.geometry).toBe(geometry);
     expect([...positions.array]).toEqual(before);
     expect([...clouds.stateData]).toEqual(stateBefore);
+    clouds.dispose();
+  });
+
+  it("rebuilds aggregate geometry after an aggregate/individual/aggregate round trip", () => {
+    const count = CLOUD_GLOBAL_POINT_BUDGET + 1;
+    const projects = Array.from({ length: count }, (_, index) => spatialProject(`transition-${index}`, {
+      screenCentre: { x: 320, y: 220 }, energy: index === 0 ? 1 : 0,
+    }));
+    const { clouds } = setup(projects);
+    clouds.advance(0.5, true, 1);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count).toBe(1);
+    const individual = projects.slice(0, 1000);
+    clouds.updateProjects(individual);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count)
+      .toBe(individual.length * cloudPointsPerProject(individual.length));
+    expect(clouds.lines.geometry.index!.count).toBeGreaterThan(0);
+    clouds.updateProjects(projects);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count).toBe(1);
+    expect(clouds.lines.geometry.index!.count).toBe(0);
+    expect(cloudState(clouds)[7]).toBeGreaterThan(0);
     clouds.dispose();
   });
 
@@ -365,23 +487,39 @@ describe("project particle clouds", () => {
     const movedSlot = [projects[0]!, centre, projects[2]!].map(project => project.projectId).sort().indexOf("a");
     const centreBefore = cloudState(clouds, movedSlot)[0]!;
     clouds.updateProjects([projects[0]!, centre, projects[2]!]);
+    clouds.flushState();
     expect([...geometry.getAttribute("position").array]).toEqual(before);
     expect(cloudState(clouds, movedSlot)[0]! - centreBefore).toBeCloseTo(20 * NEUTRAL_VIEW_DISTANCE / (440 / (2 * Math.tan(ROOM_VERTICAL_FOV_DEGREES * Math.PI / 360))), 4);
     expect(clouds.lines.geometry.getAttribute("position")).toBe(clouds.points.geometry.getAttribute("position"));
     expect(clouds.volume.geometry).toBe(clouds.points.geometry);
   });
 
+  it("detects mutations on a reused input object without rebuilding its geometry", () => {
+    const project = spatialProject("project");
+    const { clouds } = setup([project]);
+    const geometry = clouds.points.geometry, before = cloudState(clouds)[0]!;
+    project.screenCentre.x = 340;
+    clouds.updateProjects([project]);
+    clouds.flushState();
+    expect(clouds.points.geometry).toBe(geometry);
+    expect(cloudState(clouds)[0]).not.toBe(before);
+  });
+
   it("freezes fresh sustained energy while paused but allows explicit focus", () => {
     const project = spatialProject("project", { energy: 1 });
     const { clouds } = setup([project]);
     clouds.advance(10, false, 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBe(0);
     clouds.updateProjects([{ ...project, focused: true }]);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBeCloseTo(0.24);
     clouds.advance(0.5, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBeGreaterThan(0.24);
     clouds.updateProjects([{ ...project, focused: false, energy: 0 }]);
     clouds.advance(10, false, 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBeGreaterThan(0.24);
   });
 
@@ -397,6 +535,7 @@ describe("project particle clouds", () => {
     const stateVersion = clouds.stateTexture.version, stateValues = [...clouds.stateData];
     clouds.updateProjects([{ ...initial, energy: 1 }]);
     clouds.advance(10, false, 1);
+    clouds.flushState();
     expect(attributes.map(attribute => attribute.version)).toEqual(versions);
     expect(attributes.map(attribute => [...attribute.array])).toEqual(values);
     expect(clouds.stateTexture.version).toBe(stateVersion);
@@ -409,12 +548,16 @@ describe("project particle clouds", () => {
     const project = spatialProject("project", { energy: 1 });
     const { clouds } = setup([project]);
     clouds.advance(2, true, 1);
+    clouds.flushState();
     const sustained = cloudState(clouds)[7]!;
     clouds.arrive("project", 0.4);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
     clouds.arrive("project", 1);
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBe(1);
     clouds.clearTransient();
+    clouds.flushState();
     expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
   });
 
@@ -433,6 +576,7 @@ describe("project particle clouds", () => {
     clouds.advance(Infinity, true, 1); clouds.advance(Number.NaN, true, 1);
     expect(phase()).toBe(128.75);
     expect(clouds.lines.material.uniforms.uPhase!.value).toBe(phase());
+    clouds.flushState();
     expect(cloudState(clouds)[3]).toBe(phase());
   });
 
@@ -442,12 +586,14 @@ describe("project particle clouds", () => {
     const { clouds } = setup([frozen, live]);
     const frozenSlot = 0, liveSlot = 1;
     clouds.advance(1, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds, frozenSlot)[3]).toBe(0);
     expect(cloudState(clouds, frozenSlot)[7]).toBe(0);
     expect(cloudState(clouds, liveSlot)[3]).toBe(1);
     expect(cloudState(clouds, liveSlot)[7]).toBeGreaterThan(0);
     clouds.updateProjects([frozen, live], false);
     clouds.advance(1, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds, liveSlot)[3]).toBe(1);
     expect(clouds.isAnimating()).toBe(false);
     clouds.dispose();
@@ -458,19 +604,24 @@ describe("project particle clouds", () => {
     const other = spatialProject("other", { energy: 0.5 });
     const { clouds } = setup([project, other]);
     clouds.advance(1, true, 1);
+    clouds.flushState();
     const phase = cloudState(clouds, 1)[3]!, otherPhase = cloudState(clouds, 0)[3]!;
     const energy = cloudState(clouds, 1)[7]!;
     clouds.arrive("project", 1);
+    clouds.flushState();
     expect(cloudState(clouds, 1)[7]).toBe(1);
     clouds.clearProjects(new Set(["project"]));
+    clouds.flushState();
     expect(cloudState(clouds, 1)[3]).toBe(phase);
     expect(cloudState(clouds, 1)[7]).toBe(energy);
     expect(cloudState(clouds, 0)[3]).toBe(otherPhase);
     clouds.updateProjects([{ ...project, live: false }, other]);
     clouds.advance(1, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds, 1)[3]).toBe(phase);
     clouds.updateProjects([project, other]);
     clouds.advance(1, true, 1);
+    clouds.flushState();
     expect(cloudState(clouds, 1)[3]).toBe(phase + 1);
     expect(cloudState(clouds, 1)[7]).toBeLessThan(1);
     clouds.dispose();
@@ -481,6 +632,7 @@ describe("project particle clouds", () => {
     const points = clouds.points, lines = clouds.lines, volume = clouds.volume;
     const initialPositions = [...points.geometry.getAttribute("position").array];
     clouds.updateProjects([spatialProject("project", { energy: 1 })]);
+    clouds.flushState();
     expect([...points.geometry.getAttribute("position").array]).toEqual(initialPositions);
     clouds.updateTheme({ ...gridTheme, background: "#121926" });
     const palette = gridPalette({ ...gridTheme, background: "#121926" });
@@ -532,6 +684,60 @@ describe("ambient background lifecycle", () => {
     ambient.updateProjects([]);
     expect(ambient.isAnimating()).toBe(false);
     ambient.dispose(); expect(rendered[0]!.children).toHaveLength(0);
+  });
+
+  it("flushes one staged field pass per background render and skips phase-only or reordered input", () => {
+    const { renderer } = shaderHarness();
+    const ambient = new ProceduralAmbientGrid(new THREE.Scene(), renderer, gridTheme);
+    const fieldUpdate = vi.spyOn(RoomField.prototype, "updateProjects"), draw = vi.fn();
+    ambient.resize(640, 440, 1);
+    const first = spatialProject("project"), second = spatialProject("other", { screenCentre: { x: 420, y: 260 } });
+    ambient.updateProjects([first, second]);
+    ambient.advanceTime(1, true);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.advanceTime(1, true);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.updateProjects([second, first]);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.updateProjects([{ ...second }, { ...first, screenCentre: { x: 340, y: 240 } }]);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(2);
+    expect(draw).toHaveBeenCalledTimes(5);
+    fieldUpdate.mockRestore();
+    ambient.dispose();
+  });
+
+  it("flushes staged state after off, paused and offline renders", () => {
+    const { renderer } = shaderHarness();
+    const ambient = new ProceduralAmbientGrid(new THREE.Scene(), renderer, gridTheme);
+    const fieldUpdate = vi.spyOn(RoomField.prototype, "updateProjects"), draw = vi.fn();
+    ambient.resize(640, 440, 1);
+    const project = spatialProject("project");
+    ambient.updateProjects([project]);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.setAppearance({ ...DEFAULT_APPEARANCE, background: "off" });
+    ambient.updateProjects([{ ...project, screenCentre: { x: 360, y: 240 } }]);
+    ambient.advanceTime(1, true);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(1);
+    ambient.setAppearance({ ...DEFAULT_APPEARANCE, background: "static" });
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(2);
+    ambient.updateProjects([{ ...project, screenCentre: { x: 380, y: 250 } }]);
+    ambient.advanceTime(1, false);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(3);
+    ambient.updateProjects([{ ...project, screenCentre: { x: 400, y: 260 } }], false);
+    ambient.renderWithBackgroundFallback(draw);
+    expect(fieldUpdate).toHaveBeenCalledTimes(4);
+    fieldUpdate.mockRestore();
+    ambient.dispose();
   });
 
   it("isolates background shader failure and restores diagnostic settings", () => {

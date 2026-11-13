@@ -180,8 +180,17 @@ depth, once-only pulse/feed arrivals, persisted appearance, multi-host isolation
 and room projection. Activity and icon updates preserve packed positions.
 Heartbeat-only frames reuse node presentation, routes and activity aggregation;
 unchanged overlay properties are not rewritten. Cloud particle motion runs in
-GPU shaders from cached offsets and per-project state. Background-only frames
-reuse their field without layout or route work. Structural changes may expand an affected branch.
+GPU shaders from cached offsets and per-project state. Cloud targets, clock
+advancement and arrivals are combined before drawing, with at most one room-field
+calculation per render. Particle phase alone does not rebuild the field; its
+working buffers and unchanged inputs are retained.
+
+Automatic depth continues simulating smoothly, but changes smaller than 0.2 CSS
+pixels at the graph's bounds accumulate before being displayed. Graph geometry,
+HTML nodes, anchors, cloud projection and route endpoints share that displayed
+transform. Only moved projects refresh their screen geometry and routes;
+selection and explicit navigation remain immediate. Background-only frames reuse
+the field without layout or route work. Structural changes may expand an affected branch.
 
 An optional managed workstation installation uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.

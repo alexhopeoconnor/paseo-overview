@@ -4,6 +4,8 @@ import type { ProjectSpatialPresentation, RoomFieldUniforms, SurfacePoint, World
 
 export const ROOM_FIELD_MAX_CSS_DISPLACEMENT = 12;
 const ROOM_FIELD_INFLUENCE_RADIUS_CSS = 190;
+/** Broad-phase margin around the exact circular influence test. */
+const ROOM_FIELD_CANDIDATE_MARGIN = 0.001;
 
 /**
  * GLSL1-compatible and deliberately identical to RoomField's CPU triangular
@@ -62,6 +64,23 @@ function smoothstep01(value: number): number {
   return amount * amount * (3 - 2 * amount);
 }
 
+function sameNumber(left: number, right: number): boolean {
+  return Object.is(left, right);
+}
+
+/** The exact bounded energy consumed by the deformation formula. */
+function fieldEnergy(project: ProjectSpatialPresentation): number {
+  return Math.max(bounded(project.energy), project.focused ? 0.5 : 0, project.inspected ? 0.25 : 0);
+}
+
+interface CachedProject {
+  screenX: number;
+  screenY: number;
+  energy: number;
+  visibility: number;
+  seen: number;
+}
+
 /** Fixed-size world-displacement lattice; project influence never enters a fragment loop. */
 export class RoomField {
   private data = new Float32Array(4);
@@ -79,7 +98,12 @@ export class RoomField {
   private screenX = new Float32Array(1);
   private screenY = new Float32Array(1);
   private worldPerPixel = new Float32Array(1);
-  private projectKey = "";
+  private rowScreenY = new Float32Array(1);
+  /** Reused accumulation and broad-phase scratch storage. */
+  private sums = new Float32Array(2);
+  private monotonicProjection = false;
+  private readonly inputs = new Map<string, CachedProject>();
+  private generation = 0;
   private revision = 0;
   private disposed = false;
 
@@ -117,21 +141,43 @@ export class RoomField {
     this.width = Math.max(2, Math.ceil(uMax) - this.originX + 1);
     this.height = this.wallRows + this.floorRows + 1;
     const count = this.width * this.height;
-    this.data = new Float32Array(count * 4);
-    this.screenX = new Float32Array(count);
-    this.screenY = new Float32Array(count);
-    this.worldPerPixel = new Float32Array(count);
+    // A projection-only change with the same lattice dimensions keeps its
+    // working buffers and refills them in place.
+    const reuse = this.data.length === count * 4 && this.screenX.length === count &&
+      this.screenY.length === count && this.worldPerPixel.length === count;
+    if (reuse) {
+      this.data.fill(0);
+      this.sums.fill(0);
+    } else {
+      this.data = new Float32Array(count * 4);
+      this.screenX = new Float32Array(count);
+      this.screenY = new Float32Array(count);
+      this.worldPerPixel = new Float32Array(count);
+      this.sums = new Float32Array(count * 2);
+    }
+    if (this.rowScreenY.length !== this.height) this.rowScreenY = new Float32Array(this.height);
+    let monotonic = true, previousRowY = Number.NEGATIVE_INFINITY;
     for (let row = 0; row < this.height; row++) {
+      const rowOffset = row * this.width;
+      let previousX = Number.NEGATIVE_INFINITY;
       for (let column = 0; column < this.width; column++) {
-        const index = row * this.width + column;
+        const index = rowOffset + column;
         const fieldV = this.originY + row;
         const point = this.baseSurfacePoint({ surface: fieldV < 0 ? "wall" : "floor", u: this.originX + column, v: Math.abs(fieldV) });
         const screen = this.projection.screenPoint(point);
         this.screenX[index] = screen.x;
         this.screenY[index] = screen.y;
         this.worldPerPixel[index] = Math.max(0.000001, -point.z) / this.projection.focalPixels;
+        if (!Number.isFinite(screen.x) || screen.x < previousX) monotonic = false;
+        previousX = screen.x;
       }
+      const rowY = this.screenY[rowOffset]!;
+      this.rowScreenY[row] = rowY;
+      if (!Number.isFinite(rowY) || rowY < previousRowY) monotonic = false;
+      previousRowY = rowY;
     }
+    this.monotonicProjection = monotonic;
+    this.inputs.clear();
     this.texture.image = { data: this.data, width: this.width, height: this.height };
     this.texture.needsUpdate = true;
     this.uniforms.uRoomFieldOrigin.value.set(this.originX, this.originY);
@@ -139,7 +185,6 @@ export class RoomField {
     this.uniforms.uRoomSpacing.value = spacing;
     this.uniforms.uRoomWallDepth.value = wallDepth;
     this.uniforms.uRoomFloorY.value = floorY;
-    this.projectKey = "";
     this.revision++;
   }
 
@@ -184,44 +229,99 @@ export class RoomField {
     return { x: base.x + displacement.x, y: base.y + displacement.y, z: base.z + displacement.z };
   }
 
-  private key(projects: readonly ProjectSpatialPresentation[]): string {
-    return projects.map(project => [
-      project.projectId, project.screenCentre.x, project.screenCentre.y, project.viewDepth,
-      project.screenBounds.width, project.screenBounds.height, project.energy, project.visibility,
-      project.focused ? 1 : 0, project.inspected ? 1 : 0,
-    ].join(":")).sort().join("|");
+  private lowerBoundRow(value: number): number {
+    let low = 0, high = this.height;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.rowScreenY[middle]! < value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
   }
 
-  /** Recompute only for relevant input changes; every displayed active project contributes. */
-  updateProjects(projects: readonly ProjectSpatialPresentation[]): boolean {
-    if (this.disposed) return false;
-    const key = this.key(projects);
-    if (key === this.projectKey) return false;
-    this.projectKey = key;
-    this.data.fill(0);
-    const sums = new Float32Array(this.width * this.height * 2);
-    for (const project of projects) {
-      const energy = Math.max(bounded(project.energy), project.focused ? 0.5 : 0, project.inspected ? 0.25 : 0);
-      const weight = bounded(project.visibility) * energy;
-      if (weight <= 0) continue;
-      const radius = ROOM_FIELD_INFLUENCE_RADIUS_CSS + energy * 70;
-      const centreX = project.screenCentre.x, centreY = project.screenCentre.y;
-      for (let index = 0; index < this.screenX.length; index++) {
+  private upperBoundRow(value: number): number {
+    let low = 0, high = this.height;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.rowScreenY[middle]! <= value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  private lowerBoundColumn(offset: number, length: number, value: number): number {
+    let low = 0, high = length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.screenX[offset + middle]! < value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  private upperBoundColumn(offset: number, length: number, value: number): number {
+    let low = 0, high = length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.screenX[offset + middle]! <= value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  /** Accumulate one project over the conservative screen-space candidate window. */
+  private accumulate(centreX: number, centreY: number, radius: number, weight: number): void {
+    const width = this.width, height = this.height;
+    const reach = radius + ROOM_FIELD_CANDIDATE_MARGIN, reachSq = reach * reach;
+    let rowStart = 0, rowEnd = height - 1;
+    if (this.monotonicProjection) {
+      rowStart = this.lowerBoundRow(centreY - reach) - 1;
+      rowEnd = this.upperBoundRow(centreY + reach);
+      if (rowStart < 0) rowStart = 0;
+      if (rowEnd > height - 1) rowEnd = height - 1;
+    }
+    for (let row = rowStart; row <= rowEnd; row++) {
+      const offset = row * width;
+      let columnStart = 0, columnEnd = width - 1;
+      if (this.monotonicProjection) {
+        columnStart = this.lowerBoundColumn(offset, width, centreX - reach) - 1;
+        columnEnd = this.upperBoundColumn(offset, width, centreX + reach);
+        if (columnStart < 0) columnStart = 0;
+        if (columnEnd > width - 1) columnEnd = width - 1;
+      }
+      for (let column = columnStart; column <= columnEnd; column++) {
+        const index = offset + column;
         const dx = centreX - this.screenX[index]!, dy = centreY - this.screenY[index]!;
+        const distanceSq = dx * dx + dy * dy;
+        if (distanceSq >= reachSq) continue;
+        // Broad-phase already used squared distance; retain the exact falloff.
         const distance = Math.hypot(dx, dy);
         if (!(distance < radius)) continue;
         const falloff = 1 - distance / radius;
         const influence = falloff * falloff * weight;
         const direction = distance > 0.0001 ? 1 / distance : 0;
-        sums[index * 2]! += dx * direction * influence;
-        sums[index * 2 + 1]! += dy * direction * influence;
+        this.sums[index * 2]! += dx * direction * influence;
+        this.sums[index * 2 + 1]! += dy * direction * influence;
       }
+    }
+  }
+
+  private rebuild(projects: readonly ProjectSpatialPresentation[]): void {
+    this.data.fill(0);
+    this.sums.fill(0);
+    for (const project of projects) {
+      const energy = fieldEnergy(project);
+      const weight = bounded(project.visibility) * energy;
+      if (weight <= 0) continue;
+      const centreX = project.screenCentre.x, centreY = project.screenCentre.y;
+      if (!Number.isFinite(centreX) || !Number.isFinite(centreY)) continue;
+      this.accumulate(centreX, centreY, ROOM_FIELD_INFLUENCE_RADIUS_CSS + energy * 70, weight);
     }
     for (let index = 0; index < this.screenX.length; index++) {
       const row = Math.floor(index / this.width), v = this.originY + row;
       const seamDamping = smoothstep01(Math.abs(v) / 2.5);
-      let x = sums[index * 2]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
-      let y = sums[index * 2 + 1]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
+      let x = this.sums[index * 2]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
+      let y = this.sums[index * 2 + 1]! * ROOM_FIELD_MAX_CSS_DISPLACEMENT * seamDamping;
       const length = Math.hypot(x, y);
       if (length > ROOM_FIELD_MAX_CSS_DISPLACEMENT) {
         x *= ROOM_FIELD_MAX_CSS_DISPLACEMENT / length;
@@ -235,13 +335,45 @@ export class RoomField {
     }
     this.texture.needsUpdate = true;
     this.revision++;
+  }
+
+  /** Recompute only for relevant scalar/membership changes; ordering is irrelevant. */
+  updateProjects(projects: readonly ProjectSpatialPresentation[]): boolean {
+    if (this.disposed) return false;
+    const generation = ++this.generation;
+    let changed = false;
+    for (const project of projects) {
+      const id = project.projectId;
+      const centre = project.screenCentre;
+      const energy = fieldEnergy(project), visibility = bounded(project.visibility);
+      const previous = this.inputs.get(id);
+      if (!previous) {
+        this.inputs.set(id, { screenX: centre.x, screenY: centre.y, energy, visibility, seen: generation });
+        changed = true;
+        continue;
+      }
+      if (!sameNumber(previous.screenX, centre.x) || !sameNumber(previous.screenY, centre.y) ||
+        !sameNumber(previous.energy, energy) || !sameNumber(previous.visibility, visibility)) {
+        previous.screenX = centre.x; previous.screenY = centre.y;
+        previous.energy = energy; previous.visibility = visibility;
+        changed = true;
+      }
+      previous.seen = generation;
+    }
+    for (const [id, previous] of this.inputs) {
+      if (previous.seen === generation) continue;
+      this.inputs.delete(id);
+      changed = true;
+    }
+    if (!changed) return false;
+    this.rebuild(projects);
     return true;
   }
 
   clear(): void {
     if (this.disposed) return;
-    if (this.projectKey === "" && this.data.every(value => value === 0)) return;
-    this.projectKey = "";
+    if (this.inputs.size === 0 && this.data.every(value => value === 0)) return;
+    this.inputs.clear();
     this.data.fill(0);
     this.texture.needsUpdate = true;
     this.revision++;

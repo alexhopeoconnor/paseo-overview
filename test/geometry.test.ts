@@ -3,6 +3,7 @@ import { boundaryPoint, centre, rectsOverlap, segmentIntersectsRect, segmentsCro
 import type { ProjectLayout } from "../client/layout";
 import { depthTransform, projectDepthRange, projectDepthRanges } from "../client/scene/depth";
 import { advanceElevation, elevationTarget, scaleForElevation } from "../client/scene/elevation";
+import { commitProjectTransform, DISPLAY_MOVEMENT_EPSILON, maximumCornerMovement, shouldCommitTransform, type ProjectTransform } from "../client/scene/presentation-transform";
 
 function project(id: string, position: { x: number; y: number }, bounds: Rect, scale = 1): ProjectLayout {
   return { id, name: id, background: false, position, scale, bounds, radius: 0,
@@ -154,5 +155,154 @@ describe("contextual depth response", () => {
     const first = advanceElevation(0.25, 0.75, 0.3, 0.65);
     expect(advanceElevation(first, 0.75, 0, 1.6)).toBe(first);
     expect(advanceElevation(first, 0.75, 0.1, 1.6)).toBeGreaterThan(advanceElevation(first, 0.75, 0.1, 0.65));
+  });
+});
+
+describe("displayed project transforms", () => {
+  const at = (x: number, y: number, scale: number): ProjectTransform => ({ x, y, scale });
+  const worldCentre = (bounds: Rect, transform: ProjectTransform): { x: number; y: number } => {
+    const local = centre(bounds);
+    return { x: transform.x + local.x * transform.scale, y: transform.y + local.y * transform.scale };
+  };
+
+  it("accumulates sub-threshold movement against the last displayed transform", () => {
+    const bounds = { x: 0, y: 0, width: 120, height: 80 };
+    let displayed: ProjectTransform = at(0, 0, 1);
+    const commits: number[] = [];
+    for (let step = 1; step <= 28; step++) {
+      const next = commitProjectTransform(bounds, displayed, at(step * 0.03, 0, 1));
+      if (next !== displayed) commits.push(step);
+      displayed = next;
+    }
+    expect(commits).toEqual([7, 14, 21, 28]);
+    expect(displayed.x).toBeCloseTo(0.84, 12);
+  });
+
+  it("commits exactly at the threshold and keeps a below-threshold transform unchanged", () => {
+    const bounds = { x: 0, y: 0, width: 80, height: 40 };
+    const displayed = at(0, 0, 1);
+    const below = at(DISPLAY_MOVEMENT_EPSILON - 1e-9, 0, 1);
+    const threshold = at(DISPLAY_MOVEMENT_EPSILON, 0, 1);
+    expect(maximumCornerMovement(bounds, displayed, below)).toBeLessThan(DISPLAY_MOVEMENT_EPSILON);
+    expect(shouldCommitTransform(bounds, displayed, below)).toBe(false);
+    expect(commitProjectTransform(bounds, displayed, below)).toBe(displayed);
+    expect(maximumCornerMovement(bounds, displayed, threshold)).toBe(DISPLAY_MOVEMENT_EPSILON);
+    expect(shouldCommitTransform(bounds, displayed, threshold)).toBe(true);
+    const committed = commitProjectTransform(bounds, displayed, threshold);
+    expect(committed).not.toBe(displayed);
+    expect(committed).toEqual(threshold);
+  });
+
+  it("uses far corners for a scale-only change on large bounds", () => {
+    const bounds = { x: 0, y: 0, width: 4_000_000, height: 3_000_000 };
+    const displayed = at(0, 0, 1);
+    const desired = at(0, 0, 1.00000006);
+    const centreMovement = Math.hypot(bounds.width / 2, bounds.height / 2) * (desired.scale - displayed.scale);
+    expect(centreMovement).toBeLessThan(DISPLAY_MOVEMENT_EPSILON);
+    expect(maximumCornerMovement(bounds, displayed, desired)).toBeCloseTo(0.3, 6);
+    expect(shouldCommitTransform(bounds, displayed, desired)).toBe(true);
+    expect(commitProjectTransform(bounds, displayed, desired)).not.toBe(displayed);
+  });
+
+  it("includes negative local bounds instead of assuming a local origin", () => {
+    const bounds = { x: -200, y: -100, width: 300, height: 200 };
+    const displayed = at(50, 50, 1);
+    const desired = at(50, 50, 1.01);
+    expect(maximumCornerMovement(bounds, displayed, desired)).toBeCloseTo(Math.hypot(2, 1), 9);
+    expect(shouldCommitTransform(bounds, displayed, desired)).toBe(true);
+    expect(commitProjectTransform(bounds, displayed, desired)).not.toBe(displayed);
+  });
+
+  it("commits a scale change that holds the project centre fixed", () => {
+    const bounds = { x: -300, y: -100, width: 500, height: 300 };
+    const displayed = at(200, 300, 1);
+    const scale = 1.05;
+    const local = centre(bounds);
+    const desired = at(
+      displayed.x + local.x * (displayed.scale - scale),
+      displayed.y + local.y * (displayed.scale - scale),
+      scale,
+    );
+    expect(worldCentre(bounds, desired).x).toBeCloseTo(worldCentre(bounds, displayed).x, 9);
+    expect(worldCentre(bounds, desired).y).toBeCloseTo(worldCentre(bounds, displayed).y, 9);
+    expect(maximumCornerMovement(bounds, displayed, desired)).toBeCloseTo(Math.hypot(250, 150) * (scale - displayed.scale), 9);
+    expect(shouldCommitTransform(bounds, displayed, desired)).toBe(true);
+    const committed = commitProjectTransform(bounds, displayed, desired);
+    expect(committed).not.toBe(displayed);
+    expect(committed.scale).toBe(scale);
+    expect(worldCentre(bounds, committed).x).toBeCloseTo(worldCentre(bounds, displayed).x, 9);
+    expect(worldCentre(bounds, committed).y).toBeCloseTo(worldCentre(bounds, displayed).y, 9);
+  });
+
+  it("forces an explicit final commit below the automatic threshold", () => {
+    const bounds = { x: -40, y: -20, width: 80, height: 40 };
+    const displayed = at(100, 100, 1);
+    const desired = at(100.05, 100, 1);
+    expect(shouldCommitTransform(bounds, displayed, desired)).toBe(false);
+    expect(commitProjectTransform(bounds, displayed, desired)).toBe(displayed);
+    expect(shouldCommitTransform(bounds, displayed, desired, true)).toBe(true);
+    const committed = commitProjectTransform(bounds, displayed, desired, true);
+    expect(committed).not.toBe(displayed);
+    expect(committed).toEqual(desired);
+    expect(commitProjectTransform(bounds, displayed, displayed, true)).not.toBe(displayed);
+  });
+
+  it("returns a detached snapshot and leaves all inputs untouched", () => {
+    const bounds = { x: -20, y: -10, width: 40, height: 20 };
+    const displayed = at(10, 20, 1);
+    const desired = at(10.5, 20, 1.02);
+    const before = { bounds: { ...bounds }, displayed: { ...displayed }, desired: { ...desired } };
+    const committed = commitProjectTransform(bounds, displayed, desired);
+    expect(committed).not.toBe(desired);
+    expect(committed).toEqual(desired);
+    expect(bounds).toEqual(before.bounds);
+    expect(displayed).toEqual(before.displayed);
+    expect(desired).toEqual(before.desired);
+    desired.x = 999; desired.scale = 9;
+    expect(committed.x).toBe(before.desired.x);
+    expect(committed.scale).toBe(before.desired.scale);
+    committed.y = -999;
+    expect(desired.y).toBe(before.desired.y);
+    const small = at(displayed.x + 0.01, displayed.y, displayed.scale);
+    expect(commitProjectTransform(bounds, displayed, small)).toBe(displayed);
+    expect(displayed).toEqual(before.displayed);
+  });
+
+  describe("non-finite inputs", () => {
+    const bounds = { x: -10, y: -5, width: 20, height: 10 };
+    const displayed = at(10, 20, 1);
+    const desired = at(30, 40, 1.1);
+
+    it("reports unmeasurable geometry as unbounded", () => {
+      expect(maximumCornerMovement({ ...bounds, width: Number.NaN }, displayed, desired)).toBe(Number.POSITIVE_INFINITY);
+      expect(maximumCornerMovement(bounds, at(Number.NaN, 20, 1), desired)).toBe(Number.POSITIVE_INFINITY);
+      expect(maximumCornerMovement(bounds, displayed, at(30, 40, Number.POSITIVE_INFINITY))).toBe(Number.POSITIVE_INFINITY);
+      expect(maximumCornerMovement({ ...bounds, x: Number.MAX_VALUE, width: Number.MAX_VALUE }, displayed, desired))
+        .toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it("never commits a non-finite desired transform, even when forced", () => {
+      for (const invalid of [at(Number.NaN, 20, 1), at(10, Number.POSITIVE_INFINITY, 1), at(10, 20, Number.NEGATIVE_INFINITY)]) {
+        expect(shouldCommitTransform(bounds, displayed, invalid, true)).toBe(false);
+        expect(commitProjectTransform(bounds, displayed, invalid, true)).toBe(displayed);
+      }
+    });
+
+    it("replaces an invalid displayed transform with finite desired state, never the origin", () => {
+      const invalid = at(Number.NaN, Number.POSITIVE_INFINITY, Number.NaN);
+      expect(shouldCommitTransform(bounds, invalid, desired)).toBe(true);
+      const committed = commitProjectTransform(bounds, invalid, desired);
+      expect(committed).toEqual(desired);
+      expect(committed).not.toBe(desired);
+    });
+
+    it("commits a finite desired transform once when bounds cannot bound movement", () => {
+      const invalidBounds = { ...bounds, y: Number.POSITIVE_INFINITY };
+      expect(shouldCommitTransform(invalidBounds, displayed, displayed)).toBe(false);
+      expect(shouldCommitTransform(invalidBounds, displayed, desired)).toBe(true);
+      const committed = commitProjectTransform(invalidBounds, displayed, desired);
+      expect(committed).toEqual(desired);
+      expect(shouldCommitTransform(invalidBounds, committed, desired)).toBe(false);
+    });
   });
 });

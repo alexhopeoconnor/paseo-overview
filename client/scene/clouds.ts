@@ -46,8 +46,19 @@ function randomAt(seed: number, index: number, channel: number): number {
   return (value >>> 0) / 4294967296;
 }
 
+interface CloudFieldState {
+  valid: boolean;
+  screenX: number;
+  screenY: number;
+  energy: number;
+  visibility: number;
+}
+
 interface CloudState {
   project: ProjectSpatialPresentation;
+  /** Reused scalar input for the room field's exact display values. */
+  fieldProject: ProjectSpatialPresentation;
+  field: CloudFieldState;
   seed: number;
   offsets: Float32Array;
   energy: number;
@@ -57,6 +68,7 @@ interface CloudState {
   arrivalEnergy: number;
   phase: number;
   links: Map<number, Int16Array>;
+  seen: number;
 }
 
 interface CloudSlot { state: CloudState; start: number; count: number }
@@ -110,6 +122,10 @@ function store(data: Float32Array, index: number, value: number): boolean {
   return true;
 }
 
+function sameNumber(left: number, right: number): boolean {
+  return Object.is(left, right);
+}
+
 function ease(current: number, target: number, seconds: number): number {
   const next = current + (target - current) * (1 - Math.exp(-seconds / CLOUD_ACTIVITY_TIME_CONSTANT));
   return Math.abs(next - target) < 0.0001 ? target : next;
@@ -130,6 +146,12 @@ export class ProjectParticleClouds {
   private pointGeometry = new THREE.BufferGeometry();
   private lineGeometry = new THREE.BufferGeometry();
   private layoutKey = "";
+  private layoutDirty = false;
+  private stateDirty = false;
+  private fieldDirty = false;
+  private projectPointCount = 0;
+  private inputGeneration = 0;
+  private readonly fieldProjects: ProjectSpatialPresentation[] = [];
   private phase = 0;
   private readonly commonUniforms: Record<string, THREE.IUniform>;
   private disposed = false;
@@ -191,7 +213,19 @@ export class ProjectParticleClouds {
       offsets[index * 3 + 1] = vertical * radial;
       offsets[index * 3 + 2] = Math.sin(azimuth) * horizontal * radial;
     }
-    return { project, seed, offsets, energy: 0, targetEnergy: bounded(project.energy), focusEnergy: 0, arrival: 0, arrivalEnergy: 0, phase: 0, links: new Map() };
+    const snapshot: ProjectSpatialPresentation = {
+      ...project, live: project.live !== false,
+      screenCentre: { ...project.screenCentre }, screenBounds: { ...project.screenBounds },
+    };
+    const fieldProject: ProjectSpatialPresentation = {
+      ...snapshot, screenCentre: { ...snapshot.screenCentre }, screenBounds: { ...snapshot.screenBounds },
+    };
+    return {
+      project: snapshot, fieldProject,
+      field: { valid: false, screenX: 0, screenY: 0, energy: 0, visibility: 0 },
+      seed, offsets, energy: 0, targetEnergy: bounded(project.energy), focusEnergy: 0,
+      arrival: 0, arrivalEnergy: 0, phase: 0, links: new Map(), seen: 0,
+    };
   }
 
   private linksFor(state: CloudState, count: number): Int16Array {
@@ -276,38 +310,125 @@ export class ProjectParticleClouds {
 
   updateProjects(projects: readonly ProjectSpatialPresentation[], online = true): void {
     if (this.disposed) return;
-    const present = new Set(projects.map(project => project.projectId));
-    for (const id of this.states.keys()) if (!present.has(id)) this.states.delete(id);
+    const generation = ++this.inputGeneration;
+    let membershipChanged = false, inputsChanged = false;
     for (const project of projects) {
+      const live = Boolean(online) && project.live !== false;
       let state = this.states.get(project.projectId);
-      if (!state) { state = this.stateFor(project); this.states.set(project.projectId, state); }
-      state.project = {
-        ...project, live: online && project.live !== false,
-        screenCentre: { ...project.screenCentre }, screenBounds: { ...project.screenBounds },
-      };
+      if (!state) {
+        state = this.stateFor(project);
+        state.project.live = live;
+        state.fieldProject.live = live;
+        state.seen = generation;
+        this.states.set(project.projectId, state);
+        membershipChanged = true;
+        inputsChanged = true;
+      } else {
+        const previous = state.project, centre = project.screenCentre, bounds = project.screenBounds;
+        const changed = !sameNumber(previous.screenCentre.x, centre.x) || !sameNumber(previous.screenCentre.y, centre.y) ||
+          !sameNumber(previous.screenBounds.x, bounds.x) || !sameNumber(previous.screenBounds.y, bounds.y) ||
+          !sameNumber(previous.screenBounds.width, bounds.width) || !sameNumber(previous.screenBounds.height, bounds.height) ||
+          !sameNumber(previous.scaleMultiplier, project.scaleMultiplier) || !sameNumber(previous.viewDepth, project.viewDepth) ||
+          !sameNumber(previous.elevation, project.elevation) || !sameNumber(previous.energy, project.energy) ||
+          !sameNumber(previous.visibility, project.visibility) || previous.inspected !== project.inspected ||
+          previous.focused !== project.focused || previous.live !== live;
+        if (changed) {
+          previous.screenCentre.x = centre.x; previous.screenCentre.y = centre.y;
+          previous.screenBounds.x = bounds.x; previous.screenBounds.y = bounds.y;
+          previous.screenBounds.width = bounds.width; previous.screenBounds.height = bounds.height;
+          previous.scaleMultiplier = project.scaleMultiplier; previous.viewDepth = project.viewDepth;
+          previous.elevation = project.elevation; previous.energy = project.energy;
+          previous.visibility = project.visibility; previous.inspected = project.inspected;
+          previous.focused = project.focused; previous.live = live;
+          inputsChanged = true;
+        }
+        state.seen = generation;
+      }
       state.targetEnergy = bounded(project.energy);
       state.focusEnergy = project.focused ? 0.24 : project.inspected ? 0.12 : 0;
     }
-    this.aggregated = projects.length > CLOUD_GLOBAL_POINT_BUDGET;
+    for (const [id, state] of this.states) {
+      if (state.seen === generation) continue;
+      this.states.delete(id);
+      membershipChanged = true;
+      this.fieldDirty = true;
+    }
+    const aggregated = this.states.size > CLOUD_GLOBAL_POINT_BUDGET;
+    if (aggregated !== this.aggregated) { this.aggregated = aggregated; this.layoutDirty = true; }
+    if (!aggregated) {
+      const count = cloudPointsPerProject(this.states.size);
+      if (count !== this.projectPointCount) { this.projectPointCount = count; this.layoutDirty = true; }
+    }
+    if (membershipChanged) this.layoutDirty = true;
+    if (inputsChanged || membershipChanged) this.stateDirty = true;
+  }
+
+  /**
+   * Push staged layout, cloud state and room field once. Ambient calls this
+   * before each background draw; tests may call it explicitly to inspect the
+   * displayed outputs without rendering.
+   */
+  flushState(): boolean {
+    if (this.disposed) return false;
+    this.syncLayout();
+    const fieldProjects = this.fieldProjects;
+    fieldProjects.length = 0;
+    let fieldDirty = this.fieldDirty;
+    for (const state of this.states.values()) {
+      const project = state.project, fieldProject = state.fieldProject;
+      const energy = Math.max(bounded(this.energyFor(state)), project.focused ? 0.5 : 0, project.inspected ? 0.25 : 0);
+      const visibility = bounded(project.visibility), cache = state.field;
+      if (!cache.valid || !sameNumber(cache.screenX, project.screenCentre.x) ||
+        !sameNumber(cache.screenY, project.screenCentre.y) || !sameNumber(cache.energy, energy) ||
+        !sameNumber(cache.visibility, visibility)) {
+        fieldDirty = true;
+        cache.valid = true; cache.screenX = project.screenCentre.x; cache.screenY = project.screenCentre.y;
+        cache.energy = energy; cache.visibility = visibility;
+      }
+      fieldProject.screenCentre.x = project.screenCentre.x; fieldProject.screenCentre.y = project.screenCentre.y;
+      fieldProject.energy = energy; fieldProject.visibility = visibility;
+      fieldProject.focused = project.focused; fieldProject.inspected = project.inspected;
+      fieldProjects.push(fieldProject);
+    }
+    let changed = false;
+    if (fieldDirty) {
+      changed = this.surface.updateProjects(fieldProjects);
+      this.fieldDirty = false;
+    }
+    if (this.stateDirty) {
+      this.writeStateTexture();
+      this.stateDirty = false;
+    }
+    return changed;
+  }
+
+  private syncLayout(): void {
     if (this.aggregated) {
       this.slots = [];
       this.syncAggregateLayout();
-    } else {
-      this.aggregateBins = [];
-      const count = cloudPointsPerProject(projects.length);
-      const key = `projects:${count}:${[...this.states.keys()].sort().join("\u0000")}`;
-      if (key !== this.layoutKey) { this.layoutKey = key; this.rebuildLayout(count); }
+      this.layoutDirty = false;
+      return;
     }
-    this.syncStateTexture();
+    this.aggregateBins = [];
+    if (!this.layoutDirty) return;
+    this.layoutDirty = false;
+    const count = cloudPointsPerProject(this.states.size);
+    // Never leave an aggregate bin key behind: the next aggregate pass must
+    // rebuild even when its bins match the pre-individual set.
+    this.layoutKey = `projects:${count}`;
+    this.rebuildLayout(count);
   }
 
   clearProjects(projectIds: ReadonlySet<string>): void {
     if (this.disposed || projectIds.size === 0) return;
+    let changed = false;
     for (const id of projectIds) {
       const state = this.states.get(id);
-      if (state) { state.arrival = 0; state.arrivalEnergy = 0; }
+      if (!state) continue;
+      if (state.arrival !== 0 || state.arrivalEnergy !== 0) changed = true;
+      state.arrival = 0; state.arrivalEnergy = 0;
     }
-    this.syncStateTexture();
+    if (changed) this.stateDirty = true;
   }
 
   private energyFor(state: CloudState): number {
@@ -346,12 +467,9 @@ export class ProjectParticleClouds {
     });
   }
 
-  private syncStateTexture(): void {
+  private writeStateTexture(): void {
     // The grid follows displayed eased/focused energy, never a newly arriving
     // raw target. Pause and offline therefore freeze deformation naturally.
-    this.surface.updateProjects([...this.states.values()].map(state => ({
-      ...state.project, energy: this.energyFor(state),
-    })));
     if (this.aggregated) { this.updateAggregateState(); return; }
     this.slots.forEach((slot, index) => {
       const { state } = slot, project = state.project;
@@ -373,8 +491,9 @@ export class ProjectParticleClouds {
       material.uniforms.uPixelRatio!.value = ratio;
       material.uniforms.uViewportHeight!.value = this.projection.height * ratio;
     }
-    if (this.aggregated) this.syncAggregateLayout();
-    this.syncStateTexture();
+    this.layoutDirty = true;
+    this.stateDirty = true;
+    this.fieldDirty = true;
   }
 
   advance(seconds: number, moving: boolean, rate: number): void {
@@ -392,7 +511,7 @@ export class ProjectParticleClouds {
       const arrival = state.arrival > 0 ? Math.max(0, state.arrival * Math.exp(-elapsed / CLOUD_ARRIVAL_TIME_CONSTANT)) : 0;
       state.arrival = arrival < 0.001 ? 0 : arrival;
     }
-    this.syncStateTexture();
+    this.stateDirty = true;
   }
 
   arrive(projectId: string, energy: number): void {
@@ -400,12 +519,17 @@ export class ProjectParticleClouds {
     if (!state || state.project.live === false || this.disposed) return;
     state.arrival = 1;
     state.arrivalEnergy = bounded(energy);
-    this.syncStateTexture();
+    this.stateDirty = true;
   }
 
   clearTransient(): void {
-    for (const state of this.states.values()) { state.arrival = 0; state.arrivalEnergy = 0; }
-    if (!this.disposed) this.syncStateTexture();
+    if (this.disposed) return;
+    let changed = false;
+    for (const state of this.states.values()) {
+      if (state.arrival !== 0 || state.arrivalEnergy !== 0) changed = true;
+      state.arrival = 0; state.arrivalEnergy = 0;
+    }
+    if (changed) this.stateDirty = true;
   }
 
   isAnimating(): boolean {

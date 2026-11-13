@@ -21,7 +21,14 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   rendering; its timings are observations of the tested machine, not universal
   performance guarantees. Matching no-event on/off runs remain comparable; a
   separate streaming scenario exercises event admission and bubbles. Counters
-  distinguish layout, overlay positioning and transient-placement work.
+  distinguish layout, overlay positioning, transient placement, field rebuilds
+  and uploads, committed project transforms and route synchronization. Compare
+  both main-thread work per second and per rendered frame using the same fixture,
+  viewport, pixel ratio, activity schedule and settings. Record a source baseline
+  before edits; do not compare synthetic fixture totals directly with live-roster
+  totals. Counters assert one field flush per render, unchanged-field reuse and
+  retained geometry during heartbeat-only frames. Unit tests cover exact field
+  equivalence and accumulated subpixel transform commits.
   Distinguish an Overview-local theme update from the current host's global
   appearance boundary: the latter remounts screen contents and reloads passive
   rosters/icons. Renderer identity preservation applies to local appearance
@@ -74,17 +81,17 @@ hardware frame-time, draw-call and pointer-response conclusions.
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-090` in this example:
+`/tmp/overview-091` in this example:
 
 ```bash
-mkdir -p /tmp/overview-090
+mkdir -p /tmp/overview-091
 overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-090,dst=/out \
+  --mount type=bind,src=/tmp/overview-091,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   "$overview_check_image" \
