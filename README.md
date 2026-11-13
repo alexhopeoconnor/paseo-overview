@@ -90,6 +90,11 @@ owner. They update the existing view without losing focus, selection or group ch
 The phone graph uses the theme and compact controls; the spatial background and
 its speed/depth settings apply to the browser graph.
 
+The current Paseo host remounts screen contents when its application/system theme
+changes. Overview restores presentation choices, but icons and subagent rosters
+briefly reload with that new screen. Overview's own Light/Dark controls update the
+existing renderer without that host-level remount.
+
 **Pause motion** is a temporary master control: it freezes graph and background
 animation while live status and readable previews continue. Reduced motion uses
 a static background. Hidden tabs and a view with no connected hosts schedule no

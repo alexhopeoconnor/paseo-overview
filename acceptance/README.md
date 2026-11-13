@@ -22,6 +22,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   performance guarantees. Matching no-event on/off runs remain comparable; a
   separate streaming scenario exercises event admission and bubbles. Counters
   distinguish layout, overlay positioning and transient-placement work.
+  Distinguish an Overview-local theme update from the current host's global
+  appearance boundary: the latter remounts screen contents and reloads passive
+  rosters/icons. Renderer identity preservation applies to local appearance
+  changes and fullscreen, not an upstream screen remount.
 - `native-preview.cjs` renders the actual native graph and shared header through
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
