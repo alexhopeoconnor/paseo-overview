@@ -29,7 +29,7 @@ const percentile = (values, fraction) => {
   let browser, context;
   try {
     browser = await chromium.connectOverCDP(endpoint);
-    context = await browser.newContext({ viewport: { width: 1516, height: 1100 }, deviceScaleFactor: 1 });
+    context = await browser.newContext({ viewport: { width: 1516, height: 1100 }, deviceScaleFactor: Number(process.env.OVERVIEW_TEST_DPR || 1) });
     const page = await context.newPage(), errors = [];
     page.on('pageerror', error => { errors.push(error.message); console.error('Fixture:', error.message); });
     await page.goto(`http://127.0.0.1:${server.address().port}/?performance=1`);
@@ -81,20 +81,24 @@ const percentile = (values, fraction) => {
     await page.evaluate(() => window.overviewTest.dark());
     await page.waitForTimeout(1000);
     await page.screenshot({ path: `${output}/hardware-dark.png` });
-    await page.evaluate(() => { window.overviewTest.empty(); window.overviewTest.motion(true); });
+    await page.evaluate(() => { window.overviewTest.depthFixture(); window.overviewTest.motion(true); });
     await page.waitForTimeout(1500);
-    results.push(await sample('ambient-only'));
+    results.push(await sample('quiet-clouds'));
+    await page.evaluate(() => window.overviewTest.empty());
+    await page.waitForTimeout(100);
+    results.push(await sample('empty-idle', 1000));
     await page.evaluate(() => window.overviewTest.motion(false));
     await page.waitForTimeout(100);
     results.push(await sample('paused', 1000));
     await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.visibility(false); });
     results.push(await sample('hidden', 1000));
     assert.equal(results.find(item => item.name === 'paused').frames, 0);
+    assert.equal(results.find(item => item.name === 'empty-idle').frames, 0);
     assert.equal(results.find(item => item.name === 'hidden').frames, 0);
     assert.ok(results.every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${output}/performance-results.json`, JSON.stringify({ gpu, viewport: { width: 1516, height: 1100 },
-      comparison: 'Same foreground/scheduler; grid draw enabled versus disabled. CPU metrics include browser work.',
+      comparison: 'Matched foreground with background on/off. Off also removes decorative scheduling; CPU metrics include browser work.',
       pointerSelectionMs: selections, results, errors }, null, 2));
     console.log(JSON.stringify({ gpu, pointerSelectionMs: selections, results }, null, 2));
   } finally {

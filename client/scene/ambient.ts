@@ -1,11 +1,14 @@
 import * as THREE from "three";
-import { gridPalette, type GridPalette } from "../appearance";
 import type { OverviewTheme } from "../../shared/renderer";
-import { createGridField, GRID_COLUMNS, GRID_ROWS, GridInfluenceSmoother, sampleGridField, type GridField, type ProjectGridInfluence } from "./ambient-field";
-import { ambientFragmentShader, ambientVertexShader, GRID_PHASE_PERIOD_SECONDS } from "./ambient-shader";
+import { DEFAULT_APPEARANCE, type OverviewAppearance } from "../../shared/settings";
+import { appearancePolicy } from "../appearance-policy";
+import { ProjectParticleClouds } from "./clouds";
+import { OverviewProjection } from "./projection";
+import { PerspectiveRoom } from "./room";
+import type { ProjectSpatialPresentation } from "./spatial";
+import { EnergyStreams } from "./streams";
 
 // Native-facing TypeScript configurations intentionally omit the DOM library.
-// Describe only the WebGL diagnostic surface used inside this browser module.
 type ShaderErrorArguments = Parameters<NonNullable<THREE.WebGLRenderer["debug"]["onShaderError"]>>;
 interface ShaderDiagnostics {
   getShaderSource(shader: ShaderErrorArguments[2]): string | null;
@@ -15,187 +18,174 @@ interface ShaderDiagnostics {
 
 export interface AmbientGrid {
   advanceTime(elapsedSeconds: number, moving: boolean): void;
-  updateField(influences: readonly ProjectGridInfluence[]): void;
+  updateProjects(projects: readonly ProjectSpatialPresentation[]): void;
+  setAppearance(value: OverviewAppearance): void;
+  admitActivity(projectId: string): void;
+  clearTransient(): void;
   updateTheme(theme: OverviewTheme): void;
   resize(width: number, height: number, pixelRatio: number): void;
-  renderWithBackgroundFallback(renderScene: () => void): void;
+  renderWithBackgroundFallback(renderForeground: () => void): void;
   isAnimating(): boolean;
   dispose(): void;
 }
 
-function sameInfluences(previous: readonly ProjectGridInfluence[], next: readonly ProjectGridInfluence[]): boolean {
-  return previous.length === next.length && previous.every((value, index) => {
-    const other = next[index]!;
-    return value.id === other.id && value.centreX === other.centreX && value.centreY === other.centreY &&
-      value.radiusX === other.radiusX && value.radiusY === other.radiusY && value.activity === other.activity &&
-      value.elevation === other.elevation && value.visibility === other.visibility && value.focus === other.focus;
-  });
-}
-
-/** A self-contained background: it can fail closed without affecting the graph's renderer. */
+/** Owns every background resource and fails closed without disabling the graph. */
 export class ProceduralAmbientGrid implements AmbientGrid {
-  private readonly geometry = new THREE.PlaneGeometry(2, 2, 64, 40);
-  private readonly field: GridField = createGridField();
-  private readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
-  private readonly material: THREE.ShaderMaterial;
-  private readonly influences = new GridInfluenceSmoother();
-  private previous: ProjectGridInfluence[] = [];
-  private fieldDirty = true;
-  private validatedVersion = -1;
-  private width = 1;
-  private height = 1;
-  private phase = 0;
+  private readonly backgroundScene = new THREE.Scene();
+  private readonly projection = new OverviewProjection();
+  private readonly room: PerspectiveRoom;
+  private readonly clouds: ProjectParticleClouds;
+  private readonly streams: EnergyStreams;
+  private appearance: OverviewAppearance = { ...DEFAULT_APPEARANCE };
+  private projects: ProjectSpatialPresentation[] = [];
+  private readonly validatedMaterials = new WeakMap<THREE.Material, number>();
   private disposed = false;
   private failed = false;
 
-  constructor(private readonly scene: THREE.Scene, private readonly renderer: THREE.WebGLRenderer, theme: OverviewTheme) {
-    const position = this.geometry.getAttribute("position");
-    this.geometry.setAttribute("aOverviewGridWarp", new THREE.BufferAttribute(this.field.warp, 2));
-    this.geometry.setAttribute("aOverviewGridIntensity", new THREE.BufferAttribute(this.field.intensity, 1));
-    this.geometry.setAttribute("aOverviewGridQuiet", new THREE.BufferAttribute(this.field.quietMask, 1));
-    this.geometry.setAttribute("aOverviewGridShade", new THREE.BufferAttribute(this.field.contactShade, 1));
-    this.geometry.setAttribute("aOverviewGridRim", new THREE.BufferAttribute(this.field.contactRim, 1));
-    if (position.count !== GRID_COLUMNS * GRID_ROWS) throw new Error("Unexpected ambient grid geometry resolution.");
-    const palette = gridPalette(theme);
-    this.material = new THREE.ShaderMaterial({
-      name: "paseo-overview-ambient-grid",
-      vertexShader: ambientVertexShader,
-      fragmentShader: ambientFragmentShader,
-      uniforms: {
-        uViewport: { value: new THREE.Vector2(1, 1) }, uPixelRatio: { value: 1 }, uTime: { value: 0 },
-        uLine: { value: new THREE.Color(palette.line) }, uHighlight: { value: new THREE.Color(palette.highlight) },
-        uGlow: { value: new THREE.Color(palette.glow) }, uLineOpacity: { value: palette.lineOpacity },
-        uShade: { value: new THREE.Color(palette.shade) }, uRim: { value: new THREE.Color(palette.rim) },
-        uShadeOpacity: { value: palette.shadeOpacity }, uRimOpacity: { value: palette.rimOpacity },
-        uHighlightOpacity: { value: palette.highlightOpacity },
-        uHighlightBaseline: { value: palette.highlightBaseline }, uHighlightQuiet: { value: palette.highlightQuiet },
-      },
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-      side: THREE.DoubleSide,
-    });
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
-    this.mesh.position.z = -8;
-    this.mesh.renderOrder = -10;
-    this.mesh.frustumCulled = false;
-    this.mesh.userData.overviewAmbientGrid = true;
-    scene.add(this.mesh);
-  }
-
-  private updatePalette(palette: GridPalette): void {
-    (this.material.uniforms.uLine!.value as THREE.Color).set(palette.line);
-    (this.material.uniforms.uHighlight!.value as THREE.Color).set(palette.highlight);
-    (this.material.uniforms.uGlow!.value as THREE.Color).set(palette.glow);
-    (this.material.uniforms.uShade!.value as THREE.Color).set(palette.shade);
-    (this.material.uniforms.uRim!.value as THREE.Color).set(palette.rim);
-    this.material.uniforms.uLineOpacity!.value = palette.lineOpacity;
-    this.material.uniforms.uShadeOpacity!.value = palette.shadeOpacity;
-    this.material.uniforms.uRimOpacity!.value = palette.rimOpacity;
-    this.material.uniforms.uHighlightOpacity!.value = palette.highlightOpacity;
-    this.material.uniforms.uHighlightBaseline!.value = palette.highlightBaseline;
-    this.material.uniforms.uHighlightQuiet!.value = palette.highlightQuiet;
+  constructor(_foregroundScene: THREE.Scene, private readonly renderer: THREE.WebGLRenderer, theme: OverviewTheme) {
+    this.backgroundScene.name = "overview-background";
+    this.room = new PerspectiveRoom(this.backgroundScene, this.projection, theme);
+    this.clouds = new ProjectParticleClouds(this.backgroundScene, this.projection, this.room, theme);
+    this.streams = new EnergyStreams(this.backgroundScene, theme);
+    this.streams.setSpeed(appearancePolicy(this.appearance).backgroundRate);
   }
 
   private disable(): void {
     if (this.failed || this.disposed) return;
     this.failed = true;
-    this.mesh.removeFromParent();
-    this.material.dispose();
-    this.geometry.dispose();
+    this.streams.clear();
+    this.room.dispose();
+    this.clouds.dispose();
+    this.streams.dispose();
+    this.backgroundScene.clear();
   }
 
   advanceTime(elapsedSeconds: number, moving: boolean): void {
-    if (this.failed || this.disposed) return;
+    if (this.failed || this.disposed || this.appearance.background === "off") return;
     const seconds = Math.max(0, Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0);
-    if (moving) {
-      // Every shader trace has an integer number of cycles per period. Reduce
-      // the elapsed step first as well, keeping both CPU and GPU phase bounded
-      // during long-lived dashboards without catching up paused/offline time.
-      this.phase = (this.phase + seconds % GRID_PHASE_PERIOD_SECONDS) % GRID_PHASE_PERIOD_SECONDS;
-      this.material.uniforms.uTime!.value = this.phase;
-    }
-    const changed = this.influences.advance(seconds, moving);
-    if (!changed && !this.fieldDirty) return;
-    sampleGridField(this.field, this.width, this.height, this.influences.values);
-    this.geometry.getAttribute("aOverviewGridWarp").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridIntensity").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridQuiet").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridShade").needsUpdate = true;
-    this.geometry.getAttribute("aOverviewGridRim").needsUpdate = true;
-    this.fieldDirty = false;
+    const enabled = moving && this.appearance.background === "animated";
+    this.clouds.advance(seconds, enabled, appearancePolicy(this.appearance).backgroundRate);
+    this.streams.advance(seconds, enabled, (projectId, energy) => this.clouds.arrive(projectId, energy));
   }
 
-  updateField(influences: readonly ProjectGridInfluence[]): void {
-    if (this.failed || this.disposed || sameInfluences(this.previous, influences)) return;
-    this.previous = influences.map(influence => ({ ...influence }));
-    const membershipChanged = this.influences.setTargets(this.previous);
-    this.fieldDirty ||= membershipChanged;
+  updateProjects(projects: readonly ProjectSpatialPresentation[]): void {
+    if (this.failed || this.disposed) return;
+    this.projects = projects.map(project => ({ ...project, screenCentre: { ...project.screenCentre }, screenBounds: { ...project.screenBounds } }));
+    if (this.appearance.background === "off") return;
+    this.clouds.updateProjects(this.projects);
+    this.streams.updateProjects(this.projects, this.room);
+  }
+
+  setAppearance(value: OverviewAppearance): void {
+    if (this.failed || this.disposed) return;
+    const wasOff = this.appearance.background === "off";
+    if (this.appearance.background === "animated" && value.background !== "animated") this.clearTransient();
+    this.appearance = { ...value };
+    this.streams.setSpeed(appearancePolicy(value).backgroundRate);
+    if (wasOff && value.background !== "off") {
+      this.clouds.updateProjects(this.projects);
+      this.streams.updateProjects(this.projects, this.room);
+    }
+  }
+
+  admitActivity(projectId: string): void {
+    if (this.failed || this.disposed || this.appearance.background !== "animated") return;
+    this.streams.admit(projectId);
+  }
+
+  clearTransient(): void {
+    if (this.failed || this.disposed) return;
+    this.streams.clear();
+    this.clouds.clearTransient();
   }
 
   updateTheme(theme: OverviewTheme): void {
-    if (!this.failed && !this.disposed) this.updatePalette(gridPalette(theme));
+    if (this.failed || this.disposed) return;
+    this.room.updateTheme(theme);
+    this.clouds.updateTheme(theme);
+    this.streams.updateTheme(theme);
   }
 
   resize(width: number, height: number, pixelRatio: number): void {
     if (this.failed || this.disposed) return;
-    this.width = Math.max(1, width); this.height = Math.max(1, height);
-    // PlaneGeometry remains a fixed 2 × 2 grid; transform it into the current
-    // CSS-pixel viewport and preserve the top-origin scene Y convention.
-    this.mesh.position.set(this.width / 2, this.height / 2, -8);
-    this.mesh.scale.set(this.width / 2, -this.height / 2, 1);
-    (this.material.uniforms.uViewport!.value as THREE.Vector2).set(this.width, this.height);
-    this.material.uniforms.uPixelRatio!.value = Math.max(1, pixelRatio);
-    // A CSS-pixel resize changes sample coordinates even when project data did not.
-    this.fieldDirty = true;
+    this.projection.resize(width, height, pixelRatio);
+    this.room.resize(pixelRatio);
+    this.clouds.resize(pixelRatio);
+    // Existing routes use the same new projection without resetting travel.
+    this.streams.updateProjects(this.projects, this.room);
   }
 
-  /** Three.js validates a program on first use, so compile() alone is insufficient.
-   * Guard only a render that can introduce a new background program. Never leave
-   * a global error handler installed or hide another material's diagnostics.
+  private visibleMaterials(): THREE.Material[] {
+    const materials: THREE.Material[] = [];
+    this.backgroundScene.traverseVisible(object => {
+      const material = (object as THREE.Object3D & { material?: THREE.Material | THREE.Material[] }).material;
+      if (Array.isArray(material)) materials.push(...material);
+      else if (material) materials.push(material);
+    });
+    return materials;
+  }
+
+  /**
+   * Validate each visible material version on actual use, not compile(). A
+   * stream that becomes visible later is guarded just like an initial shader.
+   * Root owns the normal clear; a failed pass needs its own complete retry clear.
    */
-  renderWithBackgroundFallback(renderScene: () => void): void {
-    if (this.failed || this.disposed || this.validatedVersion === this.material.version) {
-      renderScene();
+  renderWithBackgroundFallback(renderForeground: () => void): void {
+    let renderingBackground = false;
+    let backgroundFailed = false;
+    const composite = (guard = false): void => {
+      if (!this.failed && !this.disposed && this.appearance.background !== "off") {
+        renderingBackground = guard;
+        try { this.renderer.render(this.backgroundScene, this.projection.camera); }
+        finally { renderingBackground = false; }
+        this.renderer.clearDepth();
+      }
+      renderForeground();
+    };
+    const materials = this.failed || this.disposed || this.appearance.background === "off" ? [] : this.visibleMaterials();
+    if (!materials.some(material => this.validatedMaterials.get(material) !== material.version)) {
+      composite();
       return;
     }
     const debug = this.renderer.debug;
     const previousHandler = debug.onShaderError;
     const previousCheck = debug.checkShaderErrors;
-    let backgroundFailed = false;
     debug.checkShaderErrors = true;
     debug.onShaderError = (gl, program, vertex, fragment) => {
       const diagnostics = gl as typeof gl & ShaderDiagnostics;
-      const source = `${diagnostics.getShaderSource(vertex) ?? ""}\n${diagnostics.getShaderSource(fragment) ?? ""}`;
-      if (source.includes("#define SHADER_NAME paseo-overview-ambient-grid")) {
-        backgroundFailed = true;
-      } else if (previousHandler) {
-        previousHandler(gl, program, vertex, fragment);
-      } else {
-        console.error("THREE.WebGLProgram: Shader Error", diagnostics.getProgramInfoLog(program),
-          diagnostics.getShaderInfoLog(vertex), diagnostics.getShaderInfoLog(fragment));
-      }
+      if (renderingBackground) backgroundFailed = true;
+      else if (previousHandler) previousHandler(gl, program, vertex, fragment);
+      else console.error("THREE.WebGLProgram: Shader Error", diagnostics.getProgramInfoLog(program),
+        diagnostics.getShaderInfoLog(vertex), diagnostics.getShaderInfoLog(fragment));
     };
-    try {
-      renderScene();
-    } finally {
+    try { composite(true); }
+    finally {
       debug.onShaderError = previousHandler;
       debug.checkShaderErrors = previousCheck;
       if (backgroundFailed) this.disable();
     }
-    if (backgroundFailed) renderScene();
-    else this.validatedVersion = this.material.version;
+    if (backgroundFailed) {
+      this.renderer.clear(true, true, true);
+      renderForeground();
+    } else {
+      for (const material of materials) this.validatedMaterials.set(material, material.version);
+    }
   }
 
-  isAnimating(): boolean { return !this.failed && !this.disposed; }
+  isAnimating(): boolean {
+    return !this.failed && !this.disposed && this.appearance.background === "animated" && this.projects.length > 0;
+  }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.mesh.removeFromParent();
-    if (!this.failed) { this.material.dispose(); this.geometry.dispose(); }
-    this.previous = [];
-    this.influences.setTargets([]);
+    if (!this.failed) {
+      this.streams.clear();
+      this.room.dispose();
+      this.clouds.dispose();
+      this.streams.dispose();
+    }
+    this.backgroundScene.clear();
+    this.projects = [];
   }
 }

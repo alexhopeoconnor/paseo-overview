@@ -4,20 +4,14 @@ These runners exercise the real renderer and native components with sanitised
 fixtures. They supplement the focused Vitest tests. Fixture project names,
 messages and IDs are synthetic; do not copy real chat or roster data here.
 
-- `renderer.cjs` bundles the real Three.js renderer and checks delayed loading,
-  ownership roles, animal identities, explicit groups, selected ancestors,
-  background framing, visibility restoration, bounded bubbles and disposal. It
-  also observes real depth transforms, fixed centres, pulse continuity, visible
-  grid structure and actual rendered pixel movement, local illumination changes
-  at a fixed animation phase, bounded field warp, elevation shade/rim attributes,
-  readable distant roots and unchanged GPU attributes on
-  cached ambient-only frames and the shader-failure fallback,
-  with pause/visibility/reduced-motion checks. New activity while paused must leave
-  the field unchanged. Theme checks compare pixels after a rendered frame and
-  verify the colours of already-running fibre journeys. Instrumentation stays in the
-  fixture, outside the product bundle.
-  A rendered phase-boundary comparison verifies that the bounded clock does not
-  visibly jump when it wraps.
+- `renderer.cjs` bundles the actual foreground and perspective-background passes.
+  It checks cold loading, grouping, readable nodes, selection, stable depth
+  centres and safe growth; matching graph/cloud projection; activity-admitted
+  feeds and arrivals; rendered room/cloud structure in both themes; live
+  appearance changes; pause/static/off/reduced-motion/visibility; shader
+  isolation and disposal. Instrumentation stays in the fixture. Pixel evidence
+  accompanies geometry assertions: nonzero attributes alone are not visual
+  acceptance. An empty room need not invent feeds or continuously move.
 - `performance.cjs` connects to an explicitly supplied isolated hardware-browser
   CDP endpoint. It records frame intervals, browser main-thread/script work,
   resource counts and automated pointer-selection timing. It rejects software
@@ -41,8 +35,8 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
 - `compile.mjs` uses the Paseo plugin compiler and checks the compiled native
   boundary, including Hermes where the pinned build environment provides it.
 - `packaged.cjs` exercises the selected plugin directory on an exact host
-  package, including screenshot-based grid structure, pixel movement, theme and
-  pause checks, additive streaming previews, actual element fullscreen,
+  package, including screenshot-based room structure, theme and
+  pause checks, host-persisted appearance controls, additive streaming previews, actual element fullscreen,
   preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
   tests use a real user click and inspect `document.fullscreenElement`; controller
   mocks alone are not fullscreen acceptance.
@@ -61,24 +55,24 @@ artifact builder perform its final declared checks. Repeat affected checks after
 fixes rather than rerunning every runner after documentation or lock-only edits.
 
 Inspect the saved full, selected, activity and dark-theme captures after a pass:
-the grid must be noticeable at normal browser zoom while labels, ownership links,
+the floor/wall, feeds and faint clouds must be noticeable at normal browser zoom while labels, ownership links,
 bubbles and details remain readable. Use the normal workstation browser for
 hardware frame-time, draw-call and pointer-response conclusions.
 
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-v06` in this example:
+`/tmp/overview-080` in this example:
 
 ```bash
-mkdir -p /tmp/overview-v06
+mkdir -p /tmp/overview-080
 overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-v06,dst=/out \
+  --mount type=bind,src=/tmp/overview-080,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   "$overview_check_image" \

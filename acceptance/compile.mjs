@@ -35,7 +35,9 @@ const native = vm.runInContext(bundles.clientBundle, context)(name => {
 const cleanup = native.default({
   addScreen(value) { registered.push(value); return () => {}; },
   addSidebarHeaderItem(value) { registered.push(value); return () => {}; },
+  addSettingsScreen(value) { registered.push(value); return () => {}; },
+  openSettings() {},
 });
-if (registered.length !== 2 || registered[0].title !== "Overview") throw new Error("Unexpected client contributions");
+if (registered.length !== 3 || registered[0].title !== "Overview") throw new Error("Unexpected client contributions");
 cleanup();
 console.log(JSON.stringify({ clientBytes: Buffer.byteLength(bundles.clientBundle), serverBytes: Buffer.byteLength(bundles.serverBundle), hermesParse: true, nativeRegistrationWithoutDOM: true, contributions: registered.map(item => item.id) }));

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { appearancePolicy, appearancePalettes, resolvedOverviewTheme } from "../client/appearance-policy";
 import { buildOwnershipIndex, displayId, normalise } from "../client/normalize";
 import type { AgentRecord, RosterState, WorkspaceRecord } from "../shared/observation";
+import type { OverviewTheme } from "../shared/renderer";
+import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
+import { DEFAULT_APPEARANCE, overviewAppearance, overviewAppearanceSchema } from "../shared/settings";
 
 const hostId = "host";
 const agent = (id: string, workspaceId?: string, extra: Partial<AgentRecord> = {}): AgentRecord => ({ id, workspaceId, provider: "codex", title: id, status: "idle", ...extra });
@@ -140,5 +144,86 @@ describe("graph ownership", () => {
       availability: "resident", subagents: [{ id: "child", parentAgentId: "a", parentSubagentId: "missing", provider: "codex", title: null, description: null, status: "running" }],
     }]]));
     expect(result.nodes.find(node => node.kind === "provider-subagent")?.parentId).toBe("host:agent:a");
+  });
+});
+
+describe("appearance settings contract", () => {
+  it("defines a complete host document with stable identity and defaults", () => {
+    expect(overviewAppearance.id).toBe("appearance");
+    expect(overviewAppearance.scope).toBe("host");
+    expect(overviewAppearance.version).toBe(1);
+    expect(DEFAULT_APPEARANCE).toEqual({
+      theme: "paseo", background: "animated", depth: "balanced", response: "balanced", backgroundSpeed: "normal",
+    });
+    expect(overviewAppearanceSchema.parse({})).toEqual(DEFAULT_APPEARANCE);
+    expect(overviewAppearance.schema).toBe(overviewAppearanceSchema);
+  });
+
+  it("defaults omitted fields while rejecting unknown fields and out-of-contract values", () => {
+    expect(overviewAppearanceSchema.parse({ theme: "dark", background: "off" })).toEqual({
+      ...DEFAULT_APPEARANCE, theme: "dark", background: "off",
+    });
+    expect(overviewAppearanceSchema.parse({ depth: "strong", response: "responsive", backgroundSpeed: "fast" })).toEqual({
+      ...DEFAULT_APPEARANCE, depth: "strong", response: "responsive", backgroundSpeed: "fast",
+    });
+    for (const invalid of [
+      { theme: "system" },
+      { background: "paused" },
+      { depth: "maximum" },
+      { response: "instant" },
+      { backgroundSpeed: "turbo" },
+      { theme: "dark", extra: true },
+      { theme: null },
+    ]) {
+      expect(overviewAppearanceSchema.safeParse(invalid).success, JSON.stringify(invalid)).toBe(false);
+    }
+    expect(overviewAppearanceSchema.safeParse({ ...DEFAULT_APPEARANCE, depth: "off" }).success).toBe(true);
+  });
+
+  it("keeps explicit palettes isolated from the host theme and passes Follow Paseo through", () => {
+    const host: OverviewTheme = {
+      background: "#fafafa", surface: "#ffffff", foreground: "#111111", muted: "#666666", border: "#dddddd",
+      accent: "#0055cc", working: "#008855", waiting: "#996600", error: "#bb2233", selection: "#3344cc",
+    };
+    const before = { ...host };
+    expect(resolvedOverviewTheme("paseo", host)).toBe(host);
+    for (const name of ["light", "dark"] as const) {
+      const resolved = resolvedOverviewTheme(name, host);
+      expect(resolved).toBe(appearancePalettes[name]);
+      expect(resolved).not.toBe(host);
+      expect(resolved.background).not.toBe(host.background);
+      expect(Object.keys(resolved).sort()).toEqual(Object.keys(host).sort());
+    }
+    expect(host).toEqual(before);
+    expect(resolvedOverviewTheme("light", { ...host, background: "#000000" })).toBe(appearancePalettes.light);
+    expect(resolvedOverviewTheme("dark", { ...host, background: "#ffffff" })).toBe(appearancePalettes.dark);
+  });
+
+  it("maps every preset to bounded policy values", () => {
+    expect((["off", "subtle", "balanced", "strong"] as const).map(depth =>
+      appearancePolicy({ ...DEFAULT_APPEARANCE, depth }).depthStrength)).toEqual([0, 0.4, 0.7, 1]);
+    expect((["relaxed", "balanced", "responsive"] as const).map(response =>
+      appearancePolicy({ ...DEFAULT_APPEARANCE, response }).responseRate)).toEqual([0.65, 1, 1.6]);
+    expect((["slow", "normal", "fast"] as const).map(backgroundSpeed =>
+      appearancePolicy({ ...DEFAULT_APPEARANCE, backgroundSpeed }).backgroundRate)).toEqual([0.5, 1, 1.5]);
+    for (const depth of ["off", "subtle", "balanced", "strong"] as const) {
+      for (const response of ["relaxed", "balanced", "responsive"] as const) {
+        for (const backgroundSpeed of ["slow", "normal", "fast"] as const) {
+          const policy = appearancePolicy({ ...DEFAULT_APPEARANCE, depth, response, backgroundSpeed });
+          expect(policy.depthStrength).toBeGreaterThanOrEqual(0);
+          expect(policy.depthStrength).toBeLessThanOrEqual(1);
+          expect(policy.responseRate).toBeGreaterThanOrEqual(0.65);
+          expect(policy.responseRate).toBeLessThanOrEqual(1.6);
+          expect(policy.backgroundRate).toBeGreaterThanOrEqual(0.5);
+          expect(policy.backgroundRate).toBeLessThanOrEqual(1.5);
+          expect(Object.values(policy).every(Number.isFinite)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("preserves the existing passive RPC registration names", () => {
+    expect(getRosterRpc.name).toBe("overview.roster");
+    expect(getProjectIconRpc.name).toBe("overview.project-icon");
   });
 });

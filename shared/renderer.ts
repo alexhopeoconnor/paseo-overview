@@ -1,5 +1,6 @@
 import type { OverviewModel } from "./model";
 import type { GroupPreferences, OverviewPresentation, OverviewScope } from "./presentation";
+import type { OverviewAppearance } from "./settings";
 
 export type OverviewFocus = OverviewScope;
 
@@ -35,6 +36,7 @@ export interface OverviewMountOptions {
   theme: OverviewTheme;
   motion?: boolean;
   presentation?: OverviewPresentation;
+  appearance?: OverviewAppearance;
   onSelect(nodeId: string | null): void;
   onFocus(target: OverviewFocus): void;
   onOpenAgent(managedAgentId: string): void;
@@ -46,6 +48,7 @@ export interface OverviewMountOptions {
 export interface OverviewRenderer {
   update(model: OverviewModel): void;
   updateTheme(theme: OverviewTheme): void;
+  setAppearance(appearance: OverviewAppearance): void;
   setFocus(target: OverviewFocus): void;
   setSelection(nodeId: string | null): void;
   setGroups(groups: GroupPreferences): void;

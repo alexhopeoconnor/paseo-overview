@@ -235,8 +235,9 @@ async function run() {
     await delay(600);
     const gridMoved = await packagedGridPixels(page, "motion");
     assert.ok(gridLight.structurePixels > 800, "Prepared plugin renders visible grid structure in the empty graph");
-    assert.ok(gridMoved.changedPixels > 100, "Prepared plugin changes actual background pixels over time");
-    assert.ok(gridMoved.strongChangedPixels > 100, "Light-theme motion has clear compositor contrast, beyond barely changing pixels");
+    // An empty room has no invented activity feeds. Real feed motion is covered
+    // by the event-driven renderer fixture; this packaged check proves coverage.
+    assert.ok(gridMoved.structurePixels > 800, "Empty room remains covered without synthetic traffic");
     await page.emulateMedia({ colorScheme: "dark" });
     await delay(250);
     const gridDark = await packagedGridPixels(page, "dark");
@@ -254,6 +255,26 @@ async function run() {
     await delay(100);
     const packagedGrid = { light: gridLight, moved: gridMoved, dark: gridDark, paused: gridPaused };
     await page.evaluate(() => { delete window.overviewAcceptancePixels; });
+    await page.getByTestId("overview-appearance").click();
+    await page.getByTestId("overview-theme-dark").click();
+    await waitFor(async () => {
+      const value = await page.getByTestId("overview-screen").evaluate(element => getComputedStyle(element).backgroundColor);
+      return value === "rgb(11, 17, 24)";
+    }, "Overview-only dark override");
+    await page.getByTestId("overview-background-off").click();
+    await delay(150);
+    const off = await packagedGridPixels(page, "off");
+    assert.ok(off.structurePixels < 50, "Background Off removes the room without removing the canvas");
+    await page.getByTestId("overview-theme-light").click();
+    await waitFor(async () => (await page.getByTestId("overview-screen").evaluate(element => getComputedStyle(element).backgroundColor)) === "rgb(245, 248, 251)", "Overview-only light override");
+    await page.getByTestId("overview-background-static").click();
+    await delay(150);
+    await packagedGridPixels(page, "static");
+    await delay(300);
+    assert.ok((await packagedGridPixels(page, "static")).changedPixels <= 20, "Static preference freezes the background with graph motion enabled");
+    await page.getByTestId("overview-theme-paseo").click();
+    await page.getByTestId("overview-background-animated").click();
+    await page.getByTestId("overview-appearance").click();
     console.log(`Packaged fixture ready at ${output}`);
     const requestsBeforeFixtures = browserRequests.length;
     const projectNames = ["Projects", "public", "private", "private-web", "private-infra", "private-dev", "public-dev"];
@@ -521,7 +542,7 @@ async function run() {
     }
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","compiled grid visible in both themes","compiled grid rendered pixel movement","compiled grid pause","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {

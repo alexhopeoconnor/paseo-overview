@@ -19,7 +19,9 @@ import { depthTransform, transformRouteNode, type DepthRange } from "./depth";
 import { advanceElevation, elevationTarget, scaleForElevation, type ElevationInput } from "./elevation";
 import { planDepthDelegations, updateMovingDelegation, type CachedDelegation } from "./delegation";
 import { ProceduralAmbientGrid } from "./ambient";
-import type { ProjectGridInfluence } from "./ambient-field";
+import { viewDepthForScale, type ProjectSpatialPresentation } from "./spatial";
+import { DEFAULT_APPEARANCE } from "../../shared/settings";
+import { appearancePolicy } from "../appearance-policy";
 
 interface VisualNode { halo: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; phase: number }
 interface Cluster {
@@ -53,11 +55,13 @@ function updateLinePoints(line: Line2, points: readonly Point[]): void {
   if (distanceEnds) distanceEnds.needsUpdate = true;
 }
 
-/** One orthographic scene, with measured DOM controls sharing every layout transform. */
+/** One renderer: perspective background followed by the measured orthographic graph. */
 export function createOverviewRenderer(parentValue: unknown, options: OverviewMountOptions): OverviewRenderer {
   const parent = parentValue as HTMLElement;
   if (!parent || typeof parent.appendChild !== "function" || typeof parent.getBoundingClientRect !== "function") throw new Error("The browser graph could not attach to its screen.");
   let model = options.model, theme = options.theme;
+  let appearance = options.appearance ?? DEFAULT_APPEARANCE;
+  let policy = appearancePolicy(appearance);
   let ownership = buildOwnershipIndex(model);
   let focused: OverviewFocus = options.presentation?.scope ?? null;
   let selected: string | null = options.presentation?.selectedId ?? null, hovered: string | null = null;
@@ -73,6 +77,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   const motion = () => requestedMotion && !media.matches;
   const canRender = () => !disposed && !failed && visible && document.visibilityState !== "hidden";
   const layoutEngine = new StableLayout(createCollapseTextMeasure());
+  layoutEngine.setDepthReservation(0.1 * policy.depthStrength);
   let layout: SceneLayout = { projects: [], nodes: new Map(), ownershipEdges: [], delegationEdges: [], memberToDisplay: new Map(), groups: [], width, height };
   const activity = new ActivityTracker(), limiter = new PulseLimiter(), bubbles = new BubbleStore();
   const clusters = new Map<string, Cluster>(), delegations = new Map<string, Delegation>();
@@ -80,11 +85,14 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   const pulses: Pulse[] = [], pool: FibreLight[] = [];
   const arrivals = new Map<string, number>(), held = new Map<string, readonly string[]>();
   const scene = new THREE.Scene();
+  scene.name = "overview-foreground";
   const camera = new THREE.OrthographicCamera(0, 1, 0, 1, 0.1, 3000);
   camera.position.set(0, 0, 1000);
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setClearColor(0x000000, 0);
+  renderer.autoClear = false;
+  renderer.info.autoReset = false;
   renderer.domElement.style.cssText = "position:absolute;inset:0;display:block;width:100%;height:100%;outline:none;";
   renderer.domElement.setAttribute("role", "img");
   renderer.domElement.setAttribute("aria-label", "Live project activity. Select a project or workspace to explore.");
@@ -100,7 +108,13 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   glowContext.fillStyle = gradient; glowContext.fillRect(0, 0, 64, 64);
   const glowTexture = new THREE.CanvasTexture(glowCanvas);
   const ambient = new ProceduralAmbientGrid(scene, renderer, theme);
+  ambient.setAppearance(appearance);
   const renderScene = (): void => renderer.render(scene, camera);
+  const renderComposite = (): void => {
+    renderer.info.reset();
+    renderer.clear();
+    ambient.renderWithBackgroundFallback(renderScene);
+  };
   const point = new THREE.Vector3();
   const material = (colour: string, glow = false) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, ...(glow ? { map: glowTexture } : {}) });
   const requestFrame = (dirty = true) => {
@@ -308,7 +322,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     if (!motion()) return;
     for (const event of fresh) {
       const node = layout.nodes.get(layout.memberToDisplay.get(event.nodeId) ?? event.nodeId), agent = agents.get(event.nodeId);
-      if (!node || !agent || (agent.freshness && agent.freshness !== "current") || !limiter.admit(node.id, node.workspaceId ?? node.projectId, now)) continue;
+      if (!node || !agent || (agent.freshness && agent.freshness !== "current")) continue;
+      // Background feeds share the fresh observed event source, with their own
+      // bounded per-project admission. A visual arrival never creates work.
+      ambient.admitActivity(node.projectId);
+      if (!limiter.admit(node.id, node.workspaceId ?? node.projectId, now)) continue;
       const project = clusters.get(node.projectId)?.layout;
       if (!project) continue;
       const routeIds: string[] = [], seen = new Set<string>();
@@ -344,11 +362,12 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const live = model.connection === "connected";
     if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
       ambient.advanceTime(elapsedSeconds, animate && live);
-      ambient.renderWithBackgroundFallback(renderScene); scheduleFrame(now); return;
+      renderComposite(); scheduleFrame(now); return;
     }
     graphDirty = false;
     nextActivityUpdate = Infinity;
     const summaries = aggregateOwnedActivity(model, ownership, activity, now);
+    const totalProjectActivity = [...clusters.keys()].reduce((sum, id) => sum + normaliseActivity(summaries.get(id)?.score ?? 0), 0);
     const agentById = new Map(model.nodes.map(node => [node.id, node]));
     const focusNode = focused ? layout.nodes.get(focused.id) : undefined;
     const focusProject = focusNode?.projectId;
@@ -361,7 +380,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const opacityByNode = new Map<string, number>();
     const presentationByNode = new Map<string, NodePresentation>();
     const bubbleNodes = new Set<string>();
-    const influences: ProjectGridInfluence[] = [];
+    const spatialProjects: ProjectSpatialPresentation[] = [];
     for (const [id, cluster] of clusters) {
       const summary = summaries.get(id), intensity = live ? normaliseActivity(summary?.score ?? 0) : 0;
       if (animate && intensity > 0.001) nextActivityUpdate = now + 250;
@@ -370,14 +389,15 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       const relation = foreground ? "foreground" : background ? "background" : "full-view";
       const relationChanged = relation !== cluster.relation;
       const targetElevation = elevationTarget({ activity: intensity, working: (summary?.working ?? 0) > 0,
-        fresh: live && authoritative(), relation });
+        fresh: live && authoritative(), relation,
+        otherActivity: 1 - Math.exp(-2 * Math.max(0, totalProjectActivity - intensity)) });
       // One displayed elevation drives scaling and grid deformation. Inspection
       // holds automatic motion; an explicit scope change still takes effect.
       if (relationChanged && relation === "full-view") cluster.elevation = cluster.fullViewElevation;
       else if (relationChanged && !animate) cluster.elevation = targetElevation;
       else if (animate && (live || relation !== "full-view") && (!heldDepth || relation !== "full-view") &&
         (!structuralTransition || relation !== "full-view")) {
-        cluster.elevation = advanceElevation(cluster.elevation, targetElevation, elapsedSeconds);
+        cluster.elevation = advanceElevation(cluster.elevation, targetElevation, elapsedSeconds, policy.responseRate);
         if (Math.abs(cluster.elevation - targetElevation) > 0.00001) continuous = true;
       }
       cluster.relation = relation;
@@ -387,7 +407,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         cluster.fullViewElevation = cluster.elevation;
         if (heldDepth && !cluster.depthHeld && !structuralTransition) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
         cluster.depthHeld = heldDepth;
-        if (animate && live && !heldDepth && !structuralTransition) cluster.depth = scaleForElevation(cluster.elevation, cluster.depthRange);
+        if (animate && live && !heldDepth && !structuralTransition) cluster.depth = 1 + (scaleForElevation(cluster.elevation, cluster.depthRange) - 1) * policy.depthStrength;
       }
       let bounds = cluster.layout.bounds;
       if (foreground && focused?.kind === "workspace") {
@@ -461,23 +481,25 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         width: bounds.width * displayedScale,
         height: bounds.height * displayedScale,
       };
-      const workingFloor = live && (summary?.working ?? 0) > 0 ? 0.12 : 0;
-      influences.push({
-        id,
-        centreX: displayedBounds.x + displayedBounds.width / 2,
-        centreY: displayedBounds.y + displayedBounds.height / 2,
-        radiusX: Math.max(80, displayedBounds.width / 2 + 72),
-        radiusY: Math.max(72, displayedBounds.height / 2 + 62),
-        activity: Math.max(workingFloor, live ? intensity : 0),
+      const workingFloor = live && authoritative() && (summary?.working ?? 0) > 0 ? 0.12 : 0;
+      const scaleMultiplier = displayedScale / Math.max(0.01, cluster.layout.scale);
+      spatialProjects.push({
+        projectId: id,
+        screenCentre: { x: displayedBounds.x + displayedBounds.width / 2, y: displayedBounds.y + displayedBounds.height / 2 },
+        screenBounds: displayedBounds,
+        scaleMultiplier,
+        viewDepth: viewDepthForScale(scaleMultiplier),
+        energy: Math.max(workingFloor, intensity),
         visibility: cluster.opacity,
-        focus: foreground ? (focused?.kind === "workspace" ? 0.62 : 0.48) : 0,
         elevation: cluster.elevation,
+        inspected: heldDepth,
+        focused: foreground,
       });
     }
     scene.updateMatrixWorld(true);
     // The field follows the presentation transform rather than the packed layout.
     // An unchanged influence list leaves its typed-array attributes untouched.
-    ambient.updateField(influences);
+    ambient.updateProjects(spatialProjects);
     ambient.advanceTime(elapsedSeconds, animate && live);
     if (structuralTransition && !transitioning) { structuralTransition = false; continuous = true; }
     if (transitioning) { delegationDirty = true; continuous = true; }
@@ -539,7 +561,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     }
     const shown = [...displayedBubbles.values()];
     overlay.finishPositions(shown, width, height);
-    ambient.renderWithBackgroundFallback(renderScene);
+    renderComposite();
     graphAnimating = continuous && animate;
     nextBubbleExpiry = shown.reduce((expiry, bubble) => selected === bubble.nodeId || held.has(bubble.nodeId)
       ? expiry : Math.min(expiry, bubble.expiresAt), Infinity);
@@ -578,7 +600,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     if (!canRender()) {
       if (frame) cancelAnimationFrame(frame); frame = 0;
       if (wakeTimer !== undefined) { clearTimeout(wakeTimer); wakeTimer = undefined; }
-      clearPulses(); bubbles.clear(); bubbles.discard(model.events, Date.now());
+      clearPulses(); ambient.clearTransient(); bubbles.clear(); bubbles.discard(model.events, Date.now());
     }
     else {
       for (const members of held.values()) for (const id of members) bubbles.hold(id, true);
@@ -589,7 +611,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   const onMotion = () => {
     if (!motion() && !focused && !structuralTransition) for (const cluster of clusters.values()) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
     lastTime = 0;
-    clearPulses(); requestFrame();
+    clearPulses(); ambient.clearTransient(); requestFrame();
   };
   const onContextLost = (event: Event) => { event.preventDefault(); failed = true; options.onError?.("The graphics context was lost. Showing the simple view."); };
   renderer.domElement.addEventListener("pointerdown", background);
@@ -623,7 +645,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       if (disposed || failed) return;
       // Offline time is not visible animation time. Reconnection must resume
       // the retained grid phase without catching up the unscheduled interval.
-      if (next.connection !== model.connection) lastTime = 0;
+      if (next.connection !== model.connection) {
+        lastTime = 0;
+        ambient.clearTransient(); clearPulses(); bubbles.clear();
+        bubbles.discard(next.events, Date.now());
+      }
       model = next;
       const nodeIds = new Set(model.nodes.map(node => node.id));
       activity.prune(nodeIds); bubbles.prune(nodeIds);
@@ -635,6 +661,23 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       for (const pulse of pulses) {
         const node = model.nodes.find(candidate => candidate.id === pulse.nodeId);
         if (node) pulse.light.setColour(statusColour(node, next));
+      }
+      requestFrame();
+    },
+    setAppearance(next) {
+      if (JSON.stringify(next) === JSON.stringify(appearance)) return;
+      const previousDepth = policy.depthStrength;
+      appearance = next; policy = appearancePolicy(next); ambient.setAppearance(next);
+      if (policy.depthStrength !== previousDepth) {
+        layoutEngine.setDepthReservation(0.1 * policy.depthStrength);
+        delegationPlanDirty = true;
+        rebuildLayout();
+        // An explicit preference may change the permitted envelope. Resolve it
+        // immediately when motion is paused, otherwise use the normal transition.
+        for (const cluster of clusters.values()) cluster.depth = 1 +
+          (scaleForElevation(cluster.fullViewElevation, cluster.depthRange) - 1) * policy.depthStrength;
+        structuralTransition = true;
+        if (focused) rememberFocusAnchors(true);
       }
       requestFrame();
     },

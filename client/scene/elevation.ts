@@ -9,6 +9,8 @@ export interface ElevationInput {
   working: boolean;
   fresh: boolean;
   relation: ProjectRelation;
+  /** Bounded activity from other projects; does not rank this project against a maximum. */
+  otherActivity?: number;
 }
 
 const clampUnit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
@@ -18,14 +20,15 @@ export function elevationTarget(input: ElevationInput): number {
   if (input.relation === "foreground") return 1;
   if (input.relation === "background") return 0.06;
   if (!input.fresh) return 0;
-  return Math.max(0.75 * clampUnit(input.activity), input.working ? 0.25 : 0);
+  const quiet = input.otherActivity === undefined ? 0 : 0.25 * (1 - clampUnit(input.otherActivity));
+  return Math.max(quiet, 0.75 * clampUnit(input.activity), input.working ? 0.25 : 0);
 }
 
 /** Exact elapsed-time exponential, so frame cadence cannot change the approach. */
-export function advanceElevation(current: number, target: number, elapsedSeconds: number): number {
+export function advanceElevation(current: number, target: number, elapsedSeconds: number, responseRate = 1): number {
   const from = Number.isFinite(current) ? current : target;
   const to = Number.isFinite(target) ? target : from;
-  const seconds = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const seconds = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) * Math.max(0.1, Math.min(2, responseRate)) : 0;
   if (!seconds || from === to) return from;
   const next = from + (to - from) * (1 - Math.exp(-seconds / (to > from ? 0.7 : 1.2)));
   return Math.abs(next - to) < 0.00001 ? to : next;

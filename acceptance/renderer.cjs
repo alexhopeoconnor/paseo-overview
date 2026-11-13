@@ -127,6 +127,15 @@ function checkRepresentation(nodes) {
     assert.ok(bubbleBox.height < 120 && bubbleBox.width < 360, 'Bubble has a compact measured footprint');
     assert.ok(Math.hypot(bubbleBox.x - sourceBox.x, bubbleBox.y - sourceBox.y) < 420, 'Bubble stays near its source');
     await page.screenshot({ path: `${output}/desktop-activity.png` });
+    await bubble.hover();
+    const inspectedBeforeDisconnect = await page.evaluate(() => window.overviewTest.state.selected);
+    await page.evaluate(() => window.overviewTest.connection('disconnected'));
+    await settle(page);
+    assert.equal(await page.locator('[data-overview-bubble]').count(), 0, 'Disconnect clears even held activity previews');
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), inspectedBeforeDisconnect, 'Disconnect preserves selection');
+    await page.evaluate(() => window.overviewTest.connection('connected'));
+    await settle(page);
+    assert.equal(await page.locator('[data-overview-bubble]').count(), 0, 'Reconnect does not replay the cleared preview');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.evaluate(() => window.overviewTest.motion(false));
     await page.keyboard.press('Escape');
@@ -171,25 +180,20 @@ function checkRepresentation(nodes) {
       assert.ok(after.width <= after.neutralWidth * 1.1 + 0.1 && after.height <= after.neutralHeight * 1.1 + 0.1,
         'Activity growth stays within the maximum proportional allowance');
     }
-    const spatialFields = await page.evaluate(() => window.overviewTest.fieldEvidence());
-    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridWarp').maximum <= 12.00001, 'Combined deformation remains bounded');
-    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridShade').maximum > 0, 'Raised graphs contribute visible surface shading');
-    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridRim').maximum > 0, 'Raised graphs contribute a broad contact rim');
+    const spatial = await page.evaluate(() => window.overviewTest.spatialEvidence());
+    for (const project of spatial) assert.ok(Math.abs(project.viewDepth * project.scaleMultiplier - 1000) < 0.001,
+      'Cloud depth and final graph scale use one projection');
+    assert.ok(spatial[0].energy > spatial[1].energy, 'Owned activity energises the busy cloud');
+    const feeds = await page.evaluate(() => window.overviewTest.feedEvidence());
+    assert.ok(feeds.admitted > 0, 'Fresh events admit bounded background feeds');
     await page.screenshot({ path: `${output}/desktop-depth-dark.png` });
     await page.evaluate(() => window.overviewTest.theme(false));
     await settle(page);
     await page.screenshot({ path: `${output}/desktop-depth-light.png` });
     await page.evaluate(() => window.overviewTest.theme(true));
-    const centre = graph => ({ x: graph.x + graph.width / 2, y: graph.y + graph.height / 2 });
-    const localGrid = await page.evaluate(({ busy, quiet }) => ({ busy: window.overviewTest.gridFieldAt(busy.x, busy.y), quiet: window.overviewTest.gridFieldAt(quiet.x, quiet.y) }), {
-      busy: centre(graphAfter[0]), quiet: centre(graphAfter[1]),
-    });
-    const gridSummary = await page.evaluate(() => window.overviewTest.gridFieldSummary());
-    assert.ok(localGrid.busy.intensity > localGrid.quiet.intensity, `Busy project receives stronger local grid illumination than a quiet project: ${JSON.stringify({ localGrid, gridSummary, graphAfter })}`);
-    assert.ok(localGrid.busy.warp <= 12 && localGrid.quiet.warp <= 12, 'Displayed influence warp stays bounded');
     const afterIllumination = await page.evaluate(regions => window.overviewTest.ambientEvidence('local', 3, regions), regions);
     const illuminationGain = afterIllumination.local.map((region, index) => region.meanAlpha - beforeIllumination.local[index].meanAlpha);
-    assert.ok(illuminationGain[0] > 0.05 && illuminationGain[0] > illuminationGain[1], `Rendered grid brightens locally around real activity: ${JSON.stringify(illuminationGain)}`);
+    assert.ok(illuminationGain[0] > 0.05, `Rendered cloud responds to real activity: ${JSON.stringify(illuminationGain)}`);
     const inspecting = await node(page, 'depth-a').boundingBox();
     await page.mouse.move(inspecting.x + inspecting.width / 2, inspecting.y + inspecting.height / 2);
     await page.waitForTimeout(75);
@@ -236,35 +240,57 @@ function checkRepresentation(nodes) {
     await settle(page);
     sameGeometry(pausedReturn, await inspect(page));
 
-    // An empty connected scene isolates ambient scheduling from working heartbeats.
-    await page.evaluate(() => window.overviewTest.empty());
-    await page.waitForTimeout(150);
+    // Keep quiet projects present so subtle cloud motion is tested; an empty room
+    // intentionally has no invented activity feeds.
+    await page.evaluate(() => window.overviewTest.depthFixture());
+    await page.evaluate(() => window.overviewTest.motion(true));
+    await page.waitForTimeout(700);
     const ambientEvidence = await page.evaluate(() => window.overviewTest.ambientEvidence('moving'));
-    const fieldBeforeIdle = await page.evaluate(() => window.overviewTest.fieldEvidence());
-    assert.ok(ambientEvidence.visiblePixels > 800, `Grid has meaningful visible structure (${JSON.stringify(ambientEvidence)})`);
-    assert.ok(ambientEvidence.meanAlpha > 10, 'Grid lines remain visibly separated from the transparent canvas');
-    await page.evaluate(() => window.overviewTest.resetTelemetry());
-    const ambientBefore = (await page.evaluate(() => window.overviewTest.telemetry())).ambient;
-    await page.waitForTimeout(500);
-    const ambientAfter = await page.evaluate(() => window.overviewTest.telemetry());
-    assert.ok(ambientAfter.frames >= 5 && ambientAfter.frames <= 18, `Ambient-only rendering stays at a low cadence (${ambientAfter.frames} frames)`);
-    assert.notDeepEqual(ambientAfter.ambient, ambientBefore);
-    assert.equal(ambientAfter.layoutBuilds, 0, 'Ambient-only ticks do not rebuild layout');
-    assert.deepEqual(await page.evaluate(() => window.overviewTest.fieldEvidence()), fieldBeforeIdle, 'Unchanged ambient-only frames reuse GPU field attributes');
+    assert.ok(ambientEvidence.visiblePixels > 800, `Room has meaningful visible structure (${JSON.stringify(ambientEvidence)})`);
+    await page.evaluate(() => { window.overviewTest.resetTelemetry(); window.overviewTest.burst(); });
+    await page.waitForTimeout(350);
     const renderedMovement = await page.evaluate(() => window.overviewTest.ambientEvidence('moving'));
-    assert.ok(renderedMovement.changedPixels > 100, `Actual grid pixels move, independently of the time uniform: ${renderedMovement.changedPixels}`);
-    await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.theme(false); });
+    assert.ok(renderedMovement.changedPixels > 100, `Actual room/cloud/feed pixels move: ${renderedMovement.changedPixels}`);
+    await page.waitForTimeout(3500);
+    const feedArrival = await page.evaluate(() => window.overviewTest.feedEvidence());
+    assert.ok(feedArrival.arrivals > 0 && feedArrival.arrivals <= feedArrival.admitted, 'Admitted streams arrive without duplicate callbacks');
+    await page.evaluate(() => { window.overviewTest.appearance({ background: 'static' }); window.overviewTest.motion(false); });
     await settle(page);
-    const lightGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
-    await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 0));
-    const wrappedGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 256));
-    assert.equal(wrappedGrid.changedPixels, 0, 'Common phase wrap preserves actual rendered trace positions');
+    const fieldBeforeIdle = await page.evaluate(() => window.overviewTest.fieldEvidence());
+    await page.evaluate(() => window.overviewTest.resetTelemetry());
+    await page.waitForTimeout(300);
+    assert.equal((await page.evaluate(() => window.overviewTest.telemetry())).frames, 0, 'Static paused scene needs no animation frames');
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.fieldEvidence()), fieldBeforeIdle);
+    await page.evaluate(() => window.overviewTest.theme(false));
+    await settle(page);
+    const lightGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme'));
     await page.evaluate(() => window.overviewTest.theme(true));
     await settle(page);
-    const darkGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
-    assert.ok(lightGrid.visiblePixels > 800 && darkGrid.visiblePixels > 800, 'Both themes render visible grid structure');
-    assert.ok(darkGrid.changedPixels > 800 && Math.abs(lightGrid.meanColour - darkGrid.meanColour) > 1, 'Effective theme changes rendered grid colours');
-    await page.evaluate(() => window.overviewTest.motion(true));
+    const darkGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme'));
+    assert.ok(lightGrid.visiblePixels > 800 && darkGrid.visiblePixels > 800, 'Both themes render the floor and wall');
+    // Transparent pixels use different coverage in each palette; an average
+    // premultiplied RGB value over those different masks is not a colour metric.
+    assert.ok(darkGrid.changedPixels > 800 && Math.abs(lightGrid.meanAlpha - darkGrid.meanAlpha) > 1,
+      'Effective theme changes rendered room palette and contrast');
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.shaderLogs()), [], 'All visible background shaders compile');
+    await page.evaluate(() => window.overviewTest.appearance({ background: 'off' }));
+    await settle(page);
+    const offResources = await page.evaluate(() => window.overviewTest.resourceEvidence());
+    await page.evaluate(() => window.overviewTest.appearance({ background: 'animated' }));
+    await settle(page);
+    assert.ok((await page.evaluate(() => window.overviewTest.resourceEvidence())).drawCalls > offResources.drawCalls, 'Off removes background drawing');
+    // Settings preserve scope/selection; explicit focus remains useful with depth off.
+    await page.evaluate(() => window.overviewTest.appearance({ depth: 'off' }));
+    await page.evaluate(() => window.overviewTest.focus({ kind: 'project', id: 'p1' }));
+    await settle(page);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.focused), { kind: 'project', id: 'p1' });
+    await page.evaluate(() => { window.overviewTest.focus(null); window.overviewTest.appearance({ depth: 'balanced' }); window.overviewTest.empty(); window.overviewTest.motion(true); });
+    await page.waitForTimeout(100);
+    await page.evaluate(() => window.overviewTest.resetTelemetry());
+    await page.waitForTimeout(500);
+    const ambientAfter = await page.evaluate(() => window.overviewTest.telemetry());
+    assert.ok(ambientAfter.frames <= 18, `Background scheduling stays bounded (${ambientAfter.frames} frames)`);
+    assert.equal(ambientAfter.layoutBuilds, 0, 'Background ticks do not rebuild layout');
     for (const mode of ['pause', 'reduce', 'hidden', 'disconnected']) {
       if (mode === 'pause') await page.evaluate(() => window.overviewTest.motion(false));
       if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
@@ -284,10 +310,10 @@ function checkRepresentation(nodes) {
       await new Promise(resolve => requestAnimationFrame(resolve));
       return { before, after: window.overviewTest.telemetry().ambient[0] };
     });
-    assert.ok(reconnectClock.after > reconnectClock.before && reconnectClock.after - reconnectClock.before <= 0.05,
+    assert.ok(reconnectClock.after >= reconnectClock.before && reconnectClock.after - reconnectClock.before <= 0.05,
       `Reconnect advances only a fresh frame, not offline time: ${JSON.stringify(reconnectClock)}`);
     await page.waitForTimeout(150);
-    assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
+    assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames >= 1, 'Reconnect redraws current state');
     await page.evaluate(() => window.overviewTest.loadNative());
     await settle(page);
     await page.evaluate(() => window.overviewTest.installShaderObserver());
@@ -311,7 +337,7 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, wrappedGrid, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, feedArrival, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
     console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {

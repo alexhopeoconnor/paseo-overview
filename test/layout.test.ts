@@ -257,3 +257,30 @@ describe("project-root layout", () => {
     valid(result);
   });
 });
+
+
+describe("reserved project depth envelopes", () => {
+  it("reserves growth once and keeps activity updates in the same packing", () => {
+    const engine = new StableLayout(), value = model([3, 1, 0, 2], 8);
+    engine.setDepthReservation(0.1);
+    const before = engine.update(value, 1280, 920);
+    const envelopes = before.projects.map(project => {
+      const width = project.bounds.width * project.scale, height = project.bounds.height * project.scale;
+      return { x: project.position.x + project.bounds.x * project.scale - width * 0.05,
+        y: project.position.y + project.bounds.y * project.scale - height * 0.05,
+        width: width * 1.1, height: height * 1.1 };
+    });
+    for (const bounds of envelopes) {
+      expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.y).toBeGreaterThanOrEqual(0);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(1280); expect(bounds.y + bounds.height).toBeLessThanOrEqual(920);
+      for (const other of envelopes) if (bounds !== other) expect(rectsOverlap(bounds, other, 8)).toBe(false);
+    }
+    const after = engine.update({ ...value, nodes: value.nodes.map(node => ({ ...node, state: "working" })) }, 1280, 920);
+    expect(after.projects.map(project => [project.position, project.scale])).toEqual(before.projects.map(project => [project.position, project.scale]));
+    engine.setDepthReservation(0);
+    engine.update(value, 1280, 920);
+    engine.setDepthReservation(0.1);
+    const restored = engine.update(value, 1280, 920);
+    expect(restored.projects.map(project => [project.position, project.scale])).toEqual(before.projects.map(project => [project.position, project.scale]));
+  });
+});

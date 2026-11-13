@@ -47,7 +47,7 @@ describe("bounded project depth ranges", () => {
     const wide = project("wide", { x: 200, y: 150 }, { x: 0, y: 0, width: 400, height: 200 });
     const range = projectDepthRange(wide, viewport);
     expect(range.max).toBeCloseTo(1.1);
-    expect(range.min).toBeCloseTo(0.98);
+    expect(range.min).toBeCloseTo(0.94);
     expect((range.max - 1) * wide.bounds.width / 2).toBeGreaterThan(8);
     for (const multiplier of [range.min, 1, range.max]) expectInside(transformedBounds(wide, multiplier), viewport);
   });
@@ -138,5 +138,21 @@ describe("project elevation", () => {
     expect(scaleForElevation(0.75, range)).toBe(1.1);
     expect(scaleForElevation(1, range)).toBe(1.1);
     expect(scaleForElevation(-1, range)).toBe(0.98);
+  });
+});
+
+
+describe("contextual depth response", () => {
+  it("keeps a quiet scene neutral and recedes quiet neighbours without ranking", () => {
+    const input = { activity: 0, working: false, fresh: true, relation: "full-view" as const };
+    expect(elevationTarget({ ...input, otherActivity: 0 })).toBe(0.25);
+    expect(elevationTarget({ ...input, otherActivity: 0.8 })).toBeCloseTo(0.05);
+    expect(elevationTarget({ ...input, working: true, otherActivity: 1 })).toBe(0.25);
+    expect(elevationTarget({ ...input, activity: 1, otherActivity: 1 })).toBe(0.75);
+  });
+  it("integrates response-rate changes without restarting or jumping phase", () => {
+    const first = advanceElevation(0.25, 0.75, 0.3, 0.65);
+    expect(advanceElevation(first, 0.75, 0, 1.6)).toBe(first);
+    expect(advanceElevation(first, 0.75, 0.1, 1.6)).toBeGreaterThan(advanceElevation(first, 0.75, 0.1, 0.65));
   });
 });

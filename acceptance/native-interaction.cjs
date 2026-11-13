@@ -8,7 +8,26 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 
 (async () => {
-  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { nativeFixture } from "/plugin/acceptance/native-fixture"; export { lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
+  const uiStub = [
+    'import React from "react";',
+    'import { Pressable, Text, View } from "react-native";',
+    'const h = React.createElement;',
+    'export function SettingsSection({ title, trailing, testID, children }) { return h(View, { testID }, h(Text, null, title), trailing ? h(Text, null, trailing) : null, children); }',
+    'export const SettingsGroup = SettingsSection;',
+    'export function SettingsCard({ testID, children }) { return h(View, { testID }, children); }',
+    'export function SettingsRow({ testID, label, hint, error, children }) { return h(View, { testID, accessibilityValue: hint ? { text: hint } : undefined }, h(Text, null, label), children, hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
+    'export function SettingsSelect({ testID, label, value, options, onValueChange, disabled, hint, error }) { return h(View, { testID, accessibilityValue: { text: value } }, h(Text, null, label), ...options.map(option => h(Pressable, { key: option.value, testID: [testID, option.value].join(":"), accessibilityRole: "radio", accessibilityLabel: option.label, accessibilityState: { checked: value === option.value, disabled }, disabled, onPress: () => { if (!disabled) onValueChange(option.value); } }, h(Text, null, option.label))), hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
+    'export function SettingsAction({ testID, label, actionLabel, onPress, disabled, hint, error }) { return h(View, { testID }, h(Text, null, label), h(Pressable, { testID: [testID, "action"].join(":"), accessibilityRole: "button", accessibilityLabel: actionLabel, disabled, onPress: () => { if (!disabled) onPress(); } }, h(Text, null, actionLabel)), hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
+  ].join('\n');
+  const stubPlugin = { name: 'overview-acceptance-stubs', setup(build) {
+    build.onResolve({ filter: /^@getpaseo\/plugin\/client\/ui$/ }, () => ({ path: 'ui', namespace: 'stub' }));
+    build.onResolve({ filter: /^@getpaseo\/plugin\/client$/ }, () => ({ path: 'client', namespace: 'stub' }));
+    build.onResolve({ filter: /^@getpaseo\/plugin$/ }, () => ({ path: 'sdk', namespace: 'stub' }));
+    build.onLoad({ filter: /^ui$/, namespace: 'stub' }, () => ({ contents: uiStub, loader: 'js' }));
+    build.onLoad({ filter: /^client$/, namespace: 'stub' }, () => ({ contents: 'import { useSyncExternalStore } from "react";\nexport function useSettings() { const state = useSyncExternalStore(globalThis.__overviewSettingsSubscribe, globalThis.__overviewSettingsSnapshot); return { ...state, save: globalThis.__overviewSettingsSave, reset: globalThis.__overviewSettingsReset, reload: globalThis.__overviewSettingsReload }; }', loader: 'js' }));
+    build.onLoad({ filter: /^sdk$/, namespace: 'stub' }, () => ({ contents: 'export function defineSettings(definition) { return definition; }', loader: 'js' }));
+  } };
+  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { AppearanceSettings } from "/plugin/client/settings"; export { appearancePalettes } from "/plugin/client/appearance-policy"; export { DEFAULT_APPEARANCE } from "/plugin/shared/settings"; export { nativeFixture } from "/plugin/acceptance/native-fixture"; export { lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, plugins: [stubPlugin], bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
   const listeners = { app: new Set(), motion: new Set() };
   const active = new Map(), animationCalls = [];
   let animationId = 0;
@@ -44,6 +63,11 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
     },
   };
   const module = { exports: {} };
+  let settingsSnapshot = null;
+  const settingsListeners = new Set();
+  const settingsSaveCalls = [];
+  let settingsResetCalls = 0, settingsReloadCalls = 0, settingsSaveResult = true, settingsSavedRevision = 'rev-2';
+  const setSettings = next => { settingsSnapshot = next; for (const listener of settingsListeners) listener(); };
   const context = vm.createContext({ module, exports: module.exports, console, setTimeout, clearTimeout,
     require(name) {
       if (name === 'react') return React;
@@ -52,6 +76,29 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
       throw new Error(`Unexpected native-only import: ${name}`);
     },
   });
+  context.__overviewSettingsSubscribe = listener => { settingsListeners.add(listener); return () => settingsListeners.delete(listener); };
+  context.__overviewSettingsSnapshot = () => settingsSnapshot;
+  context.__overviewSettingsSave = async (values, revision) => {
+    settingsSaveCalls.push({ values, revision });
+    const current = settingsSnapshot;
+    if (!settingsSaveResult) {
+      setSettings({ ...current, saving: false, saveError: 'Another client changed appearance settings.' });
+      return false;
+    }
+    setSettings({ ...current, status: 'ready', values, revision: settingsSavedRevision, saving: false, saveError: null });
+    return true;
+  };
+  context.__overviewSettingsReset = async () => {
+    settingsResetCalls += 1;
+    setSettings({ status: 'ready', values: { ...module.exports.DEFAULT_APPEARANCE }, revision: 'rev-reset', saving: false, saveError: null });
+    return true;
+  };
+  context.__overviewSettingsReload = async () => {
+    settingsReloadCalls += 1;
+    const current = settingsSnapshot;
+    const values = current.status === 'ready' ? current.values : { ...module.exports.DEFAULT_APPEARANCE };
+    setSettings({ status: 'ready', values, revision: current.revision ? `${current.revision}-reloaded` : 'rev-reloaded', saving: false, saveError: null });
+  };
   for (const name of ['document', 'window']) Object.defineProperty(context, name, {
     get() { throw new Error(`Native graph accessed browser global ${name}`); },
   });
@@ -66,19 +113,27 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   }
   native.Platform.OS = 'android';
   let model = { ...module.exports.nativeFixture, nodes: module.exports.nativeFixture.nodes.map(node => node.id === "a9-0" ? { ...node, state: "working" } : node) };
-  let visible = true, state, tree;
+  let visible = true, state, tree, settingsTree, appearanceState, appearancePolicy;
   const onState = next => { state = next; };
-  const element = () => React.createElement(module.exports.NativeHarness, { model, theme: module.exports.lightTheme, visible, onState });
-  const hosts = () => tree.root.findAll(node => typeof node.type === 'string');
-  const byId = id => hosts().find(node => node.props.testID === id);
+  const onAppearance = (value, policy) => { appearanceState = value; appearancePolicy = policy; };
+  const element = () => React.createElement(module.exports.NativeHarness, { model, theme: module.exports.lightTheme, visible, onState, onAppearance });
+  const hostsIn = root => root.root.findAll(node => typeof node.type === 'string');
+  const hosts = () => hostsIn(tree);
+  const byIdIn = (root, id) => hostsIn(root).find(node => node.props.testID === id);
+  const byId = id => byIdIn(tree, id);
+  const settingsById = id => byIdIn(settingsTree, id);
   const prefixed = prefix => hosts().filter(node => String(node.props.testID || '').startsWith(prefix));
   const text = node => node.children.map(child => typeof child === 'string' ? child : text(child)).join('');
   const update = async () => { await act(async () => tree.update(element())); };
-  const press = async id => {
-    const control = byId(id);
+  const pressIn = async (root, id) => {
+    const control = byIdIn(root, id);
     assert.ok(control && typeof control.props.onPress === 'function', `Missing control ${id}`);
     await act(async () => control.props.onPress());
   };
+  const press = id => pressIn(tree, id);
+  const pressSettings = id => pressIn(settingsTree, id);
+  const styleValues = node => (Array.isArray(node.props.style) ? node.props.style.flat(Infinity) : [node.props.style]).filter(Boolean);
+  const styleValue = (node, key) => styleValues(node).map(style => style[key]).find(value => value !== undefined);
   const mount = async () => {
     await act(async () => { tree = create(element(), { createNodeMock: element => element.type === 'ScrollView' ? { scrollTo() {} } : null }); });
   };
@@ -104,6 +159,40 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   const beforeLateCallback = active.size;
   await act(async () => { for (const call of old) if (!active.has(call.id)) call.callback({ finished: true }); });
   assert.equal(active.size, beforeLateCallback);
+
+  // The shared header quick appearance uses the real controlled appearance
+  // state and policy without disturbing scope or counts.
+  assert.ok(appearanceState && appearancePolicy, 'Native harness reports appearance and policy');
+  assert.equal(appearanceState.theme, 'paseo');
+  assert.equal(appearancePolicy.depthStrength, 0.7);
+  const appearanceTitle = text(byId('overview-scope-title'));
+  const appearanceCounts = text(byId('overview-scope-counts'));
+  const appearanceScope = state.scope;
+  await press('overview-appearance');
+  assert.ok(byId('overview-appearance-panel'));
+  for (const id of ['overview-appearance', 'overview-theme-paseo', 'overview-theme-light', 'overview-theme-dark',
+    'overview-background-animated', 'overview-background-static', 'overview-background-off']) {
+    const control = byId(id);
+    assert.equal(styleValue(control, 'minWidth'), 44, `${id} keeps a 44px width`);
+    assert.equal(styleValue(control, 'minHeight'), 44, `${id} keeps a 44px height`);
+  }
+  await press('overview-theme-dark');
+  assert.equal(appearanceState.theme, 'dark');
+  assert.equal(byId('overview-native-screen').props.style.backgroundColor, module.exports.appearancePalettes.dark.background);
+  assert.equal(byId('overview-theme-dark').props.accessibilityState.checked, true);
+  assert.deepEqual(state.scope, appearanceScope);
+  assert.equal(text(byId('overview-scope-title')), appearanceTitle);
+  assert.equal(text(byId('overview-scope-counts')), appearanceCounts);
+  await press('overview-background-off');
+  assert.equal(appearanceState.background, 'off');
+  assert.equal(byId('overview-background-off').props.accessibilityState.checked, true);
+  assert.equal(appearancePolicy.backgroundRate, 1);
+  await press('overview-theme-paseo');
+  await press('overview-background-animated');
+  assert.equal(byId('overview-native-screen').props.style.backgroundColor, module.exports.lightTheme.background);
+  assert.deepEqual(state.scope, appearanceScope);
+  await press('overview-appearance');
+  assert.equal(byId('overview-appearance-panel'), undefined);
 
   await press('overview-native-project:p0');
   assert.equal(text(byId('overview-scope-title')), 'Application');
@@ -163,8 +252,73 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.ok(active.size > 0);
   await act(async () => tree.unmount());
   assert.equal(active.size, 0); assert.equal(listeners.app.size, 0); assert.equal(listeners.motion.size, 0);
+  // Host settings screen states. The stub mirrors useSettings' discriminated
+  // state, full-document save and revision contract without Paseo internals.
+  const settingsElement = () => React.createElement(module.exports.AppearanceSettings);
+  const updateSettings = async () => { await act(async () => settingsTree.update(settingsElement())); };
+  const applySettings = async next => { await act(async () => { setSettings(next); settingsTree.update(settingsElement()); }); };
+  const normalize = value => JSON.parse(JSON.stringify(value));
+  await act(async () => {
+    setSettings({ status: 'loading', saving: false, saveError: null });
+    settingsTree = create(settingsElement(), { createNodeMock: () => null });
+  });
+  assert.ok(settingsById('overview-appearance-loading'));
+  assert.equal(settingsById('overview-appearance-theme'), undefined);
+  assert.equal(settingsSaveCalls.length, 0);
+
+  await applySettings({ status: 'error', error: 'Host unavailable', saving: false, saveError: null });
+  assert.match(text(settingsById('overview-appearance-error')), /could not be loaded/);
+  assert.equal(settingsSaveCalls.length, 0);
+  await pressSettings('overview-appearance-retry:action');
+  await updateSettings();
+  assert.equal(settingsReloadCalls, 1);
+  assert.equal(settingsSaveCalls.length, 0);
+
+  await applySettings({ status: 'invalid', error: 'Stored values do not match the schema', revision: 'rev-bad', saving: false, saveError: null });
+  assert.match(text(settingsById('overview-appearance-invalid')), /invalid/);
+  assert.equal(settingsById('overview-appearance-theme'), undefined);
+  assert.equal(settingsSaveCalls.length, 0);
+  await pressSettings('overview-appearance-invalid-reset:action');
+  await updateSettings();
+  assert.equal(settingsResetCalls, 1);
+  assert.equal(settingsSaveCalls.length, 0);
+
+  await applySettings({ status: 'ready', values: { ...module.exports.DEFAULT_APPEARANCE }, revision: 'rev-1', saving: false, saveError: null });
+  assert.equal(settingsById('overview-appearance-theme').props.accessibilityValue.text, 'paseo');
+  assert.equal(settingsById('overview-appearance-background').props.accessibilityValue.text, 'animated');
+  settingsSaveResult = true;
+  settingsSavedRevision = 'rev-2';
+  await pressSettings('overview-appearance-theme:dark');
+  await updateSettings();
+  assert.equal(settingsSaveCalls.length, 1);
+  assert.deepEqual(normalize(settingsSaveCalls[0]), normalize({ values: { ...module.exports.DEFAULT_APPEARANCE, theme: 'dark' }, revision: 'rev-1' }));
+  assert.equal(settingsSnapshot.revision, 'rev-2');
+  assert.equal(settingsById('overview-appearance-theme').props.accessibilityValue.text, 'dark');
+
+  // A rejected save preserves the last good values and exposes Reload; a
+  // successful reload clears the conflict without retaining the draft.
+  settingsSaveResult = false;
+  await pressSettings('overview-appearance-background:off');
+  await updateSettings();
+  assert.equal(settingsSaveCalls.length, 2);
+  assert.deepEqual(normalize(settingsSaveCalls[1]), normalize({
+    values: { ...module.exports.DEFAULT_APPEARANCE, theme: 'dark', background: 'off' }, revision: 'rev-2',
+  }));
+  assert.equal(settingsById('overview-appearance-background').props.accessibilityValue.text, 'animated');
+  assert.match(text(settingsById('overview-appearance-save-error')), /Changes were not saved/);
+  assert.match(text(settingsById('overview-appearance-save-error')), /Another client changed appearance settings/);
+  const savesBeforeReload = settingsSaveCalls.length;
+  await pressSettings('overview-appearance-save-error:action');
+  await updateSettings();
+  assert.equal(settingsReloadCalls, 2);
+  assert.equal(settingsSaveCalls.length, savesBeforeReload);
+  assert.equal(settingsById('overview-appearance-save-error'), undefined);
+  assert.equal(settingsById('overview-appearance-theme').props.accessibilityValue.text, 'dark');
+  assert.equal(settingsById('overview-appearance-background').props.accessibilityValue.text, 'animated');
+  await act(async () => settingsTree.unmount());
+
   await fs.mkdir(output, { recursive: true });
-  await fs.writeFile(`${output}/native-interaction-results.json`, JSON.stringify({ ok: true, actualComponents: true, nativePrimitivesAndAnimationMocked: true, withoutDOM: true, withoutThree: true,
-    checks: ['android/iOS browser fullscreen/renderer/positioner guards', 'controlled header scope', 'stable role-aware emoji nodes', 'mixed inactive group outcomes', 'visible closed/canceled statuses and selection', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
+  await fs.writeFile(`${output}/native-interaction-results.json`, JSON.stringify({ ok: true, actualComponents: true, nativePrimitivesAndAnimationMocked: true, settingsHostBoundaryMocked: true, withoutDOM: true, withoutThree: true,
+    checks: ['android/iOS browser fullscreen/renderer/positioner guards', 'controlled header scope', 'quick appearance theme/background with stable scope', '44px appearance targets', 'settings loading/error/invalid never save', 'ready full-document revision save', 'conflict preserves last good values and reload recovers', 'stable role-aware emoji nodes', 'mixed inactive group outcomes', 'visible closed/canceled statuses and selection', 'group focus persistence and collapse', '44px collapse target', 'phase continuity', 'late animation callbacks', 'visibility/pause/AppState/reduced motion', 'listener cleanup'], rendered }, null, 2));
   console.log(JSON.stringify({ ok: true, output, animationsObserved: animationCalls.length }));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

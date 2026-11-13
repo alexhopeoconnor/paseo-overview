@@ -4,11 +4,22 @@ import type { OverviewModel } from "../shared/model";
 import type { OverviewScope, PresentationAction } from "../shared/presentation";
 import { addEdges, darkTheme, full, icon, lightTheme, managed, projects, workspaces } from "./fixture";
 import { Scene, type Camera, type WebGLRenderer, type Mesh, type ShaderMaterial } from "three";
+import { DEFAULT_APPEARANCE, type OverviewAppearance } from "../shared/settings";
+import { ProceduralAmbientGrid } from "../client/scene/ambient";
+import { EnergyStreams } from "../client/scene/streams";
+import type { ProjectSpatialPresentation } from "../client/scene/spatial";
 import { FibreLight } from "../client/scene/lines";
 import { StableLayout, type ProjectLayout } from "../client/layout";
 
 // Fixture-only observation of the actual renderer, without a production debug API.
 const performanceMode = new URLSearchParams(location.search).get("performance") === "1";
+const shaderLogs: string[] = [];
+const shaderInfoLog = WebGL2RenderingContext.prototype.getShaderInfoLog;
+WebGL2RenderingContext.prototype.getShaderInfoLog = function (shader) {
+  const log = shaderInfoLog.call(this, shader);
+  if (log?.trim()) shaderLogs.push(log);
+  return log;
+};
 const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number; neutralWidth: number; neutralHeight: number }[], graphFrames: [] as { id: number; width: number }[][], ambient: [] as number[] };
 const layoutUpdate = StableLayout.prototype.update;
 let displayedProjects = new Map<string, ProjectLayout>();
@@ -22,9 +33,30 @@ StableLayout.prototype.update = function (...args) {
   return layout;
 };
 let observedScene: Scene | undefined, observedRenderer: WebGLRenderer | undefined, observedCamera: Camera | undefined;
+let backgroundScene: Scene | undefined, backgroundCamera: Camera | undefined;
+let spatialProjects: readonly ProjectSpatialPresentation[] = [];
+const spatialUpdate = ProceduralAmbientGrid.prototype.updateProjects;
+ProceduralAmbientGrid.prototype.updateProjects = function (projects) {
+  spatialProjects = projects.map(project => ({ ...project }));
+  spatialUpdate.call(this, projects);
+};
+const feeds = { admitted: 0, arrivals: 0 };
+const admitFeed = EnergyStreams.prototype.admit;
+EnergyStreams.prototype.admit = function (projectId) { const admitted = admitFeed.call(this, projectId); if (admitted) feeds.admitted++; return admitted; };
+const advanceFeeds = EnergyStreams.prototype.advance;
+EnergyStreams.prototype.advance = function (seconds, moving, arrival) {
+  advanceFeeds.call(this, seconds, moving, (id, energy) => { feeds.arrivals++; arrival(id, energy); });
+};
 const beforeRender = Scene.prototype.onBeforeRender;
 Scene.prototype.onBeforeRender = function (...args) {
   beforeRender.apply(this, args);
+  if (this.name === "overview-background") {
+    backgroundScene = this; backgroundCamera = args[2];
+    telemetry.ambient = this.children.filter(child => child.userData.overviewClouds)
+      .map(child => ((child as Mesh).material as ShaderMaterial).uniforms.uPhase?.value ?? 0);
+    return;
+  }
+  if (this.name !== "overview-foreground") return;
   observedScene = this; observedRenderer = args[0]; observedCamera = args[2]; telemetry.frames++;
   telemetry.frameTimes.push(performance.now());
   if (telemetry.frameTimes.length > 4096) telemetry.frameTimes.splice(0, 2048);
@@ -41,7 +73,6 @@ Scene.prototype.onBeforeRender = function (...args) {
   }).filter(graph => Number.isFinite(graph.x) && Number.isFinite(graph.y));
   telemetry.graphFrames.push(telemetry.graphs.map(graph => ({ id: graph.id, width: graph.width })));
   if (telemetry.graphFrames.length > 240) telemetry.graphFrames.shift();
-  telemetry.ambient = this.children.filter(child => child.userData.overviewAmbientGrid).flatMap(child => [((child as Mesh).material as ShaderMaterial).uniforms.uTime?.value ?? 0]);
 };
 const observedPulses = new Set<FibreLight>();
 const pulseDispose = FibreLight.prototype.dispose;
@@ -55,6 +86,7 @@ let observedShaderErrors = 0;
 const shaderObserver = () => { observedShaderErrors++; };
 let presentation = initialPresentation();
 let currentTheme = lightTheme;
+let appearance: OverviewAppearance = { ...DEFAULT_APPEARANCE };
 const state = { focused: null as OverviewScope, selected: null as string | null, errors: [] as string[], stage: "empty" };
 let current: OverviewModel = { ...full, projects: [], workspaces: [], nodes: [], edges: [], readiness: { projects: false, workspaces: false, agents: false } };
 const action = (value: PresentationAction) => {
@@ -63,7 +95,7 @@ const action = (value: PresentationAction) => {
   state.selected = presentation.selectedId;
 };
 const create = () => createOverviewRenderer(parent, {
-  model: current, theme: currentTheme, presentation, motion: presentation.motion,
+  model: current, theme: currentTheme, presentation, motion: presentation.motion, appearance,
   onSelect: id => action({ type: "select", id }),
   onFocus: scope => action({ type: "focus", scope }),
   onGroupChange: (id, expanded) => action({ type: expanded ? "expand-group" : "collapse-group", id }),
@@ -78,6 +110,10 @@ function update(value: OverviewModel, stage: string) {
 }
 (window as any).overviewTest = {
   state,
+  appearance(value: Partial<OverviewAppearance>) { appearance = { ...appearance, ...value }; renderer.setAppearance(appearance); },
+  spatialEvidence() { return spatialProjects; },
+  feedEvidence() { return { ...feeds }; },
+  shaderLogs() { return [...shaderLogs]; },
   presentation: () => ({ ...presentation, groups: [...presentation.groups] }),
   loadProjects() { update({ ...current, projects, readiness: { projects: true, workspaces: false, agents: false } }, "projects"); },
   loadWorkspaces() { update(addEdges({ ...current, workspaces, readiness: { projects: true, workspaces: true, agents: false } }), "workspaces"); },
@@ -102,12 +138,12 @@ function update(value: OverviewModel, stage: string) {
   telemetry() { return telemetry; },
   resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; },
   ambientEvidence(key = "default", time?: number, regions: { x: number; y: number; width: number; height: number }[] = []) {
-    const scene = observedScene!, renderer = observedRenderer!, camera = observedCamera!;
+    const scene = backgroundScene!, renderer = observedRenderer!, camera = backgroundCamera!;
     const grids = scene.children.filter(child => child.userData.overviewAmbientGrid);
     const visibility = scene.children.map(child => child.visible);
-    const times = grids.map(child => ((child as Mesh).material as ShaderMaterial).uniforms.uTime!.value as number);
-    scene.children.forEach(child => { child.visible = !!child.userData.overviewAmbientGrid; });
-    if (time !== undefined) grids.forEach(child => { ((child as Mesh).material as ShaderMaterial).uniforms.uTime!.value = time; });
+    const times = grids.map(child => ((child as Mesh).material as ShaderMaterial).uniforms.uTime?.value as number);
+    renderer.clear();
+    if (time !== undefined) grids.forEach(child => { const uniform = ((child as Mesh).material as ShaderMaterial).uniforms.uTime; if (uniform) uniform.value = time; });
     renderer.render(scene, camera);
     const context = renderer.getContext(), width = renderer.domElement.width, height = renderer.domElement.height;
     const pixels = new Uint8Array(width * height * 4);
@@ -128,22 +164,21 @@ function update(value: OverviewModel, stage: string) {
       for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) { alpha += pixels[((height - y - 1) * width + x) * 4 + 3]!; count++; }
       return { meanAlpha: count ? alpha / count : 0, pixels: count };
     });
-    grids.forEach((child, index) => { ((child as Mesh).material as ShaderMaterial).uniforms.uTime!.value = times[index]; });
-    scene.children.forEach((child, index) => { child.visible = visibility[index]!; }); renderer.render(scene, camera);
+    grids.forEach((child, index) => { const uniform = ((child as Mesh).material as ShaderMaterial).uniforms.uTime; if (uniform) uniform.value = times[index]; });
+    scene.children.forEach((child, index) => { child.visible = visibility[index]!; }); renderer.clear(); renderer.render(scene, camera); renderer.clearDepth(); renderer.render(observedScene!, observedCamera!);
     return { grids: grids.length, drawCalls, visiblePixels, meanAlpha: visiblePixels ? alphaTotal / visiblePixels : 0,
       meanColour: visiblePixels ? colourTotal / (visiblePixels * 3) : 0, changedPixels, local };
   },
   fieldEvidence() {
-    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh;
-    return ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet", "aOverviewGridShade", "aOverviewGridRim"].map(name => {
-      const attribute = grid.geometry.getAttribute(name);
-      let hash = 2166136261;
-      const values = new Uint8Array(attribute.array.buffer, attribute.array.byteOffset, attribute.array.byteLength);
-      for (const value of values) hash = Math.imul(hash ^ value, 16777619);
-      let maximum = 0;
-      for (let index = 0; index < attribute.count; index++) maximum = Math.max(maximum,
-        attribute.itemSize === 2 ? Math.hypot(attribute.getX(index), attribute.getY(index)) : attribute.getX(index));
-      return { name, version: attribute.version, hash: hash >>> 0, maximum };
+    return backgroundScene!.children.filter(child => child.userData.overviewClouds || child.userData.overviewAmbientGrid).flatMap(child => {
+      const geometry = (child as Mesh).geometry;
+      if (!geometry) return [];
+      return Object.entries(geometry.attributes).map(([name, attribute]) => {
+        let hash = 2166136261;
+        const values = new Uint8Array(attribute.array.buffer, attribute.array.byteOffset, attribute.array.byteLength);
+        for (const value of values) hash = Math.imul(hash ^ value, 16777619);
+        return { object: child.name, name, version: attribute.version, hash: hash >>> 0 };
+      });
     });
   },
   pulseEvidence() {
@@ -153,42 +188,21 @@ function update(value: OverviewModel, stage: string) {
     }));
   },
   background(enabled: boolean) {
-    observedScene!.children.filter(child => child.userData.overviewAmbientGrid).forEach(child => { child.visible = enabled; });
-    renderer.update(current);
+    appearance = { ...appearance, background: enabled ? "animated" : "off" };
+    renderer.setAppearance(appearance);
   },
   resourceEvidence() { return { drawCalls: observedRenderer!.info.render.calls, ...observedRenderer!.info.memory, programs: observedRenderer!.info.programs?.length ?? 0 }; },
   installShaderObserver() { observedRenderer!.debug.onShaderError = shaderObserver; },
   shaderObserverEvidence() { return { restored: observedRenderer!.debug.onShaderError === shaderObserver, unrelatedErrors: observedShaderErrors }; },
   injectAmbientShaderFailure() {
-    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
+    const grid = backgroundScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
     if (!grid) return false;
     const material = grid.material as ShaderMaterial;
     material.fragmentShader = "void main() { gl_FragColor = vec4(overviewInjectedFailure); }";
     material.needsUpdate = true;
     return true;
   },
-  gridPresent() { return !!observedScene!.children.find(child => child.userData.overviewAmbientGrid); },
-  gridFieldAt(x: number, y: number) {
-    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
-    if (!grid) return null;
-    const position = grid.geometry.getAttribute("position"), intensity = grid.geometry.getAttribute("aOverviewGridIntensity"), warp = grid.geometry.getAttribute("aOverviewGridWarp");
-    let nearest = 0, distance = Infinity;
-    for (let index = 0; index < position.count; index++) {
-      const dx = (position.getX(index) * 0.5 + 0.5) * parent.clientWidth - x;
-      const dy = (0.5 - position.getY(index) * 0.5) * parent.clientHeight - y;
-      const next = dx * dx + dy * dy;
-      if (next < distance) { distance = next; nearest = index; }
-    }
-    return { intensity: intensity.getX(nearest), warp: Math.hypot(warp.getX(nearest), warp.getY(nearest)), version: intensity.version };
-  },
-  gridFieldSummary() {
-    const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh | undefined;
-    if (!grid) return null;
-    const position = grid.geometry.getAttribute("position"), intensity = grid.geometry.getAttribute("aOverviewGridIntensity");
-    let index = 0;
-    for (let next = 1; next < intensity.count; next++) if (intensity.getX(next) > intensity.getX(index)) index = next;
-    return { maximum: intensity.getX(index), x: (position.getX(index) * 0.5 + 0.5) * parent.clientWidth, y: (0.5 - position.getY(index) * 0.5) * parent.clientHeight };
-  },
+  gridPresent() { return !!backgroundScene!.children.find(child => child.userData.overviewAmbientGrid); },
   empty() { update({ ...full, projects: [], workspaces: [], nodes: [], edges: [] }, "empty"); },
   dispose() { renderer.dispose(); },
   recreate() { renderer = create(); },

@@ -30,20 +30,23 @@ Streaming text is assembled into readable sentences or chunks, updated about onc
 a second, rather than displaying each token. Preview updates do not create work.
 
 Unfocused projects rise proportionally with recent owned activity while quiet
-graphs recede slightly. Enlargement respects neighbouring graphs and the viewport;
-their centres stay fixed. Inspection holds the graph steady. Focused graphs come
-forward while distant roots keep readable names and status indicators. A browser-only
-cyberspace grid follows Paseo's effective light or dark theme: thin perspective
-lines and sparse travelling highlights are decorative, never activity or pulses.
-Light-mode motion uses darker, higher-contrast strokes while the base grid stays
-restrained. Long-running animation keeps a bounded, continuous phase.
-Every displayed project supplies a bounded local field from its current displayed
-bounds; shared elevation bends and shades the grid beneath raised graphs while
-owned activity brightens nearby lines. Focus strengthens its branch and calms
-surrounding interiors without creating activity. **Pause motion**
-freezes these effects while status and readable previews continue. Reduced motion,
-hidden tabs and disconnection use a static or unscheduled grid. If its shader is
-unavailable, the grid is removed independently and the graph remains usable.
+neighbours recede modestly. Centres stay fixed, geometry limits growth and
+inspection holds the graph steady. A perspective floor and back wall provide a
+stable room behind the graphs. Sparse binary feeds follow fresh activity toward
+faint project particle clouds, which brighten briefly on arrival. These effects
+summarise activity and never create additional work or replay missed events.
+
+**Appearance** offers Follow Paseo, Light or Dark for Overview, plus Animated,
+Static or Off for the browser background. The full Appearance settings under
+**Settings → Plugins → Overview** also control depth strength, activity response
+and background speed. Preferences are saved per host and shared across clients.
+A local theme choice does not change the rest of Paseo. Turning the background
+off keeps graph animations available; turning depth off still permits focus.
+
+**Pause motion** freezes all graph and background animation while status and
+readable previews continue. Reduced motion uses a static background. Hidden tabs
+and disconnection stop background animation. If background rendering fails, it is
+removed independently and the graph remains usable.
 
 Phones start with collapsed project roots. Tap into projects and workspaces,
 use Back to return, and tap an agent for details. The header follows the current

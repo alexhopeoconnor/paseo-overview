@@ -4,6 +4,8 @@ const fs = require('node:fs/promises');
 const assert = require('node:assert/strict');
 const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 
+const waitChecked = (page, testID) => page.waitForFunction(id => document.querySelector(`[data-testid="${id}"]`)?.getAttribute('aria-checked') === 'true', testID);
+
 const inspect = page => page.evaluate(() => {
   const bounds = element => {
     const rect = element.getBoundingClientRect();
@@ -13,6 +15,7 @@ const inspect = page => page.evaluate(() => {
     title: document.querySelector('[data-testid="overview-scope-title"]')?.textContent,
     counts: document.querySelector('[data-testid="overview-scope-counts"]')?.textContent,
     header: bounds(document.querySelector('[data-testid="overview-header"]')),
+    screenBackground: getComputedStyle(document.querySelector('[data-testid="overview-native-screen"]')).backgroundColor,
     nodes: [...document.querySelectorAll('[data-testid^="overview-native-project:"],[data-testid^="overview-native-workspace:"],[data-testid^="overview-native-agent:"],[data-testid^="overview-native-completed:"]')].map(node => ({ id: node.dataset.testid, label: node.getAttribute('aria-label'), box: bounds(node) })),
   };
 });
@@ -36,6 +39,39 @@ const inspect = page => page.evaluate(() => {
     assert.ok(initial.header.height < 120);
     assert.ok(!/Tap a project to explore/i.test(await page.locator('body').innerText()));
     await page.screenshot({ path: `${output}/phone-roots.png` });
+
+    // Quick appearance stays in the shared header: readable targets, live theme
+    // and background updates, and the same scope/counts throughout.
+    await page.getByTestId('overview-appearance').tap();
+    await page.getByTestId('overview-appearance-panel').waitFor({ state: 'visible' });
+    for (const id of ['overview-appearance', 'overview-theme-paseo', 'overview-theme-light', 'overview-theme-dark',
+      'overview-background-animated', 'overview-background-static', 'overview-background-off']) {
+      const box = await page.getByTestId(id).boundingBox();
+      assert.ok(box && box.width >= 44 && box.height >= 44, `${id} keeps a 44px touch target`);
+    }
+    await page.getByTestId('overview-theme-dark').tap();
+    await waitChecked(page, 'overview-theme-dark');
+    assert.equal(await page.getByTestId('overview-theme-dark').getAttribute('aria-checked'), 'true');
+    await page.waitForTimeout(50);
+    const darkHeader = await inspect(page);
+    assert.equal(darkHeader.title, initial.title);
+    assert.equal(darkHeader.counts, initial.counts);
+    assert.equal(darkHeader.screenBackground, 'rgb(11, 17, 24)');
+    await page.getByTestId('overview-background-off').tap();
+    await waitChecked(page, 'overview-background-off');
+    assert.equal(await page.getByTestId('overview-background-off').getAttribute('aria-checked'), 'true');
+    await page.getByTestId('overview-theme-paseo').tap();
+    await page.getByTestId('overview-background-animated').tap();
+    await waitChecked(page, 'overview-theme-paseo');
+    await waitChecked(page, 'overview-background-animated');
+    await page.waitForTimeout(50);
+    const restored = await inspect(page);
+    assert.equal(restored.title, initial.title);
+    assert.equal(restored.counts, initial.counts);
+    assert.equal(restored.screenBackground, 'rgb(247, 248, 251)');
+    await page.getByTestId('overview-appearance').tap();
+    await page.getByTestId('overview-appearance-panel').waitFor({ state: 'hidden' });
+
     await page.getByTestId('overview-native-project:p0').tap();
     await page.getByTestId('overview-native-workspace:w0').waitFor({ state: 'visible' });
     const project = await inspect(page);
@@ -93,8 +129,8 @@ const inspect = page => page.evaluate(() => {
     assert.equal(await page.getByTestId('overview-motion').getAttribute('aria-label'), 'Resume animation');
     await page.screenshot({ path: `${output}/phone-reset.png` });
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', inactiveLabel, terminalLabels: ['Closed', 'Canceled'], initial, project, workspace, reset, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion/collapse, 44px targets, parent selection, reset and motion controls' }));
+    await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', inactiveLabel, terminalLabels: ['Closed', 'Canceled'], appearance: { dark: darkHeader, restored }, initial, project, workspace, reset, errors }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, quick appearance theme/background without scope loss, 44px appearance targets, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion/collapse, 44px targets, parent selection, reset and motion controls' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/native-preview-failure.png` }).catch(() => {});

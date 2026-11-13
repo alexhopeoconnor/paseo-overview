@@ -54,40 +54,42 @@ output. They show at most 240 graphemes and update about once a second; tiny
 unfinished fragments do not replace readable text. Storage is bounded, final
 excerpts accompany turn completion, and preview publication never adds activity.
 
-In the browser full view, one procedural cyberspace grid replaces the former
-background washes. It follows Paseo's effective theme, including explicit app
-overrides: dark surfaces use cool luminous lines; light surfaces use muted slate
-lines and darker blue highlights. Thin, antialiased perspective lines and sparse
-travelling segments remain visibly present without camera motion, flashes or a
-moving tunnel. The grid is decorative: its highlights never create activity,
-bubbles or ownership pulses.
-Light-mode travelling strokes use stronger dark-blue contrast independently of
-the quiet base grid. Their phase stays bounded during long-running sessions,
-with continuous movement across the repeating clock boundary.
+The browser graph floats in front of a procedural room with a perspective floor
+and back wall. Each project has a faint, stable particle cloud behind its graph.
+Fresh observed activity admits short, bounded binary streams along the room grid
+toward that cloud; their arrival briefly brightens it. These are visual summaries,
+not byte counters. They never add activity scores or replay missed events. Quiet
+projects retain a calm background, and empty projects remain visible.
 
-In the full view, quiet graphs recede slightly and sustained owned activity raises
-graphs within the free space around them. Growth is capped at ten percent and
-constrained by viewport edges, neighbours and delegation corridors; dense graphs
-may have less room. Packed centres remain fixed. Hover, keyboard focus and
-inspection hold automatic movement. A quiet working graph retains a neutral
-prominence floor; stale information cannot establish new work.
+The graph and room share one resolved depth projection. Recent owned activity
+brings a graph forward while quieter neighbours recede modestly. Packing reserves
+space for growth; viewport edges, readable text and delegation corridors can
+reduce its range. Centres stay fixed, and hover or inspection holds movement.
+Project/workspace focus is explicit and still works when automatic depth is off.
+Selection, ownership links, labels and attention badges stay in the foreground.
 
-Every displayed project, including an empty project, contributes a bounded local
-field after its current depth and focus transforms are applied. One displayed
-elevation drives graph scale, broad surface shading and grid deformation. Light
-themes use slate shading; dark themes use a cool rim. Recent unique owned work
-brightens the grid independently. Combined distortion is limited in both distance
-and local stretch, and fades at viewport edges. Project and workspace focus
-strengthen the displayed branch while distant roots retain readable names,
-icons and status badges. The background does not repack graphs, alter routes,
-hit targets or camera controls, and focusing does not create activity.
+Use **Appearance** for quick theme/background choices, or open **Settings →
+Plugins → Overview → Appearance** for the full controls:
 
-**Pause motion** freezes the grid phase and field presentation while live status
-and readable previews continue. Reduced motion uses a static restrained grid;
-hidden tabs and disconnected sessions schedule no ambient animation. Resize,
-fullscreen, focus and theme changes can still redraw the static field. The grid
-uses only the browser Three.js renderer, reuses a bounded typed-array field and
-falls away independently if its shader cannot compile, leaving the graph usable.
+- **Theme:** Follow Paseo, Light or Dark. The override affects Overview only;
+  Follow Paseo uses the application's effective theme, including custom themes.
+- **Background:** Animated, Static or Off. Turning it off leaves graph activity
+  animations available.
+- **Depth:** Off, Subtle, Balanced or Strong, always within safe geometric limits.
+- **Response:** Relaxed, Balanced or Responsive activity-depth changes.
+- **Background speed:** Slow, Normal or Fast without changing observed activity.
+
+These appearance preferences are saved on the host and shared by its clients.
+They update the existing view without losing focus, selection or group choices.
+The phone graph uses the theme and compact controls; the spatial background and
+its speed/depth settings apply to the browser graph.
+
+**Pause motion** is a temporary master control: it freezes graph and background
+animation while live status and readable previews continue. Reduced motion uses
+a static background. Hidden tabs and disconnected sessions schedule no background
+animation, and returning does not replay missed feeds. Theme, resize and explicit
+navigation can still redraw. Background rendering shares the graph's WebGL
+renderer and fails independently, leaving the graph usable if a shader fails.
 
 Phones open a touch graph of collapsed project roots with live icons and activity
 halos. Tap a project, then a workspace, to reveal its connected branches. The
@@ -157,7 +159,7 @@ cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
 empty-to-populated loading, suspension, stable identity, explicit grouping,
 branch layout, routed geometry, preview assembly, fullscreen ownership, bounded
-depth, once-only pulse arrivals and the browser grid field. Activity and icon
+depth, once-only pulse/feed arrivals, persisted appearance and room projection. Activity and icon
 updates preserve packed positions; ambient-only frames reuse their field without
 layout or route work. Structural changes may expand an affected branch.
 

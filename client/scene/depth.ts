@@ -9,7 +9,7 @@ type ProjectFrame = Pick<ProjectLayout, "position" | "scale" | "bounds">;
 
 /** Approved ten-percent bound; pair budgets usually reduce it locally. */
 export const MAX_DEPTH_SCALE = 1.10;
-export const MIN_DEPTH_SCALE = 0.98;
+export const MIN_DEPTH_SCALE = 0.94;
 const MINIMUM_PROJECT_GAP = 8;
 
 function displayedBounds(project: ProjectFrame): Rect {

@@ -286,7 +286,7 @@ function subtract(free: readonly Rect[], used: Rect): Rect[] {
     !next.some((other, otherIndex) => otherIndex !== index && contains(other, rect) &&
       (other.width * other.height > rect.width * rect.height + 0.01 || otherIndex < index)));
 }
-function pack(projects: readonly ProjectLayout[], viewport: Rect, scale: number): Map<string, Point> | null {
+function pack(projects: readonly ProjectLayout[], viewport: Rect, scale: number, reservation = 0): Map<string, Point> | null {
   const orders = [
     (project: ProjectLayout) => Math.max(project.bounds.width, project.bounds.height),
     (project: ProjectLayout) => project.bounds.width * project.bounds.height,
@@ -294,29 +294,30 @@ function pack(projects: readonly ProjectLayout[], viewport: Rect, scale: number)
     (project: ProjectLayout) => project.bounds.width,
   ];
   for (const score of orders) {
-    const result = packOrder(projects, viewport, scale, score);
+    const result = packOrder(projects, viewport, scale, score, reservation);
     if (result) return result;
   }
   return null;
 }
-function packOrder(projects: readonly ProjectLayout[], viewport: Rect, scale: number, score: (project: ProjectLayout) => number): Map<string, Point> | null {
+function packOrder(projects: readonly ProjectLayout[], viewport: Rect, scale: number, score: (project: ProjectLayout) => number, reservation: number): Map<string, Point> | null {
   let free: Rect[] = [viewport];
   const positions = new Map<string, Point>();
   const gap = graphMetrics.projectGap;
   const ordered = [...projects].sort((a, b) => score(b) - score(a) || a.id.localeCompare(b.id));
   for (const project of ordered) {
-    const width = project.bounds.width * scale + gap, height = project.bounds.height * scale + gap;
+    const extraX = project.bounds.width * scale * reservation / 2, extraY = project.bounds.height * scale * reservation / 2;
+    const width = project.bounds.width * scale + extraX * 2 + gap, height = project.bounds.height * scale + extraY * 2 + gap;
     const candidates = free.filter(rect => rect.width >= width && rect.height >= height).sort((a, b) =>
       Math.min(a.width - width, a.height - height) - Math.min(b.width - width, b.height - height) || a.y - b.y || a.x - b.x);
     const selected = candidates[0];
     if (!selected) return null;
-    positions.set(project.id, { x: selected.x + gap / 2 - project.bounds.x * scale, y: selected.y + gap / 2 - project.bounds.y * scale });
+    positions.set(project.id, { x: selected.x + gap / 2 + extraX - project.bounds.x * scale, y: selected.y + gap / 2 + extraY - project.bounds.y * scale });
     free = subtract(free, { x: selected.x, y: selected.y, width, height });
   }
   const occupied = unionRects(projects.map(project => ({
-    x: positions.get(project.id)!.x + project.bounds.x * scale,
-    y: positions.get(project.id)!.y + project.bounds.y * scale,
-    width: project.bounds.width * scale, height: project.bounds.height * scale,
+    x: positions.get(project.id)!.x + project.bounds.x * scale - project.bounds.width * scale * reservation / 2,
+    y: positions.get(project.id)!.y + project.bounds.y * scale - project.bounds.height * scale * reservation / 2,
+    width: project.bounds.width * scale * (1 + reservation), height: project.bounds.height * scale * (1 + reservation),
   })));
   const offset = { x: viewport.x + (viewport.width - occupied.width) / 2 - occupied.x,
     y: viewport.y + (viewport.height - occupied.height) / 2 - occupied.y };
@@ -337,11 +338,18 @@ export class StableLayout {
   private readonly fits = new Map<string, { scale: number; positions: Map<string, Point> }>();
   private delegationGeometry?: { signature: string; edges: readonly RoutedEdge[] };
   private previous?: SceneLayout;
+  private reservation = 0;
+  private previousReservation = 0;
+
+  /** Reserve projected growth during packing, never in response to activity. */
+  setDepthReservation(value: number): void {
+    this.reservation = Math.max(0, Math.min(0.1, Number.isFinite(value) ? value : 0));
+  }
 
   constructor(private readonly measureCollapseText?: (text: string) => number) {}
 
   private fitKey(projects: readonly ProjectLayout[], viewport: Rect): string {
-    return JSON.stringify([viewport, projects.map(project => [project.id, project.bounds])]);
+    return JSON.stringify([viewport, this.reservation, projects.map(project => [project.id, project.bounds])]);
   }
 
   private projectLayouts(definitions: readonly ProjectDefinition[], geometry: Map<string, { signature: string; value: LocalGeometry }>): ProjectLayout[] {
@@ -363,14 +371,14 @@ export class StableLayout {
     const signature = this.fitKey(projects, viewport);
     const cached = this.fits.get(signature);
     if (cached) return cached;
-    let scale = 1, positions = pack(projects, viewport, 1);
+    let scale = 1, positions = pack(projects, viewport, 1, this.reservation);
     if (!positions) {
       let low = 0.02, high = 1;
       for (let attempt = 0; attempt < 20; attempt++) {
-        const middle = (low + high) / 2, candidate = pack(projects, viewport, middle);
+        const middle = (low + high) / 2, candidate = pack(projects, viewport, middle, this.reservation);
         if (candidate) low = middle; else high = middle;
       }
-      scale = low; positions = pack(projects, viewport, scale);
+      scale = low; positions = pack(projects, viewport, scale, this.reservation);
     }
     if (!positions) throw new Error("This viewport is too small for the project graph. Use the simple view.");
     const result = { scale, positions };
@@ -392,12 +400,12 @@ export class StableLayout {
     // collapsed branch must not inherit the reduced scale of its expanded tree.
     const previousFit = this.fits.get(this.fitKey(baseProjects, viewport));
     if (previousFit) { positions = previousFit.positions; scale = previousFit.scale; }
-    if (!positions && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
+    if (!positions && this.previousReservation === this.reservation && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
       const candidate = baseProjects.map(project => {
         const old = this.previous!.projects.find(item => item.id === project.id)!;
-        return { project, old, bounds: { x: old.position.x + project.bounds.x * old.scale - graphMetrics.projectGap / 2,
-          y: old.position.y + project.bounds.y * old.scale - graphMetrics.projectGap / 2,
-          width: project.bounds.width * old.scale + graphMetrics.projectGap, height: project.bounds.height * old.scale + graphMetrics.projectGap } };
+        return { project, old, bounds: { x: old.position.x + project.bounds.x * old.scale - (project.bounds.width * old.scale * this.reservation + graphMetrics.projectGap) / 2,
+          y: old.position.y + project.bounds.y * old.scale - (project.bounds.height * old.scale * this.reservation + graphMetrics.projectGap) / 2,
+          width: project.bounds.width * old.scale * (1 + this.reservation) + graphMetrics.projectGap, height: project.bounds.height * old.scale * (1 + this.reservation) + graphMetrics.projectGap } };
       });
       if (candidate.every(item => contains(viewport, item.bounds)) && candidate.every((item, index) => candidate.slice(index + 1).every(other => !rectsOverlap(item.bounds, other.bounds)))) {
         positions = new Map(candidate.map(item => [item.project.id, item.old.position])); scale = candidate[0]?.old.scale ?? 1;
@@ -434,6 +442,7 @@ export class StableLayout {
     }
     const delegationEdges = this.delegationGeometry.edges;
     const result = { projects, nodes, groups, ownershipEdges: projects.flatMap(project => [...project.edges]), delegationEdges, memberToDisplay, width, height };
+    this.previousReservation = this.reservation;
     this.previous = { ...result, projects: baseProjects };
     return result;
   }
