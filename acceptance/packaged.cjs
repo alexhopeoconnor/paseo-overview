@@ -40,12 +40,31 @@ async function sha256(file) {
   return hash.digest("hex");
 }
 
-function copyProvisionalSource(destination) {
+function copySourceCheckout(destination) {
   fs.mkdirSync(destination, { recursive: true });
   for (const name of ["package.json", "package-lock.json", "paseo-plugin.json", "index.client.tsx", "index.server.ts", "client", "server", "shared", "OVERVIEW.md"])
     fs.cpSync(path.join("/plugin-source", name), path.join(destination, name), { recursive: true });
   for (const name of ["three", "d3-hierarchy", "@floating-ui"])
     fs.cpSync(path.join("/plugin-source/node_modules", name), path.join(destination, "node_modules", name), { recursive: true });
+}
+
+function readPluginIdentity(pluginDir) {
+  const manifestPath = path.join(pluginDir, "paseo-plugin.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Overview plugin needs a readable paseo-plugin.json: ${manifestPath}`, { cause: error });
+  }
+  assert.equal(manifest?.id, "overview", "Overview plugin manifest must declare id overview");
+  assert.ok(typeof manifest?.name === "string" && manifest.name.trim().length > 0, "Overview plugin manifest must declare a name");
+  let version = null;
+  const packageJsonPath = path.join(pluginDir, "package.json");
+  if (fs.existsSync(packageJsonPath)) {
+    const metadata = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    if (typeof metadata?.version === "string" && metadata.version.length > 0) version = metadata.version;
+  }
+  return { id: manifest.id, name: manifest.name, version };
 }
 
 // Decode actual compositor screenshots in the isolated browser, avoiding a new PNG
@@ -86,15 +105,18 @@ async function packagedGridPixels(page, key) {
 }
 
 async function run() {
+  if (process.env.OVERVIEW_TEST_ARTIFACT || process.env.OVERVIEW_TEST_ARTIFACT_DIR) {
+    throw new Error("OVERVIEW_TEST_ARTIFACT/OVERVIEW_TEST_ARTIFACT_DIR are no longer supported. Set OVERVIEW_TEST_PLUGIN_DIR to a prepared plugin directory, or omit it to test /plugin-source.");
+  }
   const expectation = readExpectation(process.env);
   const packageFile = process.env.OVERVIEW_TEST_PACKAGE_FILE;
-  assert.ok(packageFile, "Acceptance requires the exact package file, including provisional runs");
+  assert.ok(packageFile, "Acceptance requires the exact package file for both plugin input origins");
   const packageSha256 = await sha256(packageFile);
   assert.equal(packageSha256, expectation.packageSha256, "Tested package SHA256 differs from the explicit acceptance expectation");
   const { chromium } = require("/fork/node_modules/playwright");
   const { WebSocket } = require("/fork/node_modules/ws");
   const packageRoot = process.env.OVERVIEW_TEST_PACKAGE_ROOT || "/package";
-  const artifact = process.env.OVERVIEW_TEST_ARTIFACT;
+  const preparedPluginDir = process.env.OVERVIEW_TEST_PLUGIN_DIR;
   const output = fs.mkdtempSync("/out/run-");
   const state = path.join(output, "state");
   fs.mkdirSync(state, { mode: 0o700 });
@@ -104,24 +126,17 @@ async function run() {
     features: { webUi: { enabled: true }, dictation: { enabled: false }, voiceMode: { enabled: false } }, pluginsEnabled: true,
     agents: { providers: { "overview-test": { extends: "acp", label: "Overview acceptance provider", command: [process.execPath, path.join(__dirname, "provider.mjs")], env: { OVERVIEW_TEST_PROVIDER_LOG: path.join(output, "provider-operations.jsonl") } } } },
   }, null, 2));
+  const pluginSource = preparedPluginDir || "/plugin-source";
+  assert.ok(fs.existsSync(pluginSource) && fs.statSync(pluginSource).isDirectory(), `Overview plugin source is not a directory: ${pluginSource}`);
+  const plugin = readPluginIdentity(pluginSource);
+  const identity = {
+    origin: preparedPluginDir ? "prepared-plugin-directory" : "source-checkout",
+    plugin,
+    packageSha256,
+  };
   const payload = path.join(output, "overview-payload");
-  let identity;
-  if (artifact) {
-    const lockBytes = fs.readFileSync(path.join(artifact, "lock.json"));
-    const lock = JSON.parse(lockBytes);
-    const release = JSON.parse(fs.readFileSync(path.join(artifact, "release.json"), "utf8"));
-    assert.equal(lock.id, "overview");
-    assert.equal(lock.schemaVersion, 5);
-    assert.equal(release.manifestSha256, createHash("sha256").update(lockBytes).digest("hex"));
-    assert.match(release.artifactId, /^[a-f0-9]{64}$/);
-    const matches = lock.validatedHosts.filter(host => host.artifactSha256 === packageSha256);
-    assert.equal(matches.length, 1, "Artifact must explicitly validate the tested package");
-    identity = { artifactId: release.artifactId, packageSha256, host: matches[0] };
-    fs.cpSync(path.join(artifact, "payload"), payload, { recursive: true });
-  } else {
-    copyProvisionalSource(payload);
-    identity = { provisionalHarnessOnly: true, packageSha256 };
-  }
+  if (preparedPluginDir) fs.cpSync(pluginSource, payload, { recursive: true });
+  else copySourceCheckout(payload);
   const cli = path.join(packageRoot, "opt/Paseo/resources/bin/paseo");
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PASEO_")));
   env.PASEO_HOME = state;
@@ -149,7 +164,6 @@ async function run() {
     await client.connect();
     const status = await client.getDaemonStatus();
     assert.equal(status.version, expectation.runtimeVersion, "Connected daemon version differs from the explicit acceptance expectation");
-    if (identity.host) assert.equal(status.version, identity.host.version);
     const installed = await client.installDirectoryPlugin(payload);
     assert.equal(installed.id, "overview");
     assert.equal(installed.status, "running");
@@ -220,13 +234,13 @@ async function run() {
     const gridLight = await packagedGridPixels(page, "motion");
     await delay(600);
     const gridMoved = await packagedGridPixels(page, "motion");
-    assert.ok(gridLight.structurePixels > 800, "Compiled artifact renders visible grid structure in the empty graph");
-    assert.ok(gridMoved.changedPixels > 100, "Compiled artifact changes actual background pixels over time");
+    assert.ok(gridLight.structurePixels > 800, "Prepared plugin renders visible grid structure in the empty graph");
+    assert.ok(gridMoved.changedPixels > 100, "Prepared plugin changes actual background pixels over time");
     assert.ok(gridMoved.strongChangedPixels > 100, "Light-theme motion has clear compositor contrast, beyond barely changing pixels");
     await page.emulateMedia({ colorScheme: "dark" });
     await delay(250);
     const gridDark = await packagedGridPixels(page, "dark");
-    assert.ok(gridDark.structurePixels > 800, "Compiled artifact retains visible structure in dark theme");
+    assert.ok(gridDark.structurePixels > 800, "Prepared plugin retains visible structure in dark theme");
     assert.ok(Math.abs(gridDark.base.reduce((sum, value) => sum + value, 0) - gridLight.base.reduce((sum, value) => sum + value, 0)) > 90,
       "Application theme changes reach the packaged graph surface");
     await page.getByTestId("overview-motion").click();
@@ -506,7 +520,7 @@ async function run() {
     assert.deepEqual(consoleErrors,[]);
     const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","compiled grid visible in both themes","compiled grid rendered pixel movement","compiled grid pause","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
-    console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, provisional: !artifact }));
+    console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: path.join(output, "failure.png") }).catch(() => {});

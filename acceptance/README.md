@@ -39,7 +39,7 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   margin and confirms that opening the card does not change graph dimensions.
 - `compile.mjs` uses the Paseo plugin compiler and checks the compiled native
   boundary, including Hermes where the pinned build environment provides it.
-- `packaged.cjs` exercises the immutable plugin on the current exact host
+- `packaged.cjs` exercises the selected plugin directory on an exact host
   package, including screenshot-based grid structure, pixel movement, theme and
   pause checks, additive streaming previews, actual element fullscreen,
   preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
@@ -94,68 +94,82 @@ image alone may render fallback boxes for emoji; that is an acceptance environme
 problem rather than evidence that the graph's identity glyphs work. Inspect the
 saved full, selected, activity and phone screenshots after the assertions pass.
 
-The packaged-plugin acceptance remains separate: install the immutable artifact
-on an isolated exact supported host, verify its navigation and RPC behavior, and
-record those host and artifact identities with the release evidence.
+The packaged-plugin acceptance remains separate: install a prepared plugin
+directory into a daemon run from an exact package, then verify navigation and RPC
+behavior. Set:
 
-For that check, set `OVERVIEW_TEST_DEB` to the retained exact package file and
-`OVERVIEW_TEST_ARTIFACT_DIR` to the verified artifact directory containing
-`lock.json`, `release.json` and `payload/`. The harness verifies the package SHA256
-against the artifact's declared compatible host and records both identities.
-Every run, including provisional runs, also requires an explicit acceptance row:
-
-- `OVERVIEW_EXPECT_RUNTIME_VERSION`: the exact runtime version.
-- `OVERVIEW_EXPECT_PACKAGE_SHA256`: the retained package's SHA256.
+- `OVERVIEW_TEST_DEB`: retained exact package file.
+- `OVERVIEW_TEST_PLUGIN_DIR`: prepared plugin directory containing
+  `paseo-plugin.json`, `package.json`, the entry sources and any production
+  `node_modules` the plugin imports.
+- `OVERVIEW_EXPECT_RUNTIME_VERSION`: exact daemon version.
+- `OVERVIEW_EXPECT_PACKAGE_SHA256`: retained package SHA256.
 - `OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS`: `required` or `not-applicable`.
 
-The current target is `0.15.2-workstation.2`, package SHA256
-`f2b8f3e298347d7678a251f078eb16d5baf0bf8e3256b5cf2d371fb3798a74e5`,
-with `OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS=required`. Missing or invalid inputs
-fail before the daemon starts; a mismatching package hash or runtime version
-fails acceptance.
-The report records the expectation and the checks actually performed. A new
-version label does not automatically skip chat coverage.
+Every run requires the expectation values. The harness hashes the package before
+starting the daemon and fails on mismatch, then reads the prepared directory's
+ordinary plugin manifest identity. Missing or invalid inputs fail before the
+daemon starts. Do not pass `OVERVIEW_TEST_ARTIFACT` or mount `/artifact`; those
+inputs are rejected with a migration message.
 
-For example, after selecting the tested package's version and hash:
+Prepare the directory from the reviewed public checkout. Overview needs its locked
+production dependencies (`three`, `d3-hierarchy` and `@floating-ui/dom`):
 
 ```bash
-docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
+overview_plugin=$(mktemp -d /tmp/paseo-overview-plugin.XXXXXXXX)
+overview_output=$(mktemp -d /tmp/paseo-overview-acceptance.XXXXXXXX)
+overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
+git -C "$OVERVIEW_SOURCE" archive HEAD | tar -xf - -C "$overview_plugin"
+docker run --rm --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$overview_plugin,dst=/work" --workdir /work \
+  --env npm_config_cache=/tmp/npm "$overview_check_image" \
+  npm ci --ignore-scripts --omit=dev
+```
+
+Then run, after selecting the tested package's version and hash:
+
+```bash
+docker run --rm --init --user "$(id -u):$(id -g)" --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin-source,readonly" \
   --mount "type=bind,src=$OVERVIEW_TEST_DEB,dst=/inputs/package.deb,readonly" \
-  --mount "type=bind,src=$OVERVIEW_TEST_ARTIFACT_DIR,dst=/artifact,readonly" \
+  --mount "type=bind,src=$overview_plugin,dst=/plugin-dir,readonly" \
+  --env OVERVIEW_TEST_PLUGIN_DIR=/plugin-dir \
   --env "OVERVIEW_EXPECT_RUNTIME_VERSION=$OVERVIEW_EXPECT_RUNTIME_VERSION" \
   --env "OVERVIEW_EXPECT_PACKAGE_SHA256=$OVERVIEW_EXPECT_PACKAGE_SHA256" \
   --env OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS=required \
-  --mount type=bind,src=/tmp/overview-v06,dst=/out \
+  --mount "type=bind,src=$overview_output,dst=/out" \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
-  sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \
+  "$overview_check_image" \
   bash /plugin-source/acceptance/package-container.sh
 ```
 
 The script extracts the package into a temporary container directory and starts
 an isolated daemon home with a fixture provider. It never reads or restarts the
-workstation's running Paseo daemon. Before an artifact exists, omit the `/artifact`
-mount to exercise the source checkout provisionally. Those results explicitly
-say `provisionalHarnessOnly`; repeat with the final immutable artifact on the
-current exact host declared in its compatibility lock.
+workstation's running Paseo daemon. Omit the `/plugin-dir` mount and
+`OVERVIEW_TEST_PLUGIN_DIR` to test the `/plugin-source` checkout instead. Results
+report `origin` as `prepared-plugin-directory` or `source-checkout`; neither is an
+approval record. Repeat prepared-directory acceptance on each package you select.
 
 A successful `required` run must include both `bounded Overview previews independent
 of chat preferences` and `stock chat preview disable/enable and one-way expansion`
 in `results.json`'s `checks`. The check turns the isolated browser setting off and
 on, verifies full chat text and one-way expansion, and confirms Overview's own
-preview remains bounded. Do not accept a provisional report as evidence for a
-final artifact, or modify a completed artifact's lock to add a new host.
+preview remains bounded. The report records the expectation and the checks
+actually performed. A new version label does not automatically skip chat
+coverage. Do not accept a source-checkout result as evidence for a prepared
+directory, or modify the selected package.
 
-Keep completion evidence explicit: source-fixture success, final-artifact success,
-hardware measurements and live visual acceptance are separate results. A report
-must identify the exact source/artifact and host under test; software-rendered
-frame timings do not establish real-GPU performance. The fixture's
-`?performance=1` mode retains frame timestamps while skipping expensive diagnostic
-scene traversal. Its background toggle compares the incremental grid draw cost
-under the same animation load, rather than pretending to remove scheduler cost.
+Keep completion evidence explicit: source-checkout success, prepared-directory
+success, hardware measurements and live visual acceptance are separate results. A
+report must identify the exact plugin manifest identity, package hash and daemon
+version under test; software-rendered frame timings do not establish real-GPU
+performance. The fixture's `?performance=1` mode retains frame timestamps while
+skipping expensive diagnostic scene traversal. Its background toggle compares the
+incremental grid draw cost under the same animation load, rather than pretending
+to remove scheduler cost.
 
 For hardware measurements, start an isolated browser with local remote debugging
 and its normal GPU enabled. Use its endpoint in the prepared acceptance environment:
