@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { appearancePolicy, appearancePalettes, resolvedOverviewTheme } from "../client/appearance-policy";
 import { buildOwnershipIndex, displayId, normalise } from "../client/normalize";
+import { initialPresentation, reconcilePresentation, reducePresentation } from "../client/presentation";
+import { composeHostSnapshots, emptyOverviewModel, hostForDisplayId, isHostAuthoritative } from "../shared/hosts";
 import type { AgentRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 import type { OverviewTheme } from "../shared/renderer";
 import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
@@ -144,6 +146,121 @@ describe("graph ownership", () => {
       availability: "resident", subagents: [{ id: "child", parentAgentId: "a", parentSubagentId: "missing", provider: "codex", title: null, description: null, status: "running" }],
     }]]));
     expect(result.nodes.find(node => node.kind === "provider-subagent")?.parentId).toBe("host:agent:a");
+  });
+});
+
+describe("multi-host composition", () => {
+  const snapshot = (hostId: string, parentHost?: string, parentId = "parent") => normalise({
+    hostId,
+    projects: [{ projectId: "shared", projectDisplayName: `Project ${hostId}` }],
+    workspaces: [{ id: "workspace", projectId: "shared", name: "Workspace", projectDisplayName: `Project ${hostId}` }],
+    agents: [
+      agent("parent", "workspace"),
+      agent("same", "workspace", parentHost ? { labels: {
+        "paseo.parent-agent-id": parentId, "paseo.parent-server-id": parentHost,
+      } } : {}),
+    ],
+    rosters: new Map(), icons: new Map(), events: [], connection: "connected", revision: 1,
+  });
+
+  it("keeps duplicate raw project, workspace and agent ids isolated by host", () => {
+    const one = snapshot("one"), two = snapshot("two");
+    expect(one.nodes.map(node => node.id)).toEqual(["one:agent:parent", "one:agent:same"]);
+    expect(two.nodes.map(node => node.id)).toEqual(["two:agent:parent", "two:agent:same"]);
+    expect(one.workspaces[0]!.projectDisplayId).toBe("one:project:shared");
+    expect(two.workspaces[0]!.projectDisplayId).toBe("two:project:shared");
+    const model = composeHostSnapshots([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ], new Map([["one", one], ["two", two]]), 1);
+    expect(model.hosts.map(host => host.id)).toEqual(["one", "two"]);
+    expect(model.projects.map(project => project.id)).toEqual(["one:project:shared", "two:project:shared"]);
+    expect(model.workspaces.map(workspace => workspace.id)).toEqual(["one:workspace:workspace", "two:workspace:workspace"]);
+    expect(new Set(model.nodes.map(node => node.id)).size).toBe(4);
+    const ownership = buildOwnershipIndex(model);
+    expect(ownership.projectByNode.get("one:agent:same")).toBe("one:project:shared");
+    expect(ownership.projectByNode.get("two:agent:same")).toBe("two:project:shared");
+    expect(ownership.childrenByNode.get("one:project:shared")).toEqual(["one:workspace:workspace"]);
+    expect(ownership.childrenByNode.get("two:project:shared")).toEqual(["two:workspace:workspace"]);
+  });
+
+  it("turns explicit cross-host parent metadata into delegation only after both endpoints exist", () => {
+    const one = snapshot("one"), two = snapshot("two", "one");
+    expect(two.nodes.find(node => node.managedAgentId === "same")?.parentId).toBeUndefined();
+    expect(two.nodes.find(node => node.managedAgentId === "same")?.delegationParentId).toBe("one:agent:parent");
+    const isolated = composeHostSnapshots([{ id: "two", label: "Two", status: "online" }], new Map([["two", two]]), 1);
+    expect(isolated.edges.filter(edge => edge.kind === "delegation")).toEqual([]);
+    const joined = composeHostSnapshots([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ], new Map([["one", one], ["two", two]]), 2);
+    expect(joined.edges.filter(edge => edge.kind === "delegation")).toEqual([{
+      id: "delegate:two:agent:same", source: "one:agent:parent", target: "two:agent:same", kind: "delegation",
+    }]);
+    const ownership = buildOwnershipIndex(joined);
+    expect(ownership.projectByNode.get("two:agent:same")).toBe("two:project:shared");
+    expect(ownership.parentByNode.get("two:agent:same")).toBe("two:workspace:workspace");
+    expect(ownership.childrenByNode.get("one:agent:parent")).toEqual([]);
+  });
+
+  it("does not mistake the same daemon-local ID on another host for self-parenting", () => {
+    const joined = composeHostSnapshots([
+      { id: "one", label: "One", status: "online" }, { id: "two", label: "Two", status: "online" },
+    ], new Map([["one", snapshot("one")], ["two", snapshot("two", "one", "same")]]), 1);
+    expect(joined.edges.find(edge => edge.kind === "delegation")).toMatchObject({ source: "one:agent:same", target: "two:agent:same" });
+    expect(buildOwnershipIndex(joined).parentByNode.get("two:agent:same")).toBe("two:workspace:workspace");
+  });
+
+  it("composes only supplied hosts and retains per-host connection and readiness", () => {
+    const one = snapshot("one");
+    const model = composeHostSnapshots([
+      { id: "one", label: "One", status: "offline" },
+    ], new Map([["one", one]]), 3);
+    expect(model.hosts).toEqual([{
+      id: "one", label: "One", connection: "disconnected",
+      readiness: { projects: true, workspaces: true, agents: true }, freshness: "stale",
+    }]);
+    expect(model.hosts.some(host => host.id === "two")).toBe(false);
+    expect(isHostAuthoritative(model, "one")).toBe(false);
+    expect(emptyOverviewModel()).toEqual({
+      hosts: [], projects: [], workspaces: [], nodes: [], edges: [], events: [], revision: 0,
+    });
+  });
+
+  it("decodes only well-formed display identities", () => {
+    expect(hostForDisplayId("one:agent:parent")).toBe("one");
+    expect(hostForDisplayId("one%3Atwo:agent:parent")).toBe("one:two");
+    expect(hostForDisplayId("one:agent:%E0%A4%A")).toBeUndefined();
+    expect(hostForDisplayId("one")).toBeUndefined();
+    expect(hostForDisplayId(":agent:parent")).toBeUndefined();
+  });
+
+  it("keeps focus and selection through a host's partial snapshot but clears them when authoritative", () => {
+    const full = snapshot("one");
+    const model = composeHostSnapshots([{ id: "one", label: "One", status: "online" }], new Map([["one", full]]), 1);
+    const focused = reducePresentation(reducePresentation(initialPresentation(),
+      { type: "focus", scope: { kind: "workspace", id: "one:workspace:workspace" } }),
+      { type: "select", id: "one:agent:parent" });
+    expect(reconcilePresentation(focused, model)).toBe(focused);
+
+    const partial = composeHostSnapshots([{ id: "one", label: "One", status: "online" }], new Map([["one", {
+      ...full, projects: [], workspaces: [], nodes: [], edges: [],
+      readiness: { projects: true, workspaces: false, agents: false }, freshness: "refreshing", revision: 2,
+    }]]), 2);
+    expect(reconcilePresentation(focused, partial)).toBe(focused);
+
+    const authoritative = composeHostSnapshots([{ id: "one", label: "One", status: "online" }], new Map([["one", {
+      ...full, projects: [], workspaces: [], nodes: [], edges: [],
+      readiness: { projects: true, workspaces: true, agents: true }, freshness: "current", revision: 3,
+    }]]), 3);
+    expect(reconcilePresentation(focused, authoritative)).toMatchObject({ scope: null, selectedId: null });
+
+    const filtered = reducePresentation(focused, { type: "set-host-filter", hostId: "two" });
+    expect(filtered).toMatchObject({ hostFilter: "two", scope: null, selectedId: null });
+    expect(filtered.groups).toBe(focused.groups);
+    const retained = reducePresentation(focused, { type: "set-host-filter", hostId: "one" });
+    expect(retained.scope).toBe(focused.scope);
+    expect(retained.selectedId).toBe(focused.selectedId);
   });
 });
 

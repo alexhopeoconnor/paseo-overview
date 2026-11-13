@@ -1,8 +1,8 @@
 import { createOverviewRenderer } from "../client/scene/renderer";
 import { initialPresentation, reducePresentation } from "../client/presentation";
-import type { OverviewModel } from "../shared/model";
+import type { OverviewModel, OverviewHostState } from "../shared/model";
 import type { OverviewScope, PresentationAction } from "../shared/presentation";
-import { addEdges, darkTheme, full, icon, lightTheme, managed, projects, workspaces } from "./fixture";
+import { addEdges, darkTheme, fixtureHost, full, icon, lightTheme, managed, multiHostFixture, projects, workspaces } from "./fixture";
 import { Scene, type Camera, type WebGLRenderer, type Mesh, type ShaderMaterial } from "three";
 import { DEFAULT_APPEARANCE, type OverviewAppearance } from "../shared/settings";
 import { ProceduralAmbientGrid } from "../client/scene/ambient";
@@ -10,6 +10,7 @@ import { EnergyStreams } from "../client/scene/streams";
 import type { ProjectSpatialPresentation } from "../client/scene/spatial";
 import { FibreLight } from "../client/scene/lines";
 import { StableLayout, type ProjectLayout } from "../client/layout";
+import { GraphOverlay } from "../client/scene/overlay";
 
 // Fixture-only observation of the actual renderer, without a production debug API.
 const performanceMode = new URLSearchParams(location.search).get("performance") === "1";
@@ -20,7 +21,11 @@ WebGL2RenderingContext.prototype.getShaderInfoLog = function (shader) {
   if (log?.trim()) shaderLogs.push(log);
   return log;
 };
-const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number; neutralWidth: number; neutralHeight: number }[], graphFrames: [] as { id: number; width: number }[][], ambient: [] as number[] };
+const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, overlayPositions: 0, overlayFinishes: 0,
+  graphs: [] as { id: number; x: number; y: number; width: number; height: number; neutralWidth: number; neutralHeight: number }[], graphFrames: [] as { id: number; width: number }[][], ambient: [] as number[] };
+const positionNode = GraphOverlay.prototype.positionNode, finishPositions = GraphOverlay.prototype.finishPositions;
+GraphOverlay.prototype.positionNode = function (...args) { telemetry.overlayPositions++; return positionNode.apply(this, args); };
+GraphOverlay.prototype.finishPositions = function (...args) { telemetry.overlayFinishes++; return finishPositions.apply(this, args); };
 const layoutUpdate = StableLayout.prototype.update;
 let displayedProjects = new Map<string, ProjectLayout>();
 StableLayout.prototype.update = function (...args) {
@@ -36,9 +41,9 @@ let observedScene: Scene | undefined, observedRenderer: WebGLRenderer | undefine
 let backgroundScene: Scene | undefined, backgroundCamera: Camera | undefined;
 let spatialProjects: readonly ProjectSpatialPresentation[] = [];
 const spatialUpdate = ProceduralAmbientGrid.prototype.updateProjects;
-ProceduralAmbientGrid.prototype.updateProjects = function (projects) {
+ProceduralAmbientGrid.prototype.updateProjects = function (projects, online) {
   spatialProjects = projects.map(project => ({ ...project }));
-  spatialUpdate.call(this, projects);
+  spatialUpdate.call(this, projects, online);
 };
 const feeds = { admitted: 0, arrivals: 0 };
 const admitFeed = EnergyStreams.prototype.admit;
@@ -88,7 +93,7 @@ let presentation = initialPresentation();
 let currentTheme = lightTheme;
 let appearance: OverviewAppearance = { ...DEFAULT_APPEARANCE };
 const state = { focused: null as OverviewScope, selected: null as string | null, errors: [] as string[], stage: "empty" };
-let current: OverviewModel = { ...full, projects: [], workspaces: [], nodes: [], edges: [], readiness: { projects: false, workspaces: false, agents: false } };
+let current: OverviewModel = { ...full, projects: [], workspaces: [], nodes: [], edges: [], hosts: [{ ...fixtureHost, readiness: { projects: false, workspaces: false, agents: false } }] };
 const action = (value: PresentationAction) => {
   presentation = reducePresentation(presentation, value);
   state.focused = presentation.scope;
@@ -115,28 +120,36 @@ function update(value: OverviewModel, stage: string) {
   feedEvidence() { return { ...feeds }; },
   shaderLogs() { return [...shaderLogs]; },
   presentation: () => ({ ...presentation, groups: [...presentation.groups] }),
-  loadProjects() { update({ ...current, projects, readiness: { projects: true, workspaces: false, agents: false } }, "projects"); },
-  loadWorkspaces() { update(addEdges({ ...current, workspaces, readiness: { projects: true, workspaces: true, agents: false } }), "workspaces"); },
+  loadProjects() { update({ ...current, projects, hosts: [{ ...fixtureHost, readiness: { projects: true, workspaces: false, agents: false } }] }, "projects"); },
+  loadWorkspaces() { update(addEdges({ ...current, workspaces, hosts: [{ ...fixtureHost, readiness: { projects: true, workspaces: true, agents: false } }] }), "workspaces"); },
   loadManaged() { update(addEdges({ ...full, nodes: managed }), "managed"); },
   loadNative() { update(full, "native"); },
+  multiHost() { update(multiHostFixture(), "multi-host"); },
+  hostConnection(hostId: string, connection: OverviewHostState["connection"]) {
+    update({ ...current, hosts: current.hosts.map(host => host.id === hostId ? { ...host, connection } : host) }, "host-connection");
+  },
+  hostActivity(hostId: string) {
+    update({ ...current, events: [...current.events, { hostId, id: `${hostId}:event:${Date.now()}`, nodeId: `${hostId}:native:same:child`,
+      kind: "tool", text: `${hostId} command finished`, timestamp: Date.now() }] }, "host-activity");
+  },
   focus(target: OverviewScope) { renderer.setFocus(target); },
   motion(enabled: boolean) { action({ type: "set-motion", enabled }); renderer.setMotion(enabled); },
   visibility(visible: boolean) { renderer.setVisible(visible); },
   updateIcon() { update({ ...current, projects: current.projects.map(project => project.id === "p1" ? { ...project, iconUrl: icon(1, true), name: "Renamed community" } : project) }, "icon"); },
   refresh() { update(current, "refreshed"); },
-  activity() { update({ ...current, events: [{ id: `live-${Date.now()}`, nodeId: "n0", kind: "tool", text: "Command finished · npm test · 40 checks passed. " + "Detailed tool output ".repeat(60), timestamp: Date.now() }] }, "activity"); },
+  activity() { update({ ...current, events: [{ hostId: fixtureHost.id, id: `live-${Date.now()}`, nodeId: "n0", kind: "tool", text: "Command finished · npm test · 40 checks passed. " + "Detailed tool output ".repeat(60), timestamp: Date.now() }] }, "activity"); },
   depthFixture() {
     renderer.dispose(); displayedProjects.clear(); presentation = initialPresentation(); presentation = { ...presentation, motion: false };
     current = addEdges({ ...full, projects: projects.slice(0, 3), events: [],
-      workspaces: projects.slice(0, 3).map((project, index) => ({ id: `depth-w${index}`, projectId: project.projectId, projectName: project.name, name: `Workspace ${index}`, agentIds: [] })),
-      nodes: ["depth-a", "depth-b", "depth-c"].map((id, index) => ({ id, kind: "agent", workspaceId: `depth-w${index}`, managedAgentId: id,
+      workspaces: projects.slice(0, 3).map((project, index) => ({ hostId: fixtureHost.id, projectDisplayId: project.id, id: `depth-w${index}`, projectId: project.projectId, projectName: project.name, name: `Workspace ${index}`, agentIds: [] })),
+      nodes: ["depth-a", "depth-b", "depth-c"].map((id, index) => ({ hostId: fixtureHost.id, id, kind: "agent", workspaceId: `depth-w${index}`, managedAgentId: id,
         label: id, state: "idle", attention: false, ...(index === 2 ? { parentId: "depth-a" } : {}) })) });
     renderer = create();
   },
-  burst() { update({ ...current, events: Array.from({ length: 40 }, (_, index) => ({ id: `depth-${Date.now()}-${index}`, nodeId: "depth-a", kind: "activity", timestamp: Date.now() })) }, "depth"); },
-  connection(connection: OverviewModel["connection"]) { update({ ...current, connection }, "connection"); },
+  burst() { update({ ...current, events: Array.from({ length: 40 }, (_, index) => ({ hostId: fixtureHost.id, id: `depth-${Date.now()}-${index}`, nodeId: "depth-a", kind: "activity", timestamp: Date.now() })) }, "depth"); },
+  connection(connection: OverviewHostState["connection"]) { update({ ...current, hosts: current.hosts.map(host => ({ ...host, connection })) }, "connection"); },
   telemetry() { return telemetry; },
-  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; },
+  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; telemetry.overlayPositions = 0; telemetry.overlayFinishes = 0; },
   ambientEvidence(key = "default", time?: number, regions: { x: number; y: number; width: number; height: number }[] = []) {
     const scene = backgroundScene!, renderer = observedRenderer!, camera = backgroundCamera!;
     const grids = scene.children.filter(child => child.userData.overviewAmbientGrid);
@@ -173,12 +186,22 @@ function update(value: OverviewModel, stage: string) {
     return backgroundScene!.children.filter(child => child.userData.overviewClouds || child.userData.overviewAmbientGrid).flatMap(child => {
       const geometry = (child as Mesh).geometry;
       if (!geometry) return [];
-      return Object.entries(geometry.attributes).map(([name, attribute]) => {
+      const entries = Object.entries(geometry.attributes).map(([name, attribute]) => {
         let hash = 2166136261;
         const values = new Uint8Array(attribute.array.buffer, attribute.array.byteOffset, attribute.array.byteLength);
         for (const value of values) hash = Math.imul(hash ^ value, 16777619);
         return { object: child.name, name, version: attribute.version, hash: hash >>> 0 };
       });
+      const uniforms = ((child as Mesh).material as ShaderMaterial).uniforms;
+      for (const [name, uniform] of Object.entries(uniforms)) {
+        const texture = uniform.value;
+        if (!texture?.isDataTexture || !ArrayBuffer.isView(texture.image?.data)) continue;
+        const array = texture.image.data;
+        let hash = 2166136261;
+        for (const value of new Uint8Array(array.buffer, array.byteOffset, array.byteLength)) hash = Math.imul(hash ^ value, 16777619);
+        entries.push({ object: child.name, name, version: texture.version, hash: hash >>> 0 });
+      }
+      return entries;
     });
   },
   pulseEvidence() {
@@ -191,7 +214,14 @@ function update(value: OverviewModel, stage: string) {
     appearance = { ...appearance, background: enabled ? "animated" : "off" };
     renderer.setAppearance(appearance);
   },
-  resourceEvidence() { return { drawCalls: observedRenderer!.info.render.calls, ...observedRenderer!.info.memory, programs: observedRenderer!.info.programs?.length ?? 0 }; },
+  resourceEvidence() {
+    let zeroOpacityDrawables = 0;
+    observedScene!.traverse(object => {
+      const material = (object as Mesh).material;
+      if (object.visible && material && !Array.isArray(material) && material.transparent && material.opacity === 0) zeroOpacityDrawables++;
+    });
+    return { drawCalls: observedRenderer!.info.render.calls, zeroOpacityDrawables, ...observedRenderer!.info.memory, programs: observedRenderer!.info.programs?.length ?? 0 };
+  },
   installShaderObserver() { observedRenderer!.debug.onShaderError = shaderObserver; },
   shaderObserverEvidence() { return { restored: observedRenderer!.debug.onShaderError === shaderObserver, unrelatedErrors: observedShaderErrors }; },
   injectAmbientShaderFailure() {

@@ -10,7 +10,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 (async () => {
   const uiStub = [
     'import React from "react";',
-    'import { Pressable, Text, View } from "react-native";',
+    'import { Pressable, ScrollView as NativeScrollView, Text, View } from "react-native";',
     'const h = React.createElement;',
     'export function SettingsSection({ title, trailing, testID, children }) { return h(View, { testID }, h(Text, null, title), trailing ? h(Text, null, trailing) : null, children); }',
     'export const SettingsGroup = SettingsSection;',
@@ -18,6 +18,10 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
     'export function SettingsRow({ testID, label, hint, error, children }) { return h(View, { testID, accessibilityValue: hint ? { text: hint } : undefined }, h(Text, null, label), children, hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
     'export function SettingsSelect({ testID, label, value, options, onValueChange, disabled, hint, error }) { return h(View, { testID, accessibilityValue: { text: value } }, h(Text, null, label), ...options.map(option => h(Pressable, { key: option.value, testID: [testID, option.value].join(":"), accessibilityRole: "radio", accessibilityLabel: option.label, accessibilityState: { checked: value === option.value, disabled }, disabled, onPress: () => { if (!disabled) onValueChange(option.value); } }, h(Text, null, option.label))), hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
     'export function SettingsAction({ testID, label, actionLabel, onPress, disabled, hint, error }) { return h(View, { testID }, h(Text, null, label), h(Pressable, { testID: [testID, "action"].join(":"), accessibilityRole: "button", accessibilityLabel: actionLabel, disabled, onPress: () => { if (!disabled) onPress(); } }, h(Text, null, actionLabel)), hint ? h(Text, null, hint) : null, error ? h(Text, null, error) : null); }',
+    'export function Icon({ name }) { return h(View, { accessibilityLabel: `Icon ${name}` }); }',
+    'export function ScrollView(props) { return h(NativeScrollView, props); }',
+    'export function Modal({ title, open, onOpenChange, children }) { return open ? h(View, { testID: `overview-modal:${title}` }, h(Text, null, title), h(Pressable, { testID: "overview-modal-close", accessibilityRole: "button", onPress: () => onOpenChange(false) }, h(Text, null, "Close")), children) : null; }',
+    'Modal.Content = function Content({ children }) { return h(View, null, children); };',
   ].join('\n');
   const stubPlugin = { name: 'overview-acceptance-stubs', setup(build) {
     build.onResolve({ filter: /^@getpaseo\/plugin\/client\/ui$/ }, () => ({ path: 'ui', namespace: 'stub' }));
@@ -27,7 +31,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
     build.onLoad({ filter: /^client$/, namespace: 'stub' }, () => ({ contents: 'import { useSyncExternalStore } from "react";\nexport function useSettings() { const state = useSyncExternalStore(globalThis.__overviewSettingsSubscribe, globalThis.__overviewSettingsSnapshot); return { ...state, save: globalThis.__overviewSettingsSave, reset: globalThis.__overviewSettingsReset, reload: globalThis.__overviewSettingsReload }; }', loader: 'js' }));
     build.onLoad({ filter: /^sdk$/, namespace: 'stub' }, () => ({ contents: 'export function defineSettings(definition) { return definition; }', loader: 'js' }));
   } };
-  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { AppearanceSettings } from "/plugin/client/settings"; export { appearancePalettes } from "/plugin/client/appearance-policy"; export { DEFAULT_APPEARANCE } from "/plugin/shared/settings"; export { nativeFixture } from "/plugin/acceptance/native-fixture"; export { lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, plugins: [stubPlugin], bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
+  const built = await build({ stdin: { contents: 'export { NativeHarness } from "/plugin/acceptance/native-harness"; export { AppearanceSettings } from "/plugin/client/settings"; export { AgentDetails } from "/plugin/client/agent-details"; export { appearancePalettes } from "/plugin/client/appearance-policy"; export { DEFAULT_APPEARANCE } from "/plugin/shared/settings"; export { nativeFixture } from "/plugin/acceptance/native-fixture"; export { multiHostFixture } from "/plugin/acceptance/fixture"; export { lightTheme } from "/plugin/acceptance/fixture"; export { mountGraphFullscreen, mountOverview, mountFloatingCard } from "/plugin/client/web";', resolveDir: '/plugin' }, plugins: [stubPlugin], bundle: true, format: 'cjs', platform: 'node', target: 'node22', jsx: 'automatic', external: ['react', 'react-native'], write: false });
   const listeners = { app: new Set(), motion: new Set() };
   const active = new Map(), animationCalls = [];
   let animationId = 0;
@@ -142,6 +146,8 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.equal(prefixed('overview-native-project:').length, 7);
   assert.equal(prefixed('overview-native-workspace:').length, 0);
   assert.equal(text(byId('overview-scope-title')), 'All projects');
+  assert.equal(text(byId('overview-host-filter')), 'All hosts');
+  assert.equal(text(byId('overview-project-filter')), 'All projects');
   assert.ok(active.size > 0, 'Working roots animate');
   assert.ok(animationCalls.every(call => call.options.useNativeDriver === true));
   assert.ok(new Set(animationCalls.map(call => call.initial)).size > 1, 'Stable identities seed different phases');
@@ -198,7 +204,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.equal(text(byId('overview-scope-title')), 'Application');
   assert.match(text(byId('overview-scope-counts')), /4 workspaces/);
   await press('overview-native-workspace:w0');
-  assert.equal(text(byId('overview-scope-title')), 'Deployment and release review');
+  assert.equal(text(byId('overview-scope-title')), 'Application › Deployment and release review');
   assert.match(byId('overview-native-agent:a0-0').props.accessibilityLabel, /Agent\./);
   assert.match(byId('overview-native-agent:a0-3').props.accessibilityLabel, /Subagent\./);
   for (const id of ['n0', 'n1', 'n2', 'n6']) assert.ok(byId(`overview-native-agent:${id}`));
@@ -229,7 +235,9 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   await press('overview-native-agent:n0');
   assert.equal(state.selectedId, 'n0');
   assert.ok(!JSON.stringify(tree.toJSON()).includes('Command finished'), 'Phone remains free of speech bubbles');
-  await press('overview-all-projects');
+  await press('overview-project-filter');
+  assert.ok(byId('overview-project-option-all'));
+  await press('overview-project-option-all');
 
   visible = false; await update(); assert.equal(active.size, 0);
   visible = true; await update(); assert.ok(active.size > 0);
@@ -252,6 +260,67 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.ok(active.size > 0);
   await act(async () => tree.unmount());
   assert.equal(active.size, 0); assert.equal(listeners.app.size, 0); assert.equal(listeners.motion.size, 0);
+
+  // Multi-host header pickers use the complete configured list while the
+  // native graph receives the filtered composition. A single offline host is
+  // reported locally and never disables the online hosts.
+  const multi = module.exports.multiHostFixture();
+  let multiState, multiTree;
+  const multiElement = () => React.createElement(module.exports.NativeHarness, {
+    model: multi, theme: module.exports.lightTheme,
+    hostChoices: [{ id: 'first', label: 'first host', status: 'online' }, { id: 'second', label: 'second host', status: 'online' },
+      { id: 'offline', label: 'Offline host', status: 'offline' }],
+    onState: next => { multiState = next; },
+  });
+  await act(async () => { multiTree = create(multiElement(), { createNodeMock: element => element.type === 'ScrollView' ? { scrollTo() {} } : null }); });
+  assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
+  assert.match(text(byIdIn(multiTree, 'overview-host-status:offline')), /Offline host: offline/);
+  assert.equal(text(byIdIn(multiTree, 'overview-host-filter')), 'All hosts');
+  await pressIn(multiTree, 'overview-host-filter');
+  await pressIn(multiTree, 'overview-host-option-offline');
+  assert.match(text(multiTree.root), /No connected hosts/);
+  assert.doesNotMatch(text(multiTree.root), /Loading host activity/);
+  await pressIn(multiTree, 'overview-host-filter');
+  await pressIn(multiTree, 'overview-host-option-all');
+  await pressIn(multiTree, 'overview-project-filter');
+  assert.match(text(byIdIn(multiTree, 'overview-project-option-first:project:same')), /Shared name — first host/);
+  assert.match(text(byIdIn(multiTree, 'overview-project-option-second:project:same')), /Shared name — second host/);
+  await pressIn(multiTree, 'overview-modal-close');
+  assert.equal(byIdIn(multiTree, 'overview-project-option-all'), undefined);
+  await pressIn(multiTree, 'overview-host-filter');
+  await pressIn(multiTree, 'overview-host-option-second');
+  assert.equal(multiState.hostFilter, 'second');
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
+  assert.equal(byIdIn(multiTree, 'overview-native-project:first:project:same'), undefined);
+  assert.equal(text(byIdIn(multiTree, 'overview-host-filter')), 'second host');
+  await pressIn(multiTree, 'overview-project-filter');
+  await pressIn(multiTree, 'overview-project-option-second:project:same');
+  assert.equal(multiState.scope.kind, 'project');
+  assert.equal(multiState.scope.id, 'second:project:same');
+  assert.equal(text(byIdIn(multiTree, 'overview-scope-title')), 'Shared name');
+  await pressIn(multiTree, 'overview-host-filter');
+  await pressIn(multiTree, 'overview-host-option-all');
+  assert.equal(multiState.hostFilter, null);
+  await pressIn(multiTree, 'overview-project-filter');
+  await pressIn(multiTree, 'overview-project-option-all');
+  assert.equal(multiState.scope, null);
+  assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
+  assert.match(text(byIdIn(multiTree, 'overview-host-status:offline')), /Offline host: offline/);
+  let chatTarget;
+  const secondAgent = multi.nodes.find(node => node.id === 'second:agent:same');
+  await act(async () => {
+    tree = create(React.createElement(module.exports.AgentDetails, {
+      model: multi, node: secondAgent, theme: module.exports.lightTheme, onClose() {}, onOpenAgent: target => { chatTarget = target; },
+    }), { createNodeMock: () => null });
+    await Promise.resolve();
+  });
+  await press('overview-open-chat');
+  assert.equal(chatTarget.hostId, 'second');
+  assert.equal(chatTarget.agentId, 'same');
+  await act(async () => multiTree.unmount());
+
   // Host settings screen states. The stub mirrors useSettings' discriminated
   // state, full-document save and revision contract without Paseo internals.
   const settingsElement = () => React.createElement(module.exports.AppearanceSettings);

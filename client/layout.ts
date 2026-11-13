@@ -1,7 +1,7 @@
 import { hierarchy } from "d3-hierarchy";
 import type { OverviewModel, OverviewNode } from "../shared/model";
 import type { OverviewFocus } from "../shared/renderer";
-import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import { unassignedScopeId } from "../shared/presentation";
 import { inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
 import { agentRole, type AgentRole } from "./identity";
 import { boundaryPoint, distance, inflateRect, rectsOverlap, segmentIntersectsRect, translateRect, unionRects, type Point, type Rect } from "./geometry";
@@ -10,7 +10,6 @@ import { collapseControlMetrics, graphMetrics, nodeFootprint, type LayoutNodeKin
 
 export type { Point, Rect } from "./geometry";
 export type { RoutedEdge, PathSegment } from "./routing";
-export const BACKGROUND_GROUP = UNASSIGNED_SCOPE_ID;
 
 export interface PositionedNode {
   id: string;
@@ -51,7 +50,7 @@ export interface SceneLayout {
   memberToDisplay: ReadonlyMap<string, string>;
   width: number; height: number;
 }
-export function groupForNode(node: OverviewNode): string { return node.workspaceId ?? BACKGROUND_GROUP; }
+export function groupForNode(node: OverviewNode): string { return node.workspaceId ?? unassignedScopeId(node.hostId); }
 
 /** Parentage within a workspace; delegation never changes ownership. */
 export function parentMap(nodes: readonly OverviewNode[], rootId: string): Map<string, string> {
@@ -125,37 +124,46 @@ function projectDefinitions(model: OverviewModel): ProjectDefinition[] {
     definitions: [{ id: project.id, kind: "project", projectId: project.id, workspaceId: null, label: project.name, iconUrl: project.iconUrl }],
     parents: new Map(), workspaceIds: [], agentIds: [],
   }));
-  const byRawProject = new Map(model.projects.map(project => [project.projectId, projects.find(item => item.id === project.id)!]));
+  const byProjectDisplayId = new Map(model.projects.map(project => [project.id, projects.find(item => item.id === project.id)!]));
   const byWorkspace = new Map<string, ProjectDefinition>();
-  let background: ProjectDefinition | undefined;
-  const unassigned = () => {
+  const backgrounds = new Map<string, ProjectDefinition>();
+  const unassigned = (hostId: string) => {
+    let background = backgrounds.get(hostId);
     if (!background) {
-      background = { id: BACKGROUND_GROUP, name: "Unassigned", background: true,
-        definitions: [{ id: BACKGROUND_GROUP, kind: "project", projectId: BACKGROUND_GROUP, workspaceId: null, label: "Unassigned" }],
+      const id = unassignedScopeId(hostId);
+      background = { id, name: "Unassigned", background: true,
+        definitions: [{ id, kind: "project", projectId: id, workspaceId: null, label: "Unassigned" }],
         parents: new Map(), workspaceIds: [], agentIds: [] };
+      backgrounds.set(hostId, background);
       projects.push(background);
     }
     return background;
   };
   for (const workspace of model.workspaces) {
-    const project = workspace.projectId ? byRawProject.get(workspace.projectId) ?? unassigned() : unassigned();
-    project.workspaceIds.push(workspace.id);
-    project.definitions.push({ id: workspace.id, kind: "workspace", projectId: project.id, workspaceId: workspace.id,
-      label: workspace.name, parentId: project.id });
-    project.parents.set(workspace.id, project.id); byWorkspace.set(workspace.id, project);
+    const project = workspace.projectDisplayId ? byProjectDisplayId.get(workspace.projectDisplayId) : undefined;
+    const owner = project ?? unassigned(workspace.hostId);
+    owner.workspaceIds.push(workspace.id);
+    owner.definitions.push({ id: workspace.id, kind: "workspace", projectId: owner.id, workspaceId: workspace.id,
+      label: workspace.name, parentId: owner.id });
+    owner.parents.set(workspace.id, owner.id); byWorkspace.set(workspace.id, owner);
     const nodes = model.nodes.filter(node => node.workspaceId === workspace.id);
     const parents = parentMap(nodes, workspace.id);
     for (const node of nodes) {
-      project.agentIds.push(node.id); project.parents.set(node.id, parents.get(node.id)!);
-      project.definitions.push({ id: node.id, kind: node.kind, projectId: project.id, workspaceId: workspace.id,
+      owner.agentIds.push(node.id); owner.parents.set(node.id, parents.get(node.id)!);
+      owner.definitions.push({ id: node.id, kind: node.kind, projectId: owner.id, workspaceId: workspace.id,
         label: node.label, parentId: parents.get(node.id),
         role: agentRole(node.id, { parentByNode: parents }, agents) });
     }
   }
-  const orphans = model.nodes.filter(node => !node.workspaceId || !byWorkspace.has(node.workspaceId));
-  if (orphans.length) {
-    const project = unassigned(), parents = parentMap(orphans, project.id);
-    for (const node of orphans) {
+  const orphans = new Map<string, OverviewNode[]>();
+  for (const node of model.nodes) {
+    if (node.workspaceId && byWorkspace.has(node.workspaceId)) continue;
+    const values = orphans.get(node.hostId) ?? [];
+    values.push(node); orphans.set(node.hostId, values);
+  }
+  for (const [hostId, values] of orphans) {
+    const project = unassigned(hostId), parents = parentMap(values, project.id);
+    for (const node of values) {
       project.agentIds.push(node.id); project.parents.set(node.id, parents.get(node.id)!);
       project.definitions.push({ id: node.id, kind: node.kind, projectId: project.id, workspaceId: node.workspaceId,
         label: node.label, parentId: parents.get(node.id),

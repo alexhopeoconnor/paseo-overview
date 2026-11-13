@@ -56,10 +56,11 @@ export class BubbleStore {
       const text = preview ? previewSummary(preview) : bubbleText(event.text!);
       if (!text || !Number.isFinite(event.timestamp) || event.timestamp < now - 10_000 || event.timestamp > now + 5_000) continue;
       const previous = this.bubbles.get(node.id);
+      const previewKey = event.sourceKey ? `${event.hostId}:${node.id}:${event.sourceKey}` : undefined;
       if (this.seen.has(event.id) && previous?.eventId !== event.id) continue;
       if (previous && event.timestamp < previous.timestamp) continue;
-      if (event.sourceKey) {
-        const last = this.previews.get(event.sourceKey);
+      if (previewKey) {
+        const last = this.previews.get(previewKey);
         if (last?.text === text) {
           // Keep suppressing a long-lived stream while it is still arriving;
           // touching this small dedup record must not renew the visible bubble.
@@ -75,7 +76,7 @@ export class BubbleStore {
       const updated = previous?.eventId === event.id && (previous.text !== text || event.timestamp > previous.timestamp);
       if (previous?.eventId === event.id && !updated) continue;
       this.seen.set(event.id, now);
-      if (event.sourceKey) this.previews.set(event.sourceKey, { text, at: now });
+      if (previewKey) this.previews.set(previewKey, { text, at: now });
       this.bubbles.set(node.id, {
         eventId: event.id,
         nodeId: node.id,
@@ -140,5 +141,13 @@ export class BubbleStore {
     this.bubbles.clear();
     this.held.clear();
     // Keep seen IDs so hiding and reopening cannot replay the same events.
+  }
+
+  /** Disconnecting one host must not dismiss another host's inspected preview. */
+  clearNodes(nodeIds: ReadonlySet<string>): void {
+    for (const id of nodeIds) {
+      this.bubbles.delete(id);
+      this.held.delete(id);
+    }
   }
 }

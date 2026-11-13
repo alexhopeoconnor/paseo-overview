@@ -1,24 +1,20 @@
-import { usePaseo, useRpc, useHosts, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { getPaseoClient, useHosts, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Modal } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import type { OverviewModel } from "../shared/model";
+import type { OverviewHostSummary } from "../shared/model";
 import type { OverviewPresentation, PresentationAction } from "../shared/presentation";
-import type { FloatingCardPositioner, OverviewAnchor, OverviewFullscreen, OverviewMountOptions, OverviewRenderer, OverviewTheme } from "../shared/renderer";
-import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
+import type { AgentTarget, FloatingCardPositioner, OverviewAnchor, OverviewFullscreen, OverviewMountOptions, OverviewRenderer, OverviewTheme } from "../shared/renderer";
 import { DEFAULT_APPEARANCE, overviewAppearance, type OverviewAppearance } from "../shared/settings";
+import { emptyOverviewModel, isHostAuthoritative } from "../shared/hosts";
 import { AgentDetails } from "./agent-details";
 import { resolvedOverviewTheme } from "./appearance-policy";
 import { selectionColour } from "./appearance";
 import { OverviewHeader } from "./header";
+import { createOverviewHosts } from "./hosts";
 import { NativeOverview } from "./native";
 import { parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation } from "./presentation";
-import { createOverviewStore } from "./store";
 import { mountFloatingCard, mountGraphFullscreen, mountOverview } from "./web";
-
-function emptyModel(hostId: string): OverviewModel {
-  return { hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { projects: false, workspaces: false, agents: false }, connection: "connecting", revision: 0 };
-}
 
 function sameAppearance(left: OverviewAppearance, right: OverviewAppearance): boolean {
   return left.theme === right.theme && left.background === right.background && left.depth === right.depth
@@ -31,9 +27,7 @@ export interface OverviewScreenProps extends PluginScreenProps {
 }
 
 export function OverviewScreen(props: OverviewScreenProps) {
-  const paseo = usePaseo();
   const hosts = useHosts();
-  const getRoster = useRpc(getRosterRpc), getIcon = useRpc(getProjectIconRpc);
   const appearanceSettings = useSettings(overviewAppearance);
   const [retainedAppearance, setRetainedAppearance] = useState(() => ({ hostId: props.host.id, value: DEFAULT_APPEARANCE }));
   const [appearanceSettingsHost, setAppearanceSettingsHost] = useState(props.host.id);
@@ -79,11 +73,16 @@ export function OverviewScreen(props: OverviewScreenProps) {
     appearanceSettings.status === "ready" ? appearanceSettings.values.depth : undefined,
     appearanceSettings.status === "ready" ? appearanceSettings.values.response : undefined,
     appearanceSettings.status === "ready" ? appearanceSettings.values.backgroundSpeed : undefined]);
-  const [observedModel, setModel] = useState<OverviewModel>(() => emptyModel(props.host.id));
-  // A reused screen can render once with the preceding host's store before its
-  // effect is replaced. Never validate the new host's saved selection against it.
-  const model = useMemo(() => observedModel.hostId === props.host.id ? observedModel : emptyModel(props.host.id), [observedModel, props.host.id]);
-  const [error, setError] = useState("");
+  const [observed, setObserved] = useState(() => ({ installation: props.host.id, model: emptyOverviewModel() }));
+  // A reused screen can render once with the preceding installation's model.
+  const model = useMemo(() => observed.installation === props.host.id ? observed.model : emptyOverviewModel(), [observed, props.host.id]);
+  const hostChoicesSignature = hosts.map(host => `${host.serverId}\u0000${host.label}\u0000${host.status}`).join("\u0001");
+  const hostChoices = useMemo<OverviewHostSummary[]>(() => hosts.map(host => ({
+    id: host.serverId, label: host.label, status: host.status,
+  })), [hostChoicesSignature]);
+  const hostChoicesRef = useRef(hostChoices);
+  hostChoicesRef.current = hostChoices;
+  const [actionError, setActionError] = useState("");
   const [renderError, setRenderError] = useState("");
   const [fullscreenActive, setFullscreenActive] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
@@ -98,6 +97,8 @@ export function OverviewScreen(props: OverviewScreenProps) {
       return previous.hostId === props.host.id && previous.value === value ? previous : { hostId: props.host.id, value };
     });
   }, [props.host.id]);
+  const hostFilterRef = useRef(presentation.hostFilter);
+  hostFilterRef.current = presentation.hostFilter;
 
   const screen = useRef<View | null>(null);
   const fullscreen = useRef<OverviewFullscreen | null>(null);
@@ -106,7 +107,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
   const renderer = useRef<OverviewRenderer | null>(null);
   const floating = useRef<FloatingCardPositioner | null>(null);
   const anchor = useRef<OverviewAnchor | null>(null);
-  const store = useRef<ReturnType<typeof createOverviewStore> | null>(null);
+  const coordinator = useRef<ReturnType<typeof createOverviewHosts> | null>(null);
   const hostTheme = useMemo<OverviewTheme>(() => {
     const colors = props.theme.colors;
     const base = {
@@ -137,23 +138,61 @@ export function OverviewScreen(props: OverviewScreenProps) {
     setAppearanceNotice("");
     void appearanceSettingsRef.current.reload().catch(() => undefined);
   }, []);
-  const navigation = (props as PluginScreenProps & { navigation?: { openAgent(input: { agentId: string; serverId: string }): void } }).navigation;
-  const openAgent = useCallback((agentId: string) => {
+  const navigation = props.navigation;
+  const openAgent = useCallback((target: AgentTarget) => {
+    const host = current.current.model.hosts.find(item => item.id === target.hostId);
+    if (!host || host.connection !== "connected") {
+      setActionError(`${host?.label ?? "This host"} is offline; agent chat is unavailable. Other hosts are unchanged.`);
+      return;
+    }
+    setActionError("");
     void fullscreen.current?.exit().catch(() => {});
-    navigation?.openAgent({ agentId, serverId: props.host.id });
-  }, [navigation, props.host.id]);
+    navigation?.openAgent({ agentId: target.agentId, serverId: target.hostId });
+  }, [navigation]);
   const current = useRef({ model, theme, appearance, presentation, openAgent, dispatch });
   current.current = { model, theme, appearance, presentation, openAgent, dispatch };
   const browser = Platform.OS === "web" && !renderError;
-  const hostStatus = hosts.find(host => host.serverId === props.host.id)?.status;
-  const initialHostStatus = useRef(hostStatus);
-  initialHostStatus.current = hostStatus;
   const selected = model.nodes.find(node => node.id === presentation.selectedId);
   const closeDetails = useCallback(() => {
     const id = current.current.presentation.selectedId;
     current.current.dispatch({ type: "select", id: null });
     if (id) renderer.current?.focusNode(id);
   }, []);
+
+  // One coordinator per installation host. Host-list and filter changes feed it
+  // without replacing the renderer or its retained presentation session.
+  useEffect(() => {
+    let mounted = true;
+    const installation = props.host.id;
+    setObserved({ installation, model: emptyOverviewModel() });
+    const observation = createOverviewHosts({
+      acquire: hostId => getPaseoClient(hostId),
+      observeActivity: Platform.OS === "web",
+      onChange: next => { if (mounted) setObserved({ installation, model: next }); },
+    });
+    coordinator.current = observation;
+    // Apply visibility and the saved filter before any host entry can start a
+    // passive read; setFilter retains an id until its summary arrives.
+    observation.setFilter(hostFilterRef.current);
+    observation.setVisible(AppState.currentState == null || AppState.currentState === "active");
+    observation.setHosts(hostChoicesRef.current);
+    const visibility = AppState.addEventListener("change", state => {
+      observation.setVisible(state === "active");
+      renderer.current?.setVisible(state === "active");
+    });
+    return () => {
+      mounted = false; visibility.remove(); observation.dispose();
+      if (coordinator.current === observation) coordinator.current = null;
+    };
+  }, [props.host.id]);
+  useEffect(() => { coordinator.current?.setHosts(hostChoices); }, [hostChoices, props.host.id]);
+  useEffect(() => {
+    if (presentation.hostFilter && !hostChoices.some(host => host.id === presentation.hostFilter)) {
+      dispatch({ type: "set-host-filter", hostId: null });
+    }
+  }, [hostChoices, presentation.hostFilter, dispatch]);
+  // Apply the filter before the composed model is reconciled against presentation.
+  useEffect(() => { coordinator.current?.setFilter(presentation.hostFilter); }, [presentation.hostFilter, props.host.id]);
 
   useEffect(() => {
     if (!browser) { setFullscreenSupported(false); setFullscreenActive(false); return; }
@@ -177,34 +216,6 @@ export function OverviewScreen(props: OverviewScreenProps) {
   };
 
   useEffect(() => {
-    setError(""); setModel(emptyModel(props.host.id));
-    const observation = createOverviewStore({
-      hostId: props.host.id, paseo, observeActivity: Platform.OS === "web",
-      readRoster: parentAgentId => getRoster({ parentAgentId }),
-      readIcon: projectId => getIcon({ projectId }),
-      onChange: setModel, onError: setError,
-    });
-    store.current = observation;
-    let mounted = true;
-    const status = initialHostStatus.current;
-    if (status) observation.setConnection(status === "online" ? "connected" : status === "connecting" ? "connecting" : "disconnected");
-    observation.setVisible(AppState.currentState == null || AppState.currentState === "active");
-    void observation.start().catch(cause => { if (mounted) setError(String(cause)); });
-    const visibility = AppState.addEventListener("change", state => {
-      observation.setVisible(state === "active");
-      renderer.current?.setVisible(state === "active");
-    });
-    return () => {
-      mounted = false; visibility.remove(); observation.dispose();
-      if (store.current === observation) store.current = null;
-    };
-  }, [paseo, props.host.id, getRoster, getIcon]);
-
-  useEffect(() => {
-    if (hostStatus) store.current?.setConnection(hostStatus === "online" ? "connected" : hostStatus === "connecting" ? "connecting" : "disconnected");
-  }, [hostStatus]);
-
-  useEffect(() => {
     if (!browser) return;
     try {
       const initial = current.current;
@@ -215,7 +226,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
         onFocus: scope => current.current.dispatch({ type: "focus", scope }),
         onGroupChange: (id, expanded) => current.current.dispatch({ type: expanded ? "expand-group" : "collapse-group", id }),
         onSelectionAnchor: value => { anchor.current = value; floating.current?.update(value); },
-        onOpenAgent: id => current.current.openAgent(id), onError: setRenderError,
+        onOpenAgent: target => current.current.openAgent(target), onError: setRenderError,
       };
       const mounted = mountOverview(panel.current, options);
       if (!mounted) { setRenderError("Graph rendering is unavailable on this client."); return; }
@@ -234,13 +245,13 @@ export function OverviewScreen(props: OverviewScreenProps) {
   useEffect(() => { renderer.current?.setSelection(presentation.selectedId); }, [presentation.selectedId]);
   useEffect(() => {
     setOwned(previous => {
-      if (previous.hostId !== model.hostId) return previous;
+      if (previous.hostId !== props.host.id || !model.hosts.length) return previous;
       const value = reconcilePresentation(previous.value, model);
       if (value === previous.value) return previous;
       rememberPresentation(previous.hostId, value);
       return { ...previous, value };
     });
-  }, [model]);
+  }, [model, props.host.id]);
   useEffect(() => {
     if (!browser || !selected) return;
     const positioned = mountFloatingCard(panel.current, card.current, closeDetails);
@@ -249,15 +260,20 @@ export function OverviewScreen(props: OverviewScreenProps) {
     return () => { positioned?.dispose(); if (floating.current === positioned) floating.current = null; };
   }, [browser, selected?.id, closeDetails]);
 
-  const ready = Object.values(model.readiness).every(Boolean);
+  const anyAuthoritative = model.hosts.some(host => isHostAuthoritative(model, host.id));
+  const allOffline = model.hosts.length > 0 && model.hosts.every(host => host.connection === "disconnected");
+  const hasGraph = model.projects.length > 0 || model.nodes.length > 0;
+  const loading = !hasGraph && !anyAuthoritative && !allOffline;
+  const empty = !loading && !hasGraph;
   const appearanceProblem = appearanceNotice || appearanceSettings.saveError
     || (appearanceSettings.status === "invalid" ? "Stored appearance settings are invalid. Overview is keeping its current appearance; open appearance settings to reload or restore them."
       : appearanceSettings.status === "error" ? "Appearance settings could not be loaded. Overview is keeping its current appearance." : "");
   const detailsFor = (detailsTheme: OverviewTheme) => selected ? <AgentDetails model={model} node={selected} theme={detailsTheme} onClose={closeDetails} onOpenAgent={navigation ? openAgent : undefined} /> : null;
   return <View ref={screen} testID="overview-screen" style={[styles.screen, { backgroundColor: theme.background }]}>
-    <OverviewHeader model={model} presentation={presentation} hostLabel={props.host.label} theme={theme} compact={props.layout.compact}
+    <OverviewHeader model={model} presentation={presentation} hostChoices={hostChoices} theme={theme} compact={props.layout.compact}
+      onHostFilter={hostId => dispatch({ type: "set-host-filter", hostId })}
+      onProject={scope => dispatch({ type: "focus", scope })}
       onBack={() => dispatch({ type: "focus", scope: parentScope(presentation.scope, model) })}
-      onAllProjects={() => dispatch({ type: "focus", scope: null })}
       onMotion={() => dispatch({ type: "set-motion", enabled: !presentation.motion })}
       fullscreen={fullscreenSupported ? { active: fullscreenActive, toggle: toggleFullscreen } : undefined}
       appearance={appearance} appearanceDisabled={!appearanceReady || appearanceSettingsHost !== props.host.id || appearanceSettings.saving || Boolean(appearanceSettings.saveError) || Boolean(appearanceNotice)} appearanceError={appearanceProblem}
@@ -276,13 +292,13 @@ export function OverviewScreen(props: OverviewScreenProps) {
       </View>
     </View> : null}
     {fullscreenError ? <View style={styles.notice}><Text accessibilityLiveRegion="polite" style={{ color: theme.waiting, fontSize: 12 }}>{fullscreenError}</Text></View> : null}
-    {error ? <View style={styles.notice}><Text selectable style={{ color: theme.waiting, fontSize: 12 }}>{error}</Text></View> : null}
+    {actionError ? <View style={styles.notice}><Text accessibilityLiveRegion="polite" selectable style={{ color: theme.waiting, fontSize: 12 }}>{actionError}</Text></View> : null}
     {renderError ? <View style={styles.notice}><Text style={{ color: theme.muted, fontSize: 12 }}>Using the touch graph. {renderError}</Text>{Platform.OS === "web" ? <Pressable accessibilityRole="button" onPress={() => setRenderError("")}><Text style={{ color: theme.selection, fontSize: 12 }}>Retry graph</Text></Pressable> : null}</View> : null}
     <View style={styles.canvasArea}>
       {browser ? <>
         <View ref={panel} testID="overview-canvas-host" style={styles.canvas} />
-        {!ready ? <View pointerEvents="none" style={styles.loading}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading project activity…</Text></View> : null}
-        {ready && !model.projects.length && !model.nodes.length ? <View pointerEvents="none" style={styles.empty}><Text style={{ color: theme.foreground, fontSize: 17 }}>Your projects will appear here</Text></View> : null}
+        {loading ? <View pointerEvents="none" style={styles.loading}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading host activity…</Text></View> : null}
+        {empty ? <View pointerEvents="none" style={styles.empty}><Text style={{ color: theme.foreground, fontSize: 17 }}>{allOffline ? "No connected hosts" : "Your projects will appear here"}</Text></View> : null}
         {selected ? <View ref={card} testID="overview-details-popover" style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>{detailsFor(theme)}</View> : null}
       </> : <NativeOverview model={model} theme={theme} presentation={presentation} onAction={dispatch} />}
     </View>

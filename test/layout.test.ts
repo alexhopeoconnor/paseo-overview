@@ -1,24 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { BACKGROUND_GROUP, StableLayout, canvasNode, nodeCollisionBounds, parentMap, type SceneLayout } from "../client/layout";
+import { StableLayout, canvasNode, nodeCollisionBounds, parentMap, type SceneLayout } from "../client/layout";
 import { distance, rectsOverlap } from "../client/geometry";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections } from "../client/routing";
 import { inactiveGroupId } from "../client/collapse";
 import { graphMetrics } from "../client/scene/metrics";
 import { nodeAppearance } from "../client/appearance";
 import type { OverviewModel, OverviewNode } from "../shared/model";
+import { unassignedScopeId } from "../shared/presentation";
 
-const node = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
-  id, workspaceId, parentId, managedAgentId: native ? parentId! : id, kind: native ? "provider-subagent" : "agent", label: id, state: native ? "working" : "idle", attention: false,
+const node = (id: string, workspaceId: string | null, parentId?: string, native = false, hostId = "host"): OverviewNode => ({
+  id, hostId, workspaceId, parentId, managedAgentId: native ? parentId! : id, kind: native ? "provider-subagent" : "agent", label: id, state: native ? "working" : "idle", attention: false,
 });
 function model(projectCounts = [2, 1, 0], children = 0): OverviewModel {
   const workspaces = projectCounts.flatMap((count, project) => Array.from({ length: count }, (_, index) => ({
-    id: `w${project}:${index}`, projectId: `raw${project}`, name: `Workspace ${project} ${index} with a readable title`, projectName: `Project ${project}`, agentIds: [] as string[],
+    id: `w${project}:${index}`, hostId: "host", projectId: `raw${project}`,
+    projectDisplayId: `p${project}`, name: `Workspace ${project} ${index} with a readable title`, projectName: `Project ${project}`,
+    agentIds: [] as string[],
   })));
   const nodes = workspaces.map(workspace => node(`a:${workspace.id}`, workspace.id));
   if (workspaces[0]) for (let index = 0; index < children; index++) nodes.push(node(`native:${index}`, workspaces[0].id, nodes[0]!.id, true));
-  return { hostId: "host", revision: 1, connection: "connected", events: [], edges: [],
-    readiness: { projects: true, workspaces: true, agents: true }, nodes, workspaces,
-    projects: projectCounts.map((_, index) => ({ id: `p${index}`, projectId: `raw${index}`, name: `Project ${index}`,
+  return { hosts: [{ id: "host", label: "Host", connection: "connected", readiness: { projects: true, workspaces: true, agents: true }, freshness: "current" }],
+    revision: 1, events: [], edges: [], nodes, workspaces,
+    projects: projectCounts.map((_, index) => ({ id: `p${index}`, hostId: "host", projectId: `raw${index}`, name: `Project ${index}`,
       workspaceIds: workspaces.filter(workspace => workspace.projectId === `raw${index}`).map(workspace => workspace.id) })),
   };
 }
@@ -147,14 +150,35 @@ describe("project-root layout", () => {
     expect(parents.get("missing")).toBe("w0:0");
     expect(Object.fromEntries(parentMap([...value.nodes.slice(0, 4)].reverse(), "w0:0"))).toEqual(Object.fromEntries(parents));
     const result = new StableLayout().update(value, 1200, 800);
-    expect(result.projects.some(project => project.id === BACKGROUND_GROUP && project.background)).toBe(true); valid(result);
+    expect(result.projects.some(project => project.id === unassignedScopeId("host") && project.background)).toBe(true); valid(result);
   });
   it("does not merge ownership for unresolved distinct workspaces", () => {
     const value = model([0]);
     value.nodes = [node("unknown-a", "missing-a"), node("unknown-b", "missing-b", "unknown-a")];
     const result = new StableLayout().update(value, 1200, 800);
-    const background = result.projects.find(project => project.id === BACKGROUND_GROUP)!;
-    expect(background.parents.get("unknown-b")).toBe(BACKGROUND_GROUP);
+    const background = result.projects.find(project => project.id === unassignedScopeId("host"))!;
+    expect(background.parents.get("unknown-b")).toBe(unassignedScopeId("host"));
+    valid(result);
+  });
+  it("keeps each host's unassigned branches in separate roots", () => {
+    const value = model([0]);
+    const first = { id: "one:workspace:shared", hostId: "one", projectId: "raw", projectDisplayId: null,
+      name: "Shared one", projectName: "Project", agentIds: [] as string[] };
+    const second = { id: "two:workspace:shared", hostId: "two", projectId: "raw", projectDisplayId: null,
+      name: "Shared two", projectName: "Project", agentIds: [] as string[] };
+    value.projects = [];
+    value.workspaces = [first, second];
+    value.nodes = [
+      node("one:agent:orphan", null, undefined, false, "one"),
+      node("two:agent:orphan", null, undefined, false, "two"),
+    ];
+    value.hosts = [
+      { id: "one", label: "One", connection: "connected", readiness: { projects: true, workspaces: true, agents: true } },
+      { id: "two", label: "Two", connection: "connected", readiness: { projects: true, workspaces: true, agents: true } },
+    ];
+    const result = new StableLayout().update(value, 1200, 800);
+    expect(result.projects.filter(project => project.background).map(project => project.id))
+      .toEqual([unassignedScopeId("one"), unassignedScopeId("two")]);
     valid(result);
   });
   it("does not compact other project anchors after a project disappears", () => {

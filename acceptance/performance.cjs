@@ -57,7 +57,8 @@ const percentile = (values, fraction) => {
         frameIntervalMs: { median: percentile(intervals, 0.5), p95: percentile(intervals, 0.95), maximum: Math.max(0, ...intervals) },
         mainThreadMsPerSecond: (after.TaskDuration - before.TaskDuration) * 1000 / elapsed,
         scriptMsPerSecond: (after.ScriptDuration - before.ScriptDuration) * 1000 / elapsed,
-        layoutBuilds: telemetry.layoutBuilds, resources: await page.evaluate(() => window.overviewTest.resourceEvidence()) };
+        layoutBuilds: telemetry.layoutBuilds, overlayPositions: telemetry.overlayPositions,
+        overlayFinishes: telemetry.overlayFinishes, resources: await page.evaluate(() => window.overviewTest.resourceEvidence()) };
     }
     for (const stage of ['loadProjects', 'loadWorkspaces', 'loadManaged', 'loadNative']) await page.evaluate(name => window.overviewTest[name](), stage);
     await page.waitForTimeout(1500);
@@ -68,11 +69,28 @@ const percentile = (values, fraction) => {
       await page.waitForTimeout(500);
       results.push(await sample(`active-grid-${enabled ? 'on' : 'off'}`));
     }
+    // Separate from the matched no-event baseline: exercise feeds, ownership
+    // pulses, bounded previews and event-driven model publication together.
+    await page.evaluate(() => {
+      window.overviewWorkload = setInterval(() => window.overviewTest.activity(), 1100);
+    });
+    results.push(await sample('active-streaming', 6000));
+    await page.evaluate(() => { clearInterval(window.overviewWorkload); delete window.overviewWorkload; });
     await page.screenshot({ path: `${output}/hardware-light.png` });
     const selections = [];
     for (let index = 0; index < 5; index++) {
+      // Exercise a real pointer move/click. Locator.click waits for animated
+      // geometry to become stable before moving the pointer, which measures
+      // that automation wait instead of the renderer's hover/selection response.
+      const target = page.locator('[data-overview-id="a0-0"]');
+      const initial = await target.boundingBox();
+      assert.ok(initial);
+      await page.mouse.move(initial.x + initial.width / 2, initial.y + initial.height / 2);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const box = await target.boundingBox();
+      assert.ok(box);
       const start = Date.now();
-      await page.locator('[data-overview-id="a0-0"]').click();
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
       await page.waitForFunction(() => window.overviewTest.state.selected === 'a0-0');
       selections.push(Date.now() - start);
       await page.keyboard.press('Escape');
@@ -86,16 +104,17 @@ const percentile = (values, fraction) => {
     results.push(await sample('quiet-clouds'));
     await page.evaluate(() => window.overviewTest.empty());
     await page.waitForTimeout(100);
-    results.push(await sample('empty-idle', 1000));
+    results.push(await sample('empty-online-room', 1000));
     await page.evaluate(() => window.overviewTest.motion(false));
     await page.waitForTimeout(100);
     results.push(await sample('paused', 1000));
     await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.visibility(false); });
     results.push(await sample('hidden', 1000));
     assert.equal(results.find(item => item.name === 'paused').frames, 0);
-    assert.equal(results.find(item => item.name === 'empty-idle').frames, 0);
+    assert.ok(results.find(item => item.name === 'empty-online-room').framesPerSecond <= 17,
+      'Sparse transit in an empty online room stays on the ambient cadence');
     assert.equal(results.find(item => item.name === 'hidden').frames, 0);
-    assert.ok(results.every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
+    assert.ok(results.filter(item => item.name !== 'active-streaming').every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${output}/performance-results.json`, JSON.stringify({ gpu, viewport: { width: 1516, height: 1100 },
       comparison: 'Matched foreground with background on/off. Off also removes decorative scheduling; CPU metrics include browser work.',

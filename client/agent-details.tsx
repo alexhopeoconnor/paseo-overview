@@ -1,7 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { ScrollView } from "@getpaseo/plugin/client/ui";
 import type { OverviewModel, OverviewNode } from "../shared/model";
-import type { OverviewTheme } from "../shared/renderer";
+import type { AgentTarget, OverviewTheme } from "../shared/renderer";
 import { agentIdentity, agentRole } from "./identity";
 import { buildOwnershipIndex } from "./normalize";
 import { statusColour, statusLabel } from "./status";
@@ -11,7 +11,7 @@ interface AgentDetailsProps {
   node: OverviewNode;
   theme: OverviewTheme;
   onClose(): void;
-  onOpenAgent?: (managedAgentId: string) => void;
+  onOpenAgent?: (target: AgentTarget) => void;
 }
 
 /** Shared content; the browser owns its anchor and the native host owns its modal. */
@@ -21,8 +21,10 @@ export function AgentDetails({ model, node, theme, onClose, onOpenAgent }: Agent
   const role = agentRole(node.id, ownership, agents);
   const parentId = ownership.parentByNode.get(node.id);
   const parent = parentId ? agents.get(parentId) : undefined;
-  const workspace = model.workspaces.find(item => item.id === node.workspaceId);
-  const project = model.projects.find(item => item.projectId === workspace?.projectId);
+  const workspace = model.workspaces.find(item => item.id === node.workspaceId && item.hostId === node.hostId);
+  const project = model.projects.find(item => item.id === workspace?.projectDisplayId)
+    ?? model.projects.find(item => item.hostId === node.hostId && item.projectId === workspace?.projectId);
+  const host = model.hosts.find(item => item.id === node.hostId);
   const activity = model.events.filter(event => event.nodeId === node.id && (event.preview || event.text)).slice(-2).reverse();
   const delegations = model.edges.filter(edge => edge.kind === "delegation" && (edge.source === node.id || edge.target === node.id));
   const identity = agentIdentity(node.id);
@@ -42,7 +44,7 @@ export function AgentDetails({ model, node, theme, onClose, onOpenAgent }: Agent
     {parent ? <Text selectable numberOfLines={2} accessibilityLabel={`Subagent of ${parent.label}`} style={[styles.detail, { color: theme.muted }]}>Subagent of {agentIdentity(parent.id).emoji} {parent.label}</Text> : null}
     <View style={styles.context}>
       <Text selectable style={[styles.detail, { color: theme.foreground }]}>{project?.name ?? "Unassigned"}</Text>
-      <Text selectable style={[styles.detail, { color: theme.muted }]}>{workspace?.name ?? "No workspace"}</Text>
+      <Text selectable style={[styles.detail, { color: theme.muted }]}>{workspace?.name ?? "No workspace"}{model.hosts.length > 1 && host ? ` · ${host.label}` : ""}</Text>
     </View>
     {activity.map(event => <View key={event.id} style={[styles.event, { borderLeftColor: theme.border }]}>
       {event.preview ? <><Text style={[styles.detail, { color: theme.foreground, fontWeight: "600" }]}>{event.preview.title}</Text>{event.preview.detail ? <Text selectable numberOfLines={3} style={[styles.detail, { color: theme.muted }]}>{event.preview.detail}</Text> : null}</> : <Text selectable numberOfLines={3} style={[styles.detail, { color: theme.foreground }]}>{event.text}</Text>}
@@ -53,7 +55,7 @@ export function AgentDetails({ model, node, theme, onClose, onOpenAgent }: Agent
       : node.rosterFreshness === "stale" ? <Text style={[styles.detail, { color: theme.muted }]}>Native subagent coverage is last known; refresh unavailable.</Text>
         : node.rosterAvailability === "not_resident" ? <Text style={[styles.detail, { color: theme.muted }]}>Native subagents unavailable while this agent is unloaded.</Text>
           : node.rosterAvailability === "unknown" ? <Text style={[styles.detail, { color: theme.muted }]}>Native subagent coverage unavailable.</Text> : null}
-    {onOpenAgent ? <Pressable testID="overview-open-chat" accessibilityRole="button" onPress={() => onOpenAgent(node.managedAgentId)} style={[styles.open, { borderColor: theme.border }]}>
+    {onOpenAgent ? <Pressable testID="overview-open-chat" accessibilityRole="button" onPress={() => onOpenAgent({ hostId: node.hostId, agentId: node.managedAgentId })} style={[styles.open, { borderColor: theme.border }]}>
       <Text style={{ color: selection, fontSize: 13, fontWeight: "600" }}>Open chat →</Text>
     </Pressable> : null}
   </ScrollView>;

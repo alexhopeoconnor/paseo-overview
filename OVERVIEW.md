@@ -1,6 +1,10 @@
 # Overview
 
-See where agents are working across your projects and workspaces.
+See where agents are working across your hosts, projects and workspaces.
+
+Use the **All hosts** and **All projects** selectors to narrow the view. Offline
+hosts remain listed and retain their last known graph; other hosts keep updating.
+The toolbar menus open over the graph without reducing its available space.
 
 Every live project is a root with its current icon, including empty projects.
 Actual workspaces, agents and available subagents branch beneath it. Dashed
@@ -9,7 +13,7 @@ connections show delegation without changing ownership.
 Click a project or workspace to focus its graph. Agents use stable animal emoji
 nodes: rounded tiles for workspace-level agents and smaller diamond backings for
 subagents. Select one for a floating details card and a highlighted ownership
-path. **Open chat** deliberately returns to the normal Paseo chat. Escape or a
+path. **Open chat** opens the normal Paseo chat on that agent's owning host. Escape or a
 background click closes details first, then returns to the full view. Arrow keys
 navigate relationships; browser zoom works and the graph has no wheel zoom.
 
@@ -32,20 +36,23 @@ a second, rather than displaying each token. Preview updates do not create work.
 Unfocused projects rise proportionally with recent owned activity while quiet
 neighbours recede modestly. Centres stay fixed, geometry limits growth and
 inspection holds the graph steady. A perspective floor and back wall provide a
-stable room behind the graphs. Sparse binary feeds follow fresh activity toward
-faint project particle clouds, which brighten briefly on arrival. These effects
-summarise activity and never create additional work or replay missed events.
+stable room behind the graphs. Soft geometric clouds drift behind active graphs
+and gently bend the nearby grid. Small binary heads with longer light trails
+follow grid lines across both surfaces. Activity feeds brighten their cloud on
+arrival; a few decorative streams simply cross the grid. These effects never
+create additional work or replay missed events.
 
 **Appearance** offers Follow Paseo, Light or Dark for Overview, plus Animated,
 Static or Off for the browser background. The full Appearance settings under
 **Settings → Plugins → Overview** also control depth strength, activity response
-and background speed. Preferences are saved per host and shared across clients.
+and background speed. Preferences are saved on the Overview installation's host and shared across
+clients; selecting another host does not change their owner.
 A local theme choice does not change the rest of Paseo. Turning the background
 off keeps graph animations available; turning depth off still permits focus.
 
 **Pause motion** freezes all graph and background animation while status and
 readable previews continue. Reduced motion uses a static background. Hidden tabs
-and disconnection stop background animation. If background rendering fails, it is
+and a view with no connected hosts stop background animation. If background rendering fails, it is
 removed independently and the graph remains usable.
 
 Phones start with collapsed project roots. Tap into projects and workspaces,

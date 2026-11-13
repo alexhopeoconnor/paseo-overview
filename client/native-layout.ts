@@ -1,16 +1,17 @@
 import type { OverviewModel, OverviewNode } from "../shared/model";
 import { buildOwnershipIndex } from "./normalize";
 import { hasError, needsInput } from "./status";
-import { UNASSIGNED_SCOPE_ID, type OverviewScope } from "../shared/presentation";
+import { unassignedScopeId, type OverviewScope } from "../shared/presentation";
+import { hostForDisplayId } from "../shared/hosts";
 import { collapseLabel, inactiveGroups, type CollapseOptions, type InactiveGroup } from "./collapse";
 import { agentRole, type AgentRole } from "./identity";
 import { nodeAppearance } from "./appearance";
 
-export const NATIVE_UNASSIGNED = UNASSIGNED_SCOPE_ID;
+export const nativeUnassignedScope = (hostId: string): OverviewScope => ({ kind: "unassigned", id: unassignedScopeId(hostId) });
 export type NativeFocus = OverviewScope;
 export interface NativeRect { x: number; y: number; width: number; height: number }
 export interface NativeGraphNode {
-  id: string; kind: "project" | "workspace" | "agent" | "provider-subagent" | "completed-group" | "unassigned";
+  id: string; hostId: string; kind: "project" | "workspace" | "agent" | "provider-subagent" | "completed-group" | "unassigned";
   label: string; iconUrl?: string; projectId?: string; workspaceId?: string; parentId?: string;
   memberIds?: readonly string[];
   role?: AgentRole;
@@ -111,23 +112,28 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
   const viewport = Math.max(240, Math.floor(viewportWidth || 360));
   const ownership = buildOwnershipIndex(model);
   const agents = new Map(model.nodes.map(node => [node.id, node]));
+  const hosts = new Map(model.hosts.map(host => [host.id, host]));
   const projects = new Map(model.projects.map(project => [project.id, project]));
   const workspaces = new Map(model.workspaces.map(workspace => [workspace.id, workspace]));
   const unknownWorkspaces = model.workspaces.filter(workspace => !ownership.projectByNode.has(workspace.id)).sort(byId);
   const orphans = model.nodes.filter(node => !node.workspaceId || !workspaces.has(node.workspaceId)).sort(byId);
-  const hasUnassigned = unknownWorkspaces.length > 0 || orphans.length > 0;
-  const valid = !requested || requested.kind === "project" && projects.has(requested.id) || requested.kind === "workspace" && workspaces.has(requested.id) || requested.kind === "unassigned" && hasUnassigned;
+  const unassignedHosts = new Set([...unknownWorkspaces.map(workspace => workspace.hostId), ...orphans.map(node => node.hostId)]);
+  const requestedUnassignedHost = requested?.kind === "unassigned" ? hostForDisplayId(requested.id) : undefined;
+  const valid = !requested || requested.kind === "project" && projects.has(requested.id)
+    || requested.kind === "workspace" && workspaces.has(requested.id)
+    || requested.kind === "unassigned" && !!requestedUnassignedHost && unassignedHosts.has(requestedUnassignedHost);
   const focus = valid ? requested : null;
   const projectDefinition = (id: string): Definition => {
     const project = projects.get(id)!;
-    return { id, kind: "project", label: project.name, iconUrl: project.iconUrl, projectId: id,
+    return { id, hostId: project.hostId, kind: "project", label: project.name, iconUrl: project.iconUrl, projectId: id,
       activityIds: model.nodes.filter(node => ownership.projectByNode.get(node.id) === id).map(node => node.id).sort() };
   };
-  const unassignedDefinition = (): Definition => ({ id: NATIVE_UNASSIGNED, kind: "unassigned", label: "Unassigned",
-    activityIds: model.nodes.filter(node => !ownership.projectByNode.has(node.id)).map(node => node.id).sort() });
+  const unassignedDefinition = (hostId: string): Definition => ({ id: unassignedScopeId(hostId), hostId, kind: "unassigned",
+    label: unassignedHosts.size > 1 ? `${hosts.get(hostId)?.label ?? hostId} · Unassigned` : "Unassigned",
+    activityIds: model.nodes.filter(node => node.hostId === hostId && !ownership.projectByNode.has(node.id)).map(node => node.id).sort() });
   const workspaceDefinition = (id: string, parentId: string): Definition => {
     const workspace = workspaces.get(id)!;
-    return { id, kind: "workspace", label: workspace.name, workspaceId: id, parentId, projectId: ownership.projectByNode.get(id),
+    return { id, hostId: workspace.hostId, kind: "workspace", label: workspace.name, workspaceId: id, parentId, projectId: ownership.projectByNode.get(id),
       activityIds: model.nodes.filter(node => node.workspaceId === id).map(node => node.id).sort() };
   };
   const agentTrees = (parent: Definition, candidates: readonly OverviewNode[]): TreeEntry[] => {
@@ -153,13 +159,13 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
       for (const child of siblings) {
         if (visited.has(child.id) || collapsed.hidden.has(child.id)) continue;
         visited.add(child.id);
-        const definition: Definition = { id: child.id, kind: child.kind, label: child.label, parentId: owner.id,
+        const definition: Definition = { id: child.id, hostId: child.hostId, kind: child.kind, label: child.label, parentId: owner.id,
           role: agentRole(child.id, ownership, agents), inactiveGroup: byParent.get(child.id),
           projectId: owner.projectId, workspaceId: child.workspaceId ?? undefined, activityIds: collect(child.id).sort() };
         result.push({ definition, children: visit(definition) });
       }
       const group = byParent.get(owner.id);
-      if (group && !group.expanded) result.push({ definition: { id: group.id, kind: "completed-group", label: `${group.memberIds.length} inactive`, parentId: owner.id,
+      if (group && !group.expanded) result.push({ definition: { id: group.id, hostId: owner.hostId, kind: "completed-group", label: `${group.memberIds.length} inactive`, parentId: owner.id,
         projectId: owner.projectId, workspaceId: owner.workspaceId, memberIds: group.memberIds, inactiveGroup: group, activityIds: group.memberIds }, children: [] });
       return result.sort((a, b) => a.definition.id.localeCompare(b.definition.id));
     };
@@ -168,7 +174,7 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
 
   if (!focus) {
     const definitions = model.projects.slice().sort(byId).map(project => projectDefinition(project.id));
-    if (hasUnassigned) definitions.push(unassignedDefinition());
+    for (const hostId of [...unassignedHosts].sort()) definitions.push(unassignedDefinition(hostId));
     const columns = Math.max(1, Math.min(4, Math.floor(viewport / 172)));
     const cell = viewport / columns;
     const nodes = definitions.map((definition, index) => positioned(definition, cell * (index % columns + 0.5), 24 + Math.floor(index / columns) * 174));
@@ -176,7 +182,9 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
   }
 
   const projectId = focus.kind === "project" ? focus.id : focus.kind === "workspace" ? ownership.projectByNode.get(focus.id) : undefined;
-  const definition = projectId ? projectDefinition(projectId) : unassignedDefinition();
+  const focusHost = focus.kind === "unassigned" ? hostForDisplayId(focus.id)
+    : focus.kind === "workspace" ? workspaces.get(focus.id)?.hostId : undefined;
+  const definition = projectId ? projectDefinition(projectId) : unassignedDefinition(focusHost!);
   if (focus.kind === "project") {
     const selected = model.workspaces.filter(workspace => ownership.projectByNode.get(workspace.id) === focus.id).sort(byId);
     const columns = viewport >= 344 ? 2 : 1;
@@ -200,7 +208,8 @@ export function nativeGraphLayout(model: OverviewModel, requested: NativeFocus, 
     const workspace = workspaceDefinition(focus.id, definition.id);
     root.children.push({ definition: workspace, children: agentTrees(workspace, model.nodes.filter(node => node.workspaceId === focus.id)) });
   } else {
-    root.children.push(...unknownWorkspaces.map(workspace => ({ definition: workspaceDefinition(workspace.id, definition.id), children: [] })), ...agentTrees(definition, orphans));
+    root.children.push(...unknownWorkspaces.filter(workspace => workspace.hostId === definition.hostId).map(workspace => ({ definition: workspaceDefinition(workspace.id, definition.id), children: [] })),
+      ...agentTrees(definition, orphans.filter(node => node.hostId === definition.hostId)));
     root.children.sort((a, b) => a.definition.id.localeCompare(b.definition.id));
   }
   const spans = new Map<string, number>(), heights: number[] = [];

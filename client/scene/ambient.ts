@@ -18,7 +18,8 @@ interface ShaderDiagnostics {
 
 export interface AmbientGrid {
   advanceTime(elapsedSeconds: number, moving: boolean): void;
-  updateProjects(projects: readonly ProjectSpatialPresentation[]): void;
+  updateProjects(projects: readonly ProjectSpatialPresentation[], online?: boolean): void;
+  clearProjects(projectIds: ReadonlySet<string>): void;
   setAppearance(value: OverviewAppearance): void;
   admitActivity(projectId: string): void;
   clearTransient(): void;
@@ -37,12 +38,16 @@ export class ProceduralAmbientGrid implements AmbientGrid {
   private readonly clouds: ProjectParticleClouds;
   private readonly streams: EnergyStreams;
   private appearance: OverviewAppearance = { ...DEFAULT_APPEARANCE };
+  private theme: OverviewTheme;
   private projects: ProjectSpatialPresentation[] = [];
+  private online = true;
+  private pixelRatio = 1;
   private readonly validatedMaterials = new WeakMap<THREE.Material, number>();
   private disposed = false;
   private failed = false;
 
   constructor(_foregroundScene: THREE.Scene, private readonly renderer: THREE.WebGLRenderer, theme: OverviewTheme) {
+    this.theme = theme;
     this.backgroundScene.name = "overview-background";
     this.room = new PerspectiveRoom(this.backgroundScene, this.projection, theme);
     this.clouds = new ProjectParticleClouds(this.backgroundScene, this.projection, this.room, theme);
@@ -68,12 +73,21 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     this.streams.advance(seconds, enabled, (projectId, energy) => this.clouds.arrive(projectId, energy));
   }
 
-  updateProjects(projects: readonly ProjectSpatialPresentation[]): void {
+  updateProjects(projects: readonly ProjectSpatialPresentation[], online = true): void {
     if (this.failed || this.disposed) return;
+    this.online = online;
     this.projects = projects.map(project => ({ ...project, screenCentre: { ...project.screenCentre }, screenBounds: { ...project.screenBounds } }));
+    this.streams.setOnline(online);
     if (this.appearance.background === "off") return;
-    this.clouds.updateProjects(this.projects);
+    this.clouds.updateProjects(this.projects, online);
     this.streams.updateProjects(this.projects, this.room);
+  }
+
+  clearProjects(projectIds: ReadonlySet<string>): void {
+    if (this.failed || this.disposed || projectIds.size === 0) return;
+    if (this.appearance.background === "off") return;
+    this.clouds.clearProjects(projectIds);
+    this.streams.clearProjects(projectIds);
   }
 
   setAppearance(value: OverviewAppearance): void {
@@ -83,24 +97,32 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     this.appearance = { ...value };
     this.streams.setSpeed(appearancePolicy(value).backgroundRate);
     if (wasOff && value.background !== "off") {
-      this.clouds.updateProjects(this.projects);
+      this.room.resize(this.pixelRatio);
+      this.room.updateTheme(this.theme);
+      this.clouds.updateTheme(this.theme);
+      this.streams.updateTheme(this.theme);
+      this.clouds.resize(this.pixelRatio);
+      this.clouds.updateProjects(this.projects, this.online);
       this.streams.updateProjects(this.projects, this.room);
     }
   }
 
   admitActivity(projectId: string): void {
     if (this.failed || this.disposed || this.appearance.background !== "animated") return;
+    const project = this.projects.find(project => project.projectId === projectId);
+    if (!project || !this.online || project.live === false || project.visibility <= 0) return;
     this.streams.admit(projectId);
   }
 
   clearTransient(): void {
-    if (this.failed || this.disposed) return;
+    if (this.failed || this.disposed || this.appearance.background === "off") return;
     this.streams.clear();
     this.clouds.clearTransient();
   }
 
   updateTheme(theme: OverviewTheme): void {
-    if (this.failed || this.disposed) return;
+    this.theme = theme;
+    if (this.failed || this.disposed || this.appearance.background === "off") return;
     this.room.updateTheme(theme);
     this.clouds.updateTheme(theme);
     this.streams.updateTheme(theme);
@@ -108,9 +130,11 @@ export class ProceduralAmbientGrid implements AmbientGrid {
 
   resize(width: number, height: number, pixelRatio: number): void {
     if (this.failed || this.disposed) return;
-    this.projection.resize(width, height, pixelRatio);
-    this.room.resize(pixelRatio);
-    this.clouds.resize(pixelRatio);
+    this.pixelRatio = Math.max(1, Number.isFinite(pixelRatio) ? pixelRatio : 1);
+    this.projection.resize(width, height, this.pixelRatio);
+    if (this.appearance.background === "off") return;
+    this.room.resize(this.pixelRatio);
+    this.clouds.resize(this.pixelRatio);
     // Existing routes use the same new projection without resetting travel.
     this.streams.updateProjects(this.projects, this.room);
   }
@@ -173,7 +197,8 @@ export class ProceduralAmbientGrid implements AmbientGrid {
   }
 
   isAnimating(): boolean {
-    return !this.failed && !this.disposed && this.appearance.background === "animated" && this.projects.length > 0;
+    return !this.failed && !this.disposed && this.appearance.background === "animated" && this.online &&
+      (this.clouds.isAnimating() || this.streams.isAnimating());
   }
 
   dispose(): void {

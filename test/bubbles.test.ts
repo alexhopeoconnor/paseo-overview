@@ -3,14 +3,30 @@ import { BubbleStore, bubbleText } from "../client/bubbles";
 import type { OverviewEvent, OverviewNode } from "../shared/model";
 
 const node = (id: string, workspaceId: string): OverviewNode => ({
-  id, workspaceId, kind: "agent", managedAgentId: id, label: id, state: "working", attention: false,
+  hostId: "host", id, workspaceId, kind: "agent", managedAgentId: id, label: id, state: "working", attention: false,
 });
 
 describe("activity bubbles", () => {
+  it("clears only a disconnected host and isolates equal preview source keys", () => {
+    const a = { ...node("a:agent:same", "a:workspace:w"), hostId: "a" };
+    const b = { ...node("b:agent:same", "b:workspace:w"), hostId: "b" };
+    const nodes = new Map([a, b].map(item => [item.id, item]));
+    const store = new BubbleStore();
+    const events: OverviewEvent[] = [a, b].map(item => ({ hostId: item.hostId, id: `${item.hostId}:event:1`,
+      nodeId: item.id, sourceKey: "message:1", kind: "message", text: "Same response", timestamp: 1000 }));
+    store.ingest(events, nodes, 1000);
+    store.hold(a.id, true); store.hold(b.id, true);
+    expect(store.current(1000)).toHaveLength(2);
+    store.clearNodes(new Set([a.id]));
+    store.discard([events[0]!], 2000);
+    expect(store.current(8000).map(item => item.nodeId)).toEqual([b.id]);
+    store.ingest([events[0]!], nodes, 8000);
+    expect(store.current(8000).map(item => item.nodeId)).toEqual([b.id]);
+  });
   it("bounds global/workspace count and prioritises attention", () => {
     const nodes = new Map([node("a", "w1"), node("b", "w1"), node("c", "w1"), node("d", "w2")].map((item) => [item.id, item]));
     const store = new BubbleStore();
-    const events: OverviewEvent[] = [...nodes.keys()].map((id) => ({ id, nodeId: id, kind: id === "a" ? "attention" : "message", text: id, timestamp: 1000 }));
+    const events: OverviewEvent[] = [...nodes.keys()].map((id) => ({ hostId: "host", id, nodeId: id, kind: id === "a" ? "attention" : "message", text: id, timestamp: 1000 }));
     store.ingest(events, nodes, 1000);
     const shown = store.current(1000);
     expect(shown).toHaveLength(3);
@@ -21,7 +37,7 @@ describe("activity bubbles", () => {
   it("coalesces streaming text without duplicate models extending expiry", () => {
     const nodes = new Map([["a", node("a", "w1")]]);
     const store = new BubbleStore();
-    const event: OverviewEvent = { id: "stream", nodeId: "a", kind: "message", text: "Started", timestamp: 1000 };
+    const event: OverviewEvent = { hostId: "host", id: "stream", nodeId: "a", kind: "message", text: "Started", timestamp: 1000 };
     store.ingest([event], nodes, 1000);
     store.ingest([event], nodes, 5000);
     expect(store.current(7000)).toEqual([]);
@@ -38,7 +54,7 @@ describe("activity bubbles", () => {
   it("holds an inspected bubble, releases it, and does not replay after hiding", () => {
     const nodes = new Map([["a", node("a", "w1")]]);
     const store = new BubbleStore();
-    const event: OverviewEvent = { id: "tool", nodeId: "a", kind: "tool", text: "Reading the files", timestamp: 1000 };
+    const event: OverviewEvent = { hostId: "host", id: "tool", nodeId: "a", kind: "tool", text: "Reading the files", timestamp: 1000 };
     store.ingest([event], nodes, 1000);
     store.hold("a", true);
     expect(store.current(8000)).toHaveLength(1);
@@ -60,7 +76,7 @@ describe("activity bubbles", () => {
   it("does not replay events observed while hidden or disconnected", () => {
     const nodes = new Map([["a", node("a", "w1")]]);
     const store = new BubbleStore();
-    const event: OverviewEvent = { id: "hidden", nodeId: "a", kind: "tool", text: "Past hidden activity", timestamp: 1000 };
+    const event: OverviewEvent = { hostId: "host", id: "hidden", nodeId: "a", kind: "tool", text: "Past hidden activity", timestamp: 1000 };
     store.discard([event], 1000);
     store.ingest([event], nodes, 1500);
     expect(store.current(1500)).toEqual([]);
@@ -71,7 +87,7 @@ describe("activity bubbles", () => {
   it("keeps structured previews and does not renew an unchanged stream prefix", () => {
     const nodes = new Map([["a", node("a", "w1")]]);
     const store = new BubbleStore();
-    const event: OverviewEvent = { id: "one", sourceKey: "message1", nodeId: "a", kind: "message", timestamp: 1000,
+    const event: OverviewEvent = { hostId: "host", id: "one", sourceKey: "message1", nodeId: "a", kind: "message", timestamp: 1000,
       preview: { title: "Assistant update", detail: "Same bounded prefix…", truncated: true } };
     store.ingest([event], nodes, 1000);
     expect(store.current(1000)[0].preview).toEqual(event.preview);
@@ -89,7 +105,7 @@ describe("activity bubbles", () => {
 
   it("never presents cached non-current state as fresh activity", () => {
     const store = new BubbleStore();
-    const event: OverviewEvent = { id: "pending", nodeId: "a", kind: "message", text: "Pending", timestamp: 1000 };
+    const event: OverviewEvent = { hostId: "host", id: "pending", nodeId: "a", kind: "message", text: "Pending", timestamp: 1000 };
     store.ingest([event], new Map([["a", { ...node("a", "w1"), freshness: "refreshing" }]]), 1000);
     expect(store.current(1000)).toEqual([]);
     store.ingest([event], new Map([["a", node("a", "w1")]]), 1500);

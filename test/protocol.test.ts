@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readProjectIcon, readRoster } from "../server/api";
+import { createOverviewReader } from "../client/host-api";
+import type { OverviewApi } from "../client/transport";
 import { rosterSchema } from "../shared/rpc";
 
 describe("read-only host bridge", () => {
@@ -57,5 +59,33 @@ describe("packaged acceptance expectations", () => {
     ["OVERVIEW_EXPECT_CHAT_PREVIEW_SETTINGS", "optional"],
   ])("rejects an invalid %s", (key, value) => {
     expect(() => readExpectation({ ...baseline, [key]: value })).toThrow();
+  });
+});
+
+describe("per-host reader adapter", () => {
+  it("calls the borrowed host's own passive APIs without local RPC", async () => {
+    const icon = { data: "aWNvbg==", mimeType: "image/png" };
+    const snapshot = { parentAgentId: "remote-agent", availability: "resident" as const,
+      cursor: { generation: "g", revision: 1 }, subagents: [] };
+    const getIcon = vi.fn(async () => icon);
+    const passive = vi.fn(async () => snapshot);
+    const ref = vi.fn(() => ({ providerSubagents: { snapshot: passive } }));
+    const api = { projects: { getIcon }, agents: { ref } } as unknown as OverviewApi;
+    const reader = createOverviewReader(api);
+    await expect(reader.readIcon("remote-project")).resolves.toEqual(icon);
+    await expect(reader.readRoster("remote-agent")).resolves.toEqual(snapshot);
+    expect(getIcon).toHaveBeenCalledWith("remote-project");
+    expect(ref).toHaveBeenCalledWith("remote-agent");
+    expect(passive).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an old host without invoking loading fallbacks", async () => {
+    const refresh = vi.fn(), listProviderSubagents = vi.fn();
+    const api = { projects: {}, agents: { ref: () => ({ refresh, listProviderSubagents }) } } as unknown as OverviewApi;
+    const reader = createOverviewReader(api);
+    await expect(reader.readIcon("project")).rejects.toThrow("project-icon API update");
+    await expect(reader.readRoster("agent")).rejects.toThrow("passive Overview subagent API update");
+    expect(refresh).not.toHaveBeenCalled();
+    expect(listProviderSubagents).not.toHaveBeenCalled();
   });
 });

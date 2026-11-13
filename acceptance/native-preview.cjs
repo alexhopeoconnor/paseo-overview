@@ -21,9 +21,47 @@ const inspect = page => page.evaluate(() => {
 });
 (async () => {
   await fs.mkdir(output, { recursive: true });
-  await build({ entryPoints: ['/plugin/acceptance/native-entry.tsx'], bundle: true, format: 'iife', platform: 'browser', target: 'es2020', outfile: `${output}/native-preview.js`, jsx: 'automatic', define: { global: 'globalThis' }, alias: {
+  const uiStub = [
+    'import React from "react";',
+    'import { createPortal } from "react-dom";',
+    'import { Pressable, ScrollView as NativeScrollView, Text, View } from "react-native";',
+    'const h = React.createElement;',
+    'export function Icon({ name }) { return h(View, { accessibilityLabel: `Icon ${name}` }); }',
+    'export function ScrollView(props) { return h(NativeScrollView, props); }',
+    'export function Modal({ title, open, onOpenChange, children }) {',
+    '  if (!open) return null;',
+    '  const surface = h(View, { testID: `overview-modal:${title}`, style: { position: "fixed", top: 0, right: 0, bottom: 0, left: 0, zIndex: 10000, backgroundColor: "#00000055", alignItems: "center", justifyContent: "center", padding: 16 } },',
+    '    h(View, { style: { backgroundColor: "#ffffff", borderRadius: 16, padding: 12, width: "100%", maxWidth: 420, maxHeight: "82%", overflow: "hidden", gap: 8 } },',
+    '      h(View, { style: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 } },',
+    '        h(Text, { style: { fontWeight: "600", fontSize: 16 } }, title),',
+    '        h(Pressable, { testID: "overview-modal-close", accessibilityRole: "button", onPress: () => onOpenChange(false), style: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" } }, h(Text, null, "Close"))),',
+    '      children));',
+    '  return createPortal(surface, document.body);',
+    '}',
+    'Modal.Content = function Content({ children }) { return h(NativeScrollView, { style: { maxHeight: "58vh" } }, children); };',
+  ].join('\n');
+  const stubPlugin = { name: 'overview-preview-ui-stub', setup(build) {
+    build.onResolve({ filter: /^@getpaseo\/plugin\/client\/ui$/ }, () => ({ path: 'ui', namespace: 'stub' }));
+    build.onLoad({ filter: /^ui$/, namespace: 'stub' }, () => ({ contents: uiStub, loader: 'js' }));
+  } };
+  const sharedBuild = { bundle: true, format: 'iife', platform: 'browser', target: 'es2020', jsx: 'automatic', define: { global: 'globalThis' }, alias: {
     'react-native': '/fork/node_modules/react-native-web', react: '/fork/node_modules/react', 'react-dom': '/fork/node_modules/react-dom',
-  } });
+  }, plugins: [stubPlugin] };
+  await build({ ...sharedBuild, entryPoints: ['/plugin/acceptance/native-entry.tsx'], outfile: `${output}/native-preview.js` });
+  const multiSource = `
+import { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { NativeHarness } from "/plugin/acceptance/native-harness";
+import { lightTheme, multiHostFixture } from "/plugin/acceptance/fixture";
+function App() {
+  const [state, setState] = useState(null);
+  (window as any).multiPreview = { state };
+  return <NativeHarness model={multiHostFixture()} theme={lightTheme} compact={false}
+    hostChoices={[{ id: "first", label: "first host", status: "online" }, { id: "second", label: "second host", status: "online" }, { id: "offline", label: "Offline host", status: "offline" }]}
+    onState={value => { (window as any).multiPreview.state = value; setState(value); }} />;
+}
+createRoot(document.getElementById("app")!).render(<App />);`;
+  await build({ ...sharedBuild, stdin: { contents: multiSource, resolveDir: '/plugin', loader: 'tsx' }, outfile: `${output}/native-multi.js` });
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const errors = [];
   let page;
@@ -36,6 +74,7 @@ const inspect = page => page.evaluate(() => {
     const initial = await inspect(page);
     assert.equal(initial.nodes.length, 7);
     assert.equal(initial.title, 'All projects');
+    assert.equal(await page.getByTestId('overview-host-filter').innerText(), 'All hosts');
     assert.ok(initial.header.height < 120);
     assert.ok(!/Tap a project to explore/i.test(await page.locator('body').innerText()));
     await page.screenshot({ path: `${output}/phone-roots.png` });
@@ -45,7 +84,8 @@ const inspect = page => page.evaluate(() => {
     await page.getByTestId('overview-appearance').tap();
     await page.getByTestId('overview-appearance-panel').waitFor({ state: 'visible' });
     for (const id of ['overview-appearance', 'overview-theme-paseo', 'overview-theme-light', 'overview-theme-dark',
-      'overview-background-animated', 'overview-background-static', 'overview-background-off']) {
+      'overview-background-animated', 'overview-background-static', 'overview-background-off',
+      'overview-host-filter', 'overview-project-filter', 'overview-motion']) {
       const box = await page.getByTestId(id).boundingBox();
       assert.ok(box && box.width >= 44 && box.height >= 44, `${id} keeps a 44px touch target`);
     }
@@ -69,7 +109,7 @@ const inspect = page => page.evaluate(() => {
     assert.equal(restored.title, initial.title);
     assert.equal(restored.counts, initial.counts);
     assert.equal(restored.screenBackground, 'rgb(247, 248, 251)');
-    await page.getByTestId('overview-appearance').tap();
+    await page.getByTestId('overview-modal-close').tap();
     await page.getByTestId('overview-appearance-panel').waitFor({ state: 'hidden' });
 
     await page.getByTestId('overview-native-project:p0').tap();
@@ -82,7 +122,7 @@ const inspect = page => page.evaluate(() => {
     await page.getByTestId('overview-native-agent:a0-0').waitFor({ state: 'visible' });
     await page.waitForTimeout(150);
     const workspace = await inspect(page);
-    assert.equal(workspace.title, 'Deployment and release review');
+    assert.equal(workspace.title, 'Application › Deployment and release review');
     assert.match(workspace.counts, /5 agents/);
     assert.match(workspace.nodes.find(node => node.id === 'overview-native-agent:a0-3').label, /Subagent\./);
     const primary = workspace.nodes.find(node => node.id === 'overview-native-agent:a0-0');
@@ -119,7 +159,8 @@ const inspect = page => page.evaluate(() => {
     await page.getByTestId('overview-native-agent:n0').tap();
     assert.equal(await page.evaluate(() => window.nativePreview.state.selected), 'n0');
     await page.screenshot({ path: `${output}/phone-selected.png` });
-    await page.getByTestId('overview-all-projects').tap();
+    await page.getByTestId('overview-project-filter').tap();
+    await page.getByTestId('overview-project-option-all').tap();
     await page.waitForTimeout(100);
     const reset = await inspect(page);
     assert.equal(reset.title, 'All projects');
@@ -128,9 +169,43 @@ const inspect = page => page.evaluate(() => {
     await page.getByTestId('overview-motion').tap();
     assert.equal(await page.getByTestId('overview-motion').getAttribute('aria-label'), 'Resume animation');
     await page.screenshot({ path: `${output}/phone-reset.png` });
+
+    // Desktop toolbar: complete host list versus filtered graph, duplicate
+    // project disambiguation, absolute menus that do not resize the graph,
+    // keyboard navigation and Escape/focus restoration.
+    const desktop = await browser.newPage({ viewport: { width: 980, height: 800 } });
+    desktop.on('pageerror', error => errors.push(error.message));
+    await desktop.setContent('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;font-family:Arial,sans-serif;background:#f7f8fb}#app{height:100%;display:flex;flex-direction:column}</style><div id="app"></div></html>');
+    await desktop.addScriptTag({ path: `${output}/native-multi.js` });
+    await desktop.getByTestId('overview-native-project:first:project:same').waitFor({ state: 'visible' });
+    assert.ok(await desktop.getByTestId('overview-native-project:second:project:same').isVisible());
+    assert.match(await desktop.getByTestId('overview-host-status:offline').innerText(), /Offline host: offline/);
+    const headerBefore = await desktop.getByTestId('overview-header').boundingBox();
+    const graphBefore = await desktop.getByTestId('overview-native-graph').boundingBox();
+    await desktop.getByTestId('overview-project-filter').click();
+    assert.match(await desktop.getByTestId('overview-project-option-first:project:same').innerText(), /Shared name[\s\S]*first host/);
+    assert.match(await desktop.getByTestId('overview-project-option-second:project:same').innerText(), /Shared name[\s\S]*second host/);
+    const headerOpen = await desktop.getByTestId('overview-header').boundingBox();
+    const graphOpen = await desktop.getByTestId('overview-native-graph').boundingBox();
+    assert.equal(headerOpen.height, headerBefore.height, 'desktop menu does not expand the header');
+    assert.equal(graphOpen.height, graphBefore.height, 'desktop menu does not resize the graph');
+    await desktop.keyboard.press('Escape');
+    await desktop.getByTestId('overview-project-option-all').waitFor({ state: 'hidden' });
+    assert.equal(await desktop.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'overview-project-filter');
+    await desktop.getByTestId('overview-host-filter').click();
+    await desktop.keyboard.press('ArrowDown');
+    await desktop.keyboard.press('ArrowDown');
+    await desktop.keyboard.press('Enter');
+    await desktop.getByTestId('overview-native-project:second:project:same').waitFor({ state: 'visible' });
+    await desktop.waitForFunction(() => !document.querySelector('[data-testid="overview-native-project:first:project:same"]'));
+    assert.equal(await desktop.getByTestId('overview-host-filter').innerText(), 'second host');
+    await desktop.getByTestId('overview-project-filter').click();
+    await desktop.getByTestId('overview-project-option-second:project:same').click();
+    await desktop.waitForFunction(() => document.querySelector('[data-testid="overview-scope-title"]')?.textContent === 'Shared name');
+    await desktop.close();
     assert.deepEqual(errors, []);
     await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', inactiveLabel, terminalLabels: ['Closed', 'Canceled'], appearance: { dark: darkHeader, restored }, initial, project, workspace, reset, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, quick appearance theme/background without scope loss, 44px appearance targets, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion/collapse, 44px targets, parent selection, reset and motion controls' }));
+    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header, host/project pickers with duplicate-name disambiguation, offline host isolation, absolute desktop menus with keyboard/focus restoration, quick appearance theme/background without scope loss, 44px touch targets, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion/collapse, parent selection, reset and motion controls' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/native-preview-failure.png` }).catch(() => {});

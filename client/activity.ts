@@ -1,5 +1,5 @@
-import type { OverviewEvent, OverviewModel, OwnershipIndex } from "../shared/model";
-import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import type { OverviewEvent, OverviewHostSnapshot, OverviewModel, OwnershipIndex } from "../shared/model";
+import { unassignedScopeId } from "../shared/presentation";
 import { hasError, needsInput } from "./status";
 
 export function decay(value: number, elapsedSeconds: number, halfLifeSeconds = 5): number {
@@ -21,12 +21,20 @@ export class ActivityTracker {
   private readonly seen = new Map<string, number>();
   private readonly scores = new Map<string, Score>();
 
+  private remember(id: string, now: number): void {
+    this.seen.set(id, now);
+    for (const [seenId, at] of this.seen) {
+      if (now - at > 120_000 || this.seen.size > 4096) this.seen.delete(seenId);
+      else break;
+    }
+  }
+
   ingest(events: readonly OverviewEvent[], now: number): OverviewEvent[] {
     const fresh: OverviewEvent[] = [];
     for (const event of events) {
       if (event.displayOnly) continue;
       if (this.seen.has(event.id)) continue;
-      this.seen.set(event.id, now);
+      this.remember(event.id, now);
       if (!Number.isFinite(event.timestamp) || event.timestamp < now - 15_000 || event.timestamp > now + 5_000) continue;
       const previous = this.scores.get(event.nodeId);
       const value = previous ? decay(previous.value, (now - previous.at) / 1000) : 0;
@@ -42,6 +50,18 @@ export class ActivityTracker {
     return fresh;
   }
 
+  /**
+   * Marks events as already observed without scoring them. A host returning
+   * from an offline or filtered interval cannot replay historical work.
+   */
+  discard(events: readonly OverviewEvent[], now: number): void {
+    for (const event of events) if (!this.seen.has(event.id)) this.remember(event.id, now);
+    for (const [id, at] of this.seen) {
+      if (now - at > 120_000 || this.seen.size > 4096) this.seen.delete(id);
+      else break;
+    }
+  }
+
   score(nodeId: string, now: number): number {
     const score = this.scores.get(nodeId);
     return score ? decay(score.value, (now - score.at) / 1000) : 0;
@@ -49,6 +69,11 @@ export class ActivityTracker {
 
   prune(nodeIds: ReadonlySet<string>): void {
     for (const id of this.scores.keys()) if (!nodeIds.has(id)) this.scores.delete(id);
+  }
+
+  /** Clears one disconnected or removed host's scores while retaining seen IDs. */
+  clearNodes(nodeIds: ReadonlySet<string>): void {
+    for (const id of nodeIds) this.scores.delete(id);
   }
 
   clear(): void {
@@ -87,7 +112,7 @@ function addActivity(total: OwnedActivity, contribution: OwnedActivity): void {
  * Includes each agent's own total so its halo can reflect its child branch too.
  */
 export function aggregateOwnedActivity(
-  model: OverviewModel,
+  model: OverviewModel | OverviewHostSnapshot,
   ownership: OwnershipIndex,
   tracker: Pick<ActivityTracker, "score">,
   now: number,
@@ -97,12 +122,12 @@ export function aggregateOwnedActivity(
   for (const workspace of model.workspaces) totals.set(workspace.id, emptyActivity());
   const sources = new Map(model.nodes.map(node => [node.id, node]));
   for (const node of sources.values()) totals.set(node.id, emptyActivity());
-  // Match the displayed Unassigned area, including workspaces whose project is
-  // unresolved. It is a presentation aggregate, never a manufactured project.
-  if (model.workspaces.some(workspace => !ownership.projectByNode.has(workspace.id)) ||
-    model.nodes.some(node => !ownership.projectByNode.has(node.id))) {
-    totals.set(UNASSIGNED_SCOPE_ID, emptyActivity());
-  }
+  // Match each host's displayed Unassigned area, including workspaces whose
+  // project is unresolved. It is a presentation aggregate, never a project.
+  const unassignedHosts = new Set<string>();
+  for (const workspace of model.workspaces) if (!ownership.projectByNode.has(workspace.id)) unassignedHosts.add(workspace.hostId);
+  for (const node of sources.values()) if (!ownership.projectByNode.has(node.id)) unassignedHosts.add(node.hostId);
+  for (const hostId of unassignedHosts) totals.set(unassignedScopeId(hostId), emptyActivity());
   for (const node of sources.values()) {
     const error = hasError(node);
     const waiting = !error && needsInput(node);
@@ -125,8 +150,9 @@ export function aggregateOwnedActivity(
       addActivity(total, contribution);
       owner = ownership.parentByNode.get(owner);
     }
-    if (!ownership.projectByNode.has(node.id) && !visited.has(UNASSIGNED_SCOPE_ID)) {
-      addActivity(totals.get(UNASSIGNED_SCOPE_ID)!, contribution);
+    if (!ownership.projectByNode.has(node.id)) {
+      const unassigned = totals.get(unassignedScopeId(node.hostId));
+      if (unassigned && !visited.has(unassignedScopeId(node.hostId))) addActivity(unassigned, contribution);
     }
   }
   return totals;
@@ -155,6 +181,12 @@ export class PulseLimiter {
     this.lastByNode.set(nodeId, now);
     this.active.push({ nodeId, workspaceId, at: now });
     return true;
+  }
+
+  /** Removes one disconnected or removed host's admission state, leaving others. */
+  clearNodes(nodeIds: ReadonlySet<string>): void {
+    for (const id of nodeIds) this.lastByNode.delete(id);
+    this.active = this.active.filter(pulse => !nodeIds.has(pulse.nodeId));
   }
 
   clear(): void {

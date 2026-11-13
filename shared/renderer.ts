@@ -3,6 +3,7 @@ import type { GroupPreferences, OverviewPresentation, OverviewScope } from "./pr
 import type { OverviewAppearance } from "./settings";
 
 export type OverviewFocus = OverviewScope;
+export interface AgentTarget { hostId: string; agentId: string }
 
 export interface OverviewAnchor { x: number; y: number; width: number; height: number }
 export interface FloatingCardPositioner {
@@ -39,7 +40,7 @@ export interface OverviewMountOptions {
   appearance?: OverviewAppearance;
   onSelect(nodeId: string | null): void;
   onFocus(target: OverviewFocus): void;
-  onOpenAgent(managedAgentId: string): void;
+  onOpenAgent(target: AgentTarget): void;
   onError?(message: string): void;
   onGroupChange?(id: string, expanded: boolean): void;
   onSelectionAnchor?(anchor: OverviewAnchor | null): void;

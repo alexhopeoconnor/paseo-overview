@@ -5,22 +5,22 @@ import type { OverviewModel } from "../shared/model";
 import type { OverviewTheme } from "../shared/renderer";
 import { DEFAULT_APPEARANCE } from "../shared/settings";
 import { canRetainSelection, initialPresentation, parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation, scopedNodes } from "../client/presentation";
-import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import { unassignedScopeId } from "../shared/presentation";
 import { gridPalette, isDarkBackground } from "../client/appearance";
 import { ProceduralAmbientGrid } from "../client/scene/ambient";
 import { AMBIENT_PHASE_PERIOD_SECONDS } from "../client/scene/ambient-shader";
 import { ProjectParticleClouds, CLOUD_GLOBAL_POINT_BUDGET, cloudPointBufferBudget, cloudPointsPerProject, cloudSeed } from "../client/scene/clouds";
 import { OverviewProjection, ROOM_VERTICAL_FOV_DEGREES } from "../client/scene/projection";
 import { PerspectiveRoom, ROOM_SEAM_SCREEN_FRACTION, ROOM_WALL_VIEW_DEPTH } from "../client/scene/room";
+import { ROOM_FIELD_MAX_CSS_DISPLACEMENT } from "../client/scene/room-field";
 import { NEUTRAL_VIEW_DISTANCE, type ProjectSpatialPresentation } from "../client/scene/spatial";
 
 function fixture(): OverviewModel {
   return {
-    hostId: "presentation-test", connection: "connected", revision: 1,
-    readiness: { projects: true, workspaces: true, agents: true },
-    projects: [{ id: "project", projectId: "raw", name: "Project", workspaceIds: ["workspace"] }],
-    workspaces: [{ id: "workspace", projectId: "raw", name: "Workspace", projectName: "Project", agentIds: ["agent"] }],
-    nodes: [{ id: "agent", kind: "agent", managedAgentId: "raw-agent", workspaceId: "workspace", state: "working", attention: false, label: "Agent" }],
+    hosts: [{ id: "presentation-test", label: "Test", connection: "connected", readiness: { projects: true, workspaces: true, agents: true } }], revision: 1,
+    projects: [{ id: "project", hostId: "presentation-test", projectId: "raw", name: "Project", workspaceIds: ["workspace"] }],
+    workspaces: [{ id: "workspace", hostId: "presentation-test", projectId: "raw", projectDisplayId: "project", name: "Workspace", projectName: "Project", agentIds: ["agent"] }],
+    nodes: [{ id: "agent", hostId: "presentation-test", kind: "agent", managedAgentId: "raw-agent", workspaceId: "workspace", state: "working", attention: false, label: "Agent" }],
     edges: [], events: [],
   };
 }
@@ -39,11 +39,11 @@ describe("shared Overview presentation", () => {
   });
 
   it("retains references during refresh and removes them only on an authoritative snapshot", () => {
-    const selected = { ...initialPresentation(), selectedId: "agent", scope: { kind: "workspace" as const, id: "workspace" } };
+    const selected = { ...initialPresentation(), selectedId: "presentation-test:agent:agent", scope: { kind: "workspace" as const, id: "presentation-test:workspace:workspace" } };
     const model = fixture();
     model.nodes = []; model.workspaces = [];
-    expect(reconcilePresentation(selected, { ...model, freshness: "refreshing" })).toBe(selected);
-    expect(reconcilePresentation(selected, { ...model, readiness: { ...model.readiness, agents: false } })).toBe(selected);
+    expect(reconcilePresentation(selected, { ...model, hosts: model.hosts.map(host => ({ ...host, freshness: "refreshing" })) })).toBe(selected);
+    expect(reconcilePresentation(selected, { ...model, hosts: model.hosts.map(host => ({ ...host, readiness: { ...host.readiness, agents: false } })) })).toBe(selected);
     const current = reconcilePresentation(selected, model);
     expect(current.selectedId).toBeNull(); expect(current.scope).toBeNull();
   });
@@ -54,7 +54,7 @@ describe("shared Overview presentation", () => {
     const restored = recallPresentation("session-test");
     expect(restored).toEqual(state);
     expect(restored.groups).not.toBe(state.groups);
-    expect(Object.keys(restored).sort()).toEqual(["groups", "motion", "scope", "selectedId"]);
+    expect(Object.keys(restored).sort()).toEqual(["groups", "hostFilter", "motion", "scope", "selectedId"]);
     expect(recallPresentation("unrelated-test").groups.size).toBe(0);
   });
 
@@ -79,7 +79,7 @@ describe("shared Overview presentation", () => {
     const model = fixture();
     model.nodes = [...model.nodes, { ...model.nodes[0]!, id: "unassigned", workspaceId: null }];
     expect(scopedNodes(model, { kind: "project", id: "project" }).map(node => node.id)).toEqual(["agent"]);
-    expect(scopedNodes(model, { kind: "unassigned", id: UNASSIGNED_SCOPE_ID }).map(node => node.id)).toEqual(["unassigned"]);
+    expect(scopedNodes(model, { kind: "unassigned", id: unassignedScopeId("presentation-test") }).map(node => node.id)).toEqual(["unassigned"]);
     expect(parentScope({ kind: "workspace", id: "workspace" }, model)).toEqual({ kind: "project", id: "project" });
     expect(parentScope({ kind: "project", id: "project" }, model)).toBeNull();
   });
@@ -130,6 +130,10 @@ function spatialProject(projectId: string, values: Partial<ProjectSpatialPresent
   };
 }
 
+function cloudState(clouds: ProjectParticleClouds, index = 0): Float32Array {
+  return clouds.stateData.subarray(index * 16, index * 16 + 16);
+}
+
 function shaderHarness() {
   const rendered: THREE.Scene[] = [];
   const renderer = {
@@ -157,16 +161,23 @@ describe("perspective room and projection", () => {
     expect(projection.screenPoint(projection.projectPoint({ x: 90, y: 700 }, 1400)).x).toBeCloseTo(90, 8);
   });
 
-  it("joins one real floor and wall at an exact quiet seam with finite overscan", () => {
+  it("joins one tessellated floor and wall at an exact quiet seam with finite overscan", () => {
     const projection = new OverviewProjection(1200, 800, 1);
     const scene = new THREE.Scene(), room = new PerspectiveRoom(scene, projection, gridTheme);
     const positions = room.mesh.geometry.getAttribute("position");
     const coordinates = room.mesh.geometry.getAttribute("aRoomCoord");
-    for (const [a, b] of [[2, 5], [3, 4]]) {
-      for (let axis = 0; axis < 3; axis++) expect(positions.getComponent(a, axis)).toBe(positions.getComponent(b, axis));
-      expect(coordinates.getY(a)).toBe(0);
-    }
+    expect(positions.count).toBeGreaterThan(100);
+    expect(room.mesh.geometry.index!.count % 6).toBe(0);
     expect([...positions.array, ...coordinates.array].every(Number.isFinite)).toBe(true);
+    const surfaces = room.mesh.geometry.getAttribute("aRoomSurface");
+    let wallTop = Number.POSITIVE_INFINITY, floorNear = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < positions.count; index++) {
+      const screen = projection.screenPoint({ x: positions.getX(index), y: positions.getY(index), z: positions.getZ(index) });
+      if (surfaces.getX(index) > 0.5) wallTop = Math.min(wallTop, screen.y);
+      else floorNear = Math.max(floorNear, screen.y);
+    }
+    expect(wallTop).toBeLessThan(0);
+    expect(floorNear).toBeGreaterThan(projection.height);
     expect(room.mesh.userData.overviewAmbientGrid).toBe(true);
     expect(room.diagnostics).toMatchObject({ wallViewDepth: ROOM_WALL_VIEW_DEPTH, seamScreenY: 800 * ROOM_SEAM_SCREEN_FRACTION, verticalFovDegrees: ROOM_VERTICAL_FOV_DEGREES });
     expect(room.diagnostics.floorNearViewDepth).toBeGreaterThan(0);
@@ -178,21 +189,103 @@ describe("perspective room and projection", () => {
     room.dispose(); expect(scene.children).toHaveLength(0);
   });
 
-  it("ends cached feed contours at exactly the same projected cloud centre", () => {
+  it("keeps feed contours on the shared grid and dissolves behind each cloud", () => {
     const projection = new OverviewProjection(1200, 800, 1);
     const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
-    const project = spatialProject("project-a", { viewDepth: 1375 });
-    const route = room.feedRoute(project, 8);
-    expect(route).toEqual(room.feedRoute(project, 8));
-    expect(route[route.length - 1]).toEqual(projection.projectPoint(project.screenCentre, project.viewDepth));
-    expect(route.slice(0, -1).every(point => point.z === -ROOM_WALL_VIEW_DEPTH || Math.abs(point.y - room.diagnostics.floorY) < 1e-8)).toBe(true);
-    for (let sequence = 0; sequence < 6; sequence++) {
-      const candidate = room.feedRoute(project, sequence);
-      expect(candidate.every(point => Object.values(point).every(Number.isFinite))).toBe(true);
-      expect(candidate.slice(0, -1).some(point => {
-        const screen = projection.screenPoint(point);
-        return screen.x > 0 && screen.x < projection.width && screen.y > 0 && screen.y < projection.height;
-      })).toBe(true);
+    for (const project of [spatialProject("wall", { viewDepth: 1375 }), spatialProject("floor", { screenCentre: { x: 600, y: 700 } })]) {
+      for (let sequence = 0; sequence < 6; sequence++) {
+        const route = room.feedSurfaceRoute(project, sequence);
+        expect(route).toEqual(room.feedSurfaceRoute(project, sequence));
+        expect(route.every(point => Object.values(point).every(value => typeof value === "string" || Number.isFinite(value)))).toBe(true);
+        expect(route.every(point => Number.isInteger(point.u) && Number.isInteger(point.v))).toBe(true);
+        const destination = route[route.length - 1]!;
+        expect(destination.surface).toBe(project.screenCentre.y < projection.height * ROOM_SEAM_SCREEN_FRACTION ? "wall" : "floor");
+        expect(Number.isInteger(destination.u)).toBe(true);
+        expect(Number.isInteger(destination.v)).toBe(true);
+        const screen = projection.screenPoint(room.baseSurfacePoint(destination));
+        const dx = screen.x - project.screenCentre.x, dy = screen.y - project.screenCentre.y;
+        const radiusX = Math.max(52, Math.abs(project.screenBounds.width) * 0.56);
+        const radiusY = Math.max(46, Math.abs(project.screenBounds.height) * 0.56);
+        expect(dx * dx / (radiusX * radiusX) + dy * dy / (radiusY * radiusY)).toBeLessThanOrEqual(1);
+        const entrance = room.baseSurfacePoint(route[0]!), entranceScreen = projection.screenPoint(entrance);
+        if (route[0]!.surface === "floor") {
+          expect(entrance.z).toBeGreaterThan(-ROOM_WALL_VIEW_DEPTH);
+          expect(entranceScreen.y).toBeGreaterThan(projection.height * ROOM_SEAM_SCREEN_FRACTION);
+        } else {
+          expect(entrance.y).toBeGreaterThan(room.diagnostics.floorY);
+          expect(entranceScreen.y).toBeLessThan(projection.height * ROOM_SEAM_SCREEN_FRACTION);
+        }
+        for (let index = 1; index < route.length; index++) {
+          const before = route[index - 1]!, after = route[index]!;
+          if (before.surface !== after.surface) expect(before.v).toBe(0), expect(after.v).toBe(0), expect(before.u).toBe(after.u);
+          else expect(before.u === after.u || before.v === after.v).toBe(true);
+        }
+      }
+    }
+    for (let sequence = 0; sequence < 4; sequence++) {
+      const route = room.transitSurfaceRoute(sequence);
+      expect(route).toEqual(room.transitSurfaceRoute(sequence));
+      expect(route.every(point => Number.isInteger(point.u) && Number.isInteger(point.v))).toBe(true);
+      expect(route.some(point => point.surface === "floor") && route.some(point => point.surface === "wall")).toBe(true);
+      const first = projection.screenPoint(room.baseSurfacePoint(route[0]!));
+      const last = projection.screenPoint(room.baseSurfacePoint(route[route.length - 1]!));
+      expect(first.x < 0 || first.x > projection.width).toBe(true);
+      expect(last.x < 0 || last.x > projection.width).toBe(true);
+    }
+    room.dispose();
+  });
+
+  it("shares finite bounded triangular warp sampling and caches irrelevant updates", () => {
+    const projection = new OverviewProjection(1200, 800, 1);
+    const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
+    const active = spatialProject("active", { energy: 1 });
+    const revision = room.revision, fieldRevision = room.fieldRevision;
+    expect(room.updateProjects([active])).toBe(true);
+    expect(room.revision).toBe(revision);
+    expect(room.fieldRevision).toBe(fieldRevision + 1);
+    const textureVersion = room.fieldUniforms.uRoomField.value.version;
+    expect(room.updateProjects([{ ...active }])).toBe(false);
+    expect(room.fieldUniforms.uRoomField.value.version).toBe(textureVersion);
+    for (const surface of ["floor", "wall"] as const) {
+      for (const v of surface === "floor" ? [0, 0.4, 2, 5] : [8, 2, 0.4, 0]) {
+        const point = { surface, u: 1.25, v };
+        const base = room.baseSurfacePoint(point), warped = room.warpSurfacePoint(point);
+        expect(Object.values(warped).every(Number.isFinite)).toBe(true);
+        expect(warped.z).toBe(base.z);
+        expect(warped.z).toBeLessThan(0);
+        const before = projection.screenPoint(base), after = projection.screenPoint(warped);
+        expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThanOrEqual(ROOM_FIELD_MAX_CSS_DISPLACEMENT + 0.0001);
+        if (v === 0) expect(warped).toEqual(room.warpSurfacePoint({ surface: surface === "floor" ? "wall" : "floor", u: point.u, v: 0 }));
+      }
+    }
+    room.updateProjects([]);
+    expect(room.warpSurfacePoint({ surface: "wall", u: 1.25, v: 2 })).toEqual(room.baseSurfacePoint({ surface: "wall", u: 1.25, v: 2 }));
+    room.dispose();
+  });
+
+  it("matches interior mesh barycentric warp on both surface orientations", () => {
+    const projection = new OverviewProjection(1200, 800, 1);
+    const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
+    for (const surface of ["floor", "wall"] as const) for (const [fx, fy] of [[0.25, 0.25], [0.8, 0.4]]) {
+      const sample = { surface, u: 1 + fx, v: 2 + fy };
+      const centre = projection.screenPoint(room.baseSurfacePoint(sample));
+      room.updateProjects([spatialProject(`active-${surface}`, { screenCentre: centre, energy: 1 })]);
+      const a = room.warpSurfacePoint({ surface, u: 1, v: 2 });
+      const b = room.warpSurfacePoint({ surface, u: 2, v: 2 });
+      const c = room.warpSurfacePoint({ surface, u: 2, v: 3 });
+      const d = room.warpSurfacePoint({ surface, u: 1, v: 3 });
+      const weights: Array<[typeof a, number]> = surface === "floor"
+        ? [[a, 1 - fx], [b, fx - fy], [c, fy]]
+        : fx + fy <= 1
+          ? [[a, 1 - fx - fy], [b, fx], [d, fy]]
+          : [[d, 1 - fx], [c, fx + fy - 1], [b, 1 - fy]];
+      const expected = weights.reduce((sum, [point, weight]) => ({
+        x: sum.x + point.x * weight, y: sum.y + point.y * weight, z: sum.z + point.z * weight,
+      }), { x: 0, y: 0, z: 0 });
+      const actual = room.warpSurfacePoint(sample);
+      expect(actual.x).toBeCloseTo(expected.x, 6);
+      expect(actual.y).toBeCloseTo(expected.y, 6);
+      expect(actual.z).toBeCloseTo(expected.z, 6);
     }
     room.dispose();
   });
@@ -225,14 +318,13 @@ describe("project particle clouds", () => {
     expect(cloudPointsPerProject(5000)).toBe(0);
     expect(5000 * cloudPointsPerProject(5000)).toBeLessThanOrEqual(cloudPointBufferBudget(5000));
     expect(clouds.points.geometry.getAttribute("position").count).toBe(projects.length * count);
-    expect(clouds.lines.geometry.getAttribute("position").count).toBeGreaterThan(projects.length);
+    expect(clouds.lines.geometry.index!.count).toBeGreaterThan(projects.length);
     expect(projects.map(() => count).every(value => value === count)).toBe(true);
     clouds.advance(0.5, true, 1);
-    const energies = clouds.points.geometry.getAttribute("aCloudEnergy");
-    expect(Math.max(...Array.from({ length: count }, (_, index) => energies.getX(index)))).toBe(0);
+    expect(cloudState(clouds)[7]).toBe(0);
     const activeSlot = projects.map(project => project.projectId).sort().indexOf("project-69");
     expect(activeSlot).toBeGreaterThanOrEqual(0);
-    expect(energies.getX(activeSlot * count)).toBeGreaterThan(0);
+    expect(cloudState(clouds, activeSlot)[7]).toBeGreaterThan(0);
     expect([...clouds.points.geometry.getAttribute("position").array].every(Number.isFinite)).toBe(true);
   });
 
@@ -246,16 +338,18 @@ describe("project particle clouds", () => {
     const positions = clouds.points.geometry.getAttribute("position");
     expect(positions.count).toBe(1);
     expect(positions.count).toBeLessThanOrEqual(cloudPointBufferBudget(count));
-    expect(clouds.lines.geometry.getAttribute("position").count).toBe(0);
+    expect(clouds.lines.geometry.index!.count).toBe(0);
     clouds.advance(0.5, true, 1);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeGreaterThan(0);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeLessThan(1 / CLOUD_GLOBAL_POINT_BUDGET);
+    expect(cloudState(clouds)[7]).toBeGreaterThan(0);
+    expect(cloudState(clouds)[7]).toBeLessThan(1 / CLOUD_GLOBAL_POINT_BUDGET);
     const expectedX = (325 + (count - 1) * 320) / count;
-    expect(projection.screenPoint({ x: positions.getX(0), y: positions.getY(0), z: positions.getZ(0) }).x).toBeCloseTo(expectedX, 4);
-    const before = [...positions.array], geometry = clouds.points.geometry;
+    const centre = { x: cloudState(clouds)[0]!, y: cloudState(clouds)[1]!, z: cloudState(clouds)[2]! };
+    expect(projection.screenPoint(centre).x).toBeCloseTo(expectedX, 4);
+    const before = [...positions.array], stateBefore = [...clouds.stateData], geometry = clouds.points.geometry;
     clouds.updateProjects([...projects].reverse());
     expect(clouds.points.geometry).toBe(geometry);
     expect([...positions.array]).toEqual(before);
+    expect([...clouds.stateData]).toEqual(stateBefore);
     clouds.dispose();
   });
 
@@ -268,42 +362,46 @@ describe("project particle clouds", () => {
     expect(clouds.points.geometry).toBe(geometry);
     expect([...geometry.getAttribute("position").array]).toEqual(before);
     const centre = spatialProject("a", { screenCentre: { x: 340, y: 220 } });
+    const movedSlot = [projects[0]!, centre, projects[2]!].map(project => project.projectId).sort().indexOf("a");
+    const centreBefore = cloudState(clouds, movedSlot)[0]!;
     clouds.updateProjects([projects[0]!, centre, projects[2]!]);
-    const after = [...geometry.getAttribute("position").array];
-    const count = cloudPointsPerProject(3);
-    const movedSlot = [...projects, centre].map(project => project.projectId).sort().indexOf("a") * count;
-    expect(after[movedSlot * 3]! - before[movedSlot * 3]!).toBeCloseTo(20 * NEUTRAL_VIEW_DISTANCE / (440 / (2 * Math.tan(ROOM_VERTICAL_FOV_DEGREES * Math.PI / 360))), 4);
-    for (let index = 0; index < before.length; index++) {
-      if (index < movedSlot * 3 || index >= (movedSlot + count) * 3) expect(after[index]).toBe(before[index]);
-    }
+    expect([...geometry.getAttribute("position").array]).toEqual(before);
+    expect(cloudState(clouds, movedSlot)[0]! - centreBefore).toBeCloseTo(20 * NEUTRAL_VIEW_DISTANCE / (440 / (2 * Math.tan(ROOM_VERTICAL_FOV_DEGREES * Math.PI / 360))), 4);
+    expect(clouds.lines.geometry.getAttribute("position")).toBe(clouds.points.geometry.getAttribute("position"));
+    expect(clouds.volume.geometry).toBe(clouds.points.geometry);
   });
 
   it("freezes fresh sustained energy while paused but allows explicit focus", () => {
     const project = spatialProject("project", { energy: 1 });
     const { clouds } = setup([project]);
     clouds.advance(10, false, 1);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBe(0);
+    expect(cloudState(clouds)[7]!).toBe(0);
     clouds.updateProjects([{ ...project, focused: true }]);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeCloseTo(0.24);
+    expect(cloudState(clouds)[7]!).toBeCloseTo(0.24);
     clouds.advance(0.5, true, 1);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeGreaterThan(0.24);
+    expect(cloudState(clouds)[7]!).toBeGreaterThan(0.24);
     clouds.updateProjects([{ ...project, focused: false, energy: 0 }]);
     clouds.advance(10, false, 1);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeGreaterThan(0.24);
+    expect(cloudState(clouds)[7]!).toBeGreaterThan(0.24);
   });
 
   it("does not upload unchanged GPU attributes for energy refreshed while paused", () => {
     const initial = spatialProject("project", { energy: 0 });
-    const { clouds } = setup([initial]);
+    const { clouds, room } = setup([initial]);
+    const fieldRevision = room.fieldRevision;
     const geometries = [clouds.points.geometry, clouds.lines.geometry];
-    const names = ["position", "aCloudSize", "aCloudEnergy", "aCloudAlpha", "aCloudRim", "aCloudSeed"];
+    const names = ["position", "aCloudIndex", "aCloudSize", "aCloudAlpha", "aCloudRim", "aCloudSeed"];
     const attributes = geometries.flatMap(geometry => names.map(name => geometry.getAttribute(name) as THREE.BufferAttribute));
     const versions = attributes.map(attribute => attribute.version);
     const values = attributes.map(attribute => [...attribute.array]);
+    const stateVersion = clouds.stateTexture.version, stateValues = [...clouds.stateData];
     clouds.updateProjects([{ ...initial, energy: 1 }]);
     clouds.advance(10, false, 1);
     expect(attributes.map(attribute => attribute.version)).toEqual(versions);
     expect(attributes.map(attribute => [...attribute.array])).toEqual(values);
+    expect(clouds.stateTexture.version).toBe(stateVersion);
+    expect([...clouds.stateData]).toEqual(stateValues);
+    expect(room.fieldRevision).toBe(fieldRevision);
     clouds.dispose();
   });
 
@@ -311,13 +409,13 @@ describe("project particle clouds", () => {
     const project = spatialProject("project", { energy: 1 });
     const { clouds } = setup([project]);
     clouds.advance(2, true, 1);
-    const sustained = clouds.points.geometry.getAttribute("aCloudEnergy").getX(0);
+    const sustained = cloudState(clouds)[7]!;
     clouds.arrive("project", 0.4);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeCloseTo(sustained);
+    expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
     clouds.arrive("project", 1);
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBe(1);
+    expect(cloudState(clouds)[7]!).toBe(1);
     clouds.clearTransient();
-    expect(clouds.points.geometry.getAttribute("aCloudEnergy").getX(0)).toBeCloseTo(sustained);
+    expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
   });
 
   it("bounds integrated cloud phase, honors speed, and freezes static time", () => {
@@ -335,24 +433,70 @@ describe("project particle clouds", () => {
     clouds.advance(Infinity, true, 1); clouds.advance(Number.NaN, true, 1);
     expect(phase()).toBe(128.75);
     expect(clouds.lines.material.uniforms.uPhase!.value).toBe(phase());
+    expect(cloudState(clouds)[3]).toBe(phase());
+  });
+
+  it("freezes motion and activity independently for an offline project", () => {
+    const frozen = spatialProject("frozen", { energy: 1, live: false });
+    const live = spatialProject("live", { energy: 1 });
+    const { clouds } = setup([frozen, live]);
+    const frozenSlot = 0, liveSlot = 1;
+    clouds.advance(1, true, 1);
+    expect(cloudState(clouds, frozenSlot)[3]).toBe(0);
+    expect(cloudState(clouds, frozenSlot)[7]).toBe(0);
+    expect(cloudState(clouds, liveSlot)[3]).toBe(1);
+    expect(cloudState(clouds, liveSlot)[7]).toBeGreaterThan(0);
+    clouds.updateProjects([frozen, live], false);
+    clouds.advance(1, true, 1);
+    expect(cloudState(clouds, liveSlot)[3]).toBe(1);
+    expect(clouds.isAnimating()).toBe(false);
+    clouds.dispose();
+  });
+
+  it("retains per-project phase and eased energy through transient host cleanup", () => {
+    const project = spatialProject("project", { energy: 1 });
+    const other = spatialProject("other", { energy: 0.5 });
+    const { clouds } = setup([project, other]);
+    clouds.advance(1, true, 1);
+    const phase = cloudState(clouds, 1)[3]!, otherPhase = cloudState(clouds, 0)[3]!;
+    const energy = cloudState(clouds, 1)[7]!;
+    clouds.arrive("project", 1);
+    expect(cloudState(clouds, 1)[7]).toBe(1);
+    clouds.clearProjects(new Set(["project"]));
+    expect(cloudState(clouds, 1)[3]).toBe(phase);
+    expect(cloudState(clouds, 1)[7]).toBe(energy);
+    expect(cloudState(clouds, 0)[3]).toBe(otherPhase);
+    clouds.updateProjects([{ ...project, live: false }, other]);
+    clouds.advance(1, true, 1);
+    expect(cloudState(clouds, 1)[3]).toBe(phase);
+    clouds.updateProjects([project, other]);
+    clouds.advance(1, true, 1);
+    expect(cloudState(clouds, 1)[3]).toBe(phase + 1);
+    expect(cloudState(clouds, 1)[7]).toBeLessThan(1);
+    clouds.dispose();
   });
 
   it("updates themes and resizes without replacing resource ownership", () => {
     const { clouds, projection } = setup();
-    const points = clouds.points, lines = clouds.lines;
+    const points = clouds.points, lines = clouds.lines, volume = clouds.volume;
     const initialPositions = [...points.geometry.getAttribute("position").array];
     clouds.updateProjects([spatialProject("project", { energy: 1 })]);
     expect([...points.geometry.getAttribute("position").array]).toEqual(initialPositions);
     clouds.updateTheme({ ...gridTheme, background: "#121926" });
+    const palette = gridPalette({ ...gridTheme, background: "#121926" });
     expect(points.material.uniforms.uOpacity!.value).toBe(0.62);
+    expect((points.material.uniforms.uRim!.value as THREE.Color).getHexString()).toBe(new THREE.Color(palette.rim).getHexString());
+    expect((points.material.uniforms.uShade!.value as THREE.Color).getHexString()).toBe(new THREE.Color(palette.shade).getHexString());
     projection.resize(900, 600, 2);
     clouds.resize(2);
-    for (const material of [points.material, lines.material]) {
+    for (const material of [points.material, volume.material, lines.material]) {
       expect(material.uniforms.uPixelRatio!.value).toBe(2);
       expect(material.uniforms.uViewportHeight!.value).toBe(1200);
+      expect(material.uniforms.uCloudStates!.value).toBe(clouds.stateTexture);
     }
+    expect(volume.geometry).toBe(points.geometry);
     clouds.dispose();
-    expect(points.parent).toBeNull(); expect(lines.parent).toBeNull();
+    expect(points.parent).toBeNull(); expect(volume.parent).toBeNull(); expect(lines.parent).toBeNull();
   });
 });
 
@@ -363,6 +507,7 @@ describe("ambient background lifecycle", () => {
     ambient.resize(640, 440, 1); ambient.updateProjects([spatialProject("project")]);
     expect(foreground.children).toHaveLength(0);
     ambient.setAppearance({ ...DEFAULT_APPEARANCE, background: "off" });
+    ambient.updateTheme({ ...gridTheme, background: "#121926" });
     const cloudUpdates = vi.spyOn(ProjectParticleClouds.prototype, "updateProjects");
     const cloudAdvance = vi.spyOn(ProjectParticleClouds.prototype, "advance");
     ambient.updateProjects([spatialProject("replacement")]);
@@ -377,7 +522,7 @@ describe("ambient background lifecycle", () => {
     cloudUpdates.mockRestore(); cloudAdvance.mockRestore();
     ambient.advanceTime(10, true); ambient.renderWithBackgroundFallback(drawForeground);
     expect(rendered[0]!.name).toBe("overview-background"); expect(renderer.clearDepth).toHaveBeenCalledOnce();
-    const clouds = rendered[0]!.children.find(child => child.userData.overviewClouds && child instanceof THREE.Points) as THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
+    const clouds = rendered[0]!.children.find(child => child.name === "overview-project-clouds") as THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
     expect(clouds.material.uniforms.uPhase!.value).toBe(0);
     expect(ambient.isAnimating()).toBe(false);
     ambient.setAppearance({ ...DEFAULT_APPEARANCE, background: "animated", backgroundSpeed: "slow" });

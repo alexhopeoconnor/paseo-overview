@@ -1,21 +1,24 @@
-import type { EventPreview, ObservationFreshness, OverviewEvent, OverviewModel, OverviewReadiness } from "../shared/model";
+import type { EventPreview, ObservationFreshness, OverviewEvent, OverviewHostSnapshot, OverviewReadiness } from "../shared/model";
 import type { AgentRecord, NativeRecord, ProjectIcon, ProjectRecord, RosterSnapshot, RosterUpdate, WorkspaceRecord } from "../shared/observation";
 import { ProjectIcons } from "./icons";
 import { displayId, normalise } from "./normalize";
 import { RosterTracker } from "./rosters";
 import { AssistantPreviewBuffer } from "./assistant-preview";
 import { previewSummary, previewText, timelinePreview } from "./event-preview";
-import { ReadQueue, errorText, observeDirectory, record, type DirectoryChange, type DirectoryPage, type OverviewApi } from "./transport";
+import { createOverviewReader } from "./host-api";
+import { ReadQueue, errorText, observeDirectory, record, type DirectoryChange, type DirectoryPage, type OverviewApi, type ReadGate } from "./transport";
 
 interface Options {
   hostId: string;
   paseo: OverviewApi;
-  readRoster(parentAgentId: string): Promise<RosterSnapshot>;
-  readIcon(projectId: string): Promise<ProjectIcon | null>;
-  onChange(model: OverviewModel): void;
+  readRoster?(parentAgentId: string): Promise<RosterSnapshot>;
+  readIcon?(projectId: string): Promise<ProjectIcon | null>;
+  onChange(model: OverviewHostSnapshot): void;
   onError(message: string): void;
   /** Older phone parsers can strip replay markers; metadata remains safe there. */
   observeActivity?: boolean;
+  /** Shared admission gate so many hosts cannot multiply passive read pressure. */
+  gate?: ReadGate;
 }
 
 type AgentEntry = { agent: AgentRecord; syncSeq?: number };
@@ -33,7 +36,10 @@ function excerpt(value: unknown): string | undefined {
 }
 
 export function createOverviewStore(options: Options) {
-  let connection: OverviewModel["connection"] = "connected";
+  const reader = createOverviewReader(options.paseo);
+  const readRoster = options.readRoster ? (parentAgentId: string) => options.readRoster!(parentAgentId) : reader.readRoster;
+  const readIcon = options.readIcon ? (projectId: string) => options.readIcon!(projectId) : reader.readIcon;
+  let connection: OverviewHostSnapshot["connection"] = "connected";
   let visible = true, started = false, disposed = false, generation = 0, revision = 0, eventSequence = 0;
   let agents: AgentRecord[] = [], workspaces: WorkspaceRecord[] = [], projects: ProjectRecord[] = [];
   let readiness: OverviewReadiness = { projects: false, workspaces: false, agents: false };
@@ -41,8 +47,8 @@ export function createOverviewStore(options: Options) {
     projects: "refreshing", workspaces: "refreshing", agents: "refreshing",
   };
   let events: OverviewEvent[] = [];
-  let current: OverviewModel = { hostId: options.hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { ...readiness }, connection, revision };
-  let lastComplete: OverviewModel | undefined;
+  let current: OverviewHostSnapshot = { hostId: options.hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { ...readiness }, connection, revision };
+  let lastComplete: OverviewHostSnapshot | undefined;
   let cleanups: Array<() => void> = [];
   let queue: ReadQueue | undefined, rosters: RosterTracker | undefined, icons: ProjectIcons | undefined;
   let publishTimer: ReturnType<typeof setTimeout> | undefined, expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -57,8 +63,11 @@ export function createOverviewStore(options: Options) {
   const assistantPreviews = new AssistantPreviewBuffer((nodeId, sourceKey, preview) => {
     if (!active() || options.observeActivity === false) return;
     latestPreviews.delete(nodeId);
-    latestPreviews.set(nodeId, { id: `${generation}:preview:${++eventSequence}`, nodeId, kind: "message",
-      preview, sourceKey, displayOnly: true, timestamp: Date.now() });
+    latestPreviews.set(nodeId, {
+      id: displayId(options.hostId, "preview", String(generation), String(++eventSequence)),
+      hostId: options.hostId, nodeId, kind: "message",
+      preview, sourceKey, displayOnly: true, timestamp: Date.now(),
+    });
     while (latestPreviews.size > 64) latestPreviews.delete(latestPreviews.keys().next().value!);
     schedule();
   });
@@ -130,7 +139,10 @@ export function createOverviewStore(options: Options) {
     return true;
   }
   function recordEvent(nodeId: string, kind: OverviewEvent["kind"], text?: string, preview?: EventPreview, sourceKey?: string) {
-    events.push({ id: `${generation}:${++eventSequence}`, nodeId, kind, text, preview, sourceKey, timestamp: Date.now() });
+    events.push({
+      id: displayId(options.hostId, "event", String(generation), String(++eventSequence)),
+      hostId: options.hostId, nodeId, kind, text, preview, sourceKey, timestamp: Date.now(),
+    });
     events = events.slice(-64); schedule();
   }
   function addEvent(nodeId: string, kind: OverviewEvent["kind"], text: string | undefined, key: string, preview?: EventPreview, sourceKey?: string) {
@@ -282,10 +294,10 @@ export function createOverviewStore(options: Options) {
     readiness = { projects: false, workspaces: false, agents: false };
     directoryFreshness = { projects: "refreshing", workspaces: "refreshing", agents: "refreshing" };
     const alive = () => !disposed && visible && connection === "connected" && generation === run;
-    const ownedQueue = new ReadQueue(4); queue = ownedQueue;
+    const ownedQueue = new ReadQueue(4, options.gate); queue = ownedQueue;
     const failed = (error: unknown) => { if (alive()) report(error); };
     rosters ??= new RosterTracker({
-      queue: ownedQueue, read: options.readRoster,
+      queue: ownedQueue, read: readRoster,
       changed: () => { if (active()) { pruneAssistant(); schedule(); } }, failed: report,
       activity: (parentId: string, child: NativeRecord) => {
         if (!active()) return;
@@ -298,7 +310,7 @@ export function createOverviewStore(options: Options) {
         addEvent(nodeId, kind, title, `${parentId}:${child.id}:${child.updatedAt}:${child.status}`, preview);
       },
     });
-    icons ??= new ProjectIcons({ queue: ownedQueue, read: options.readIcon, changed: () => { if (active()) schedule(); }, failed: report });
+    icons ??= new ProjectIcons({ queue: ownedQueue, read: readIcon, changed: () => { if (active()) schedule(); }, failed: report });
     rosters.suspend();
     icons.suspend();
     const observeTask = async () => {
@@ -326,7 +338,7 @@ export function createOverviewStore(options: Options) {
         setDirectoryFreshness("projects", "refreshing");
         loadingProjects = true; projectOverflow = false; projectBuffer = seed;
         try {
-          const response = await options.paseo.projects.list({ sync: {} });
+          const response = await ownedQueue.run(() => options.paseo.projects.list({ sync: {} }));
           if (!alive() || token !== projectToken) return;
           if (projectOverflow || projectBuffer.some(change => change.generation && response.sync?.generation && change.generation !== response.sync.generation)) {
             return await loadProjects();
@@ -382,6 +394,7 @@ export function createOverviewStore(options: Options) {
             sort: [{ key: "created_at", direction: "asc" }],
             page: { limit: 200, ...(cursor ? { cursor } : {}) }, ...(subscribe ? { subscribe: {} } : {}),
           }) as unknown as DirectoryPage<AgentEntry>,
+          run: work => ownedQueue.run(work),
           id: entry => entry.agent.id, version: entry => entry.syncSeq,
           change: message => {
             const msg = record(message), data = record(msg?.payload);
@@ -401,8 +414,9 @@ export function createOverviewStore(options: Options) {
         register(observeDirectory<WorkspaceRecord & { syncSeq?: number }>({
           read: async (cursor, subscribe) => await options.paseo.workspaces.list({
             includeBackground: true, sync: {}, sort: [{ key: "project_id", direction: "asc" }],
-            page: { limit: 200, ...(cursor ? { cursor } : {}) }, ...(subscribe ? { subscribe: {} } : {}),
-          }) as unknown as DirectoryPage<WorkspaceRecord & { syncSeq?: number }>,
+            page: { limit: 200, ...(cursor ? { cursor } : {}) }, ...(subscribe ? { subscribe: {} } : {}) },
+          ) as unknown as DirectoryPage<WorkspaceRecord & { syncSeq?: number }>,
+          run: work => ownedQueue.run(work),
           id: workspace => workspace.id, version: workspace => workspace.syncSeq,
           change: message => {
             const msg = record(message), data = record(msg?.payload);
@@ -429,7 +443,7 @@ export function createOverviewStore(options: Options) {
       if (disposed) return;
       started = true; await observe();
     },
-    setConnection(state: OverviewModel["connection"]): void {
+    setConnection(state: OverviewHostSnapshot["connection"]): void {
       if (disposed || connection === state) return;
       connection = state; halt(); publish();
       if (state === "connected" && started && visible) void observe().catch(() => {});

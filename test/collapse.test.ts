@@ -5,11 +5,11 @@ import { buildOwnershipIndex } from "../client/normalize";
 
 function fixture(): OverviewModel {
   const node = (id: string, parentId?: string, state: OverviewNode["state"] = "finished"): OverviewNode => ({
-    id, parentId, workspaceId: "w", managedAgentId: id, kind: "agent", label: id, state, attention: false,
+    hostId: "h", id, parentId, workspaceId: "w", managedAgentId: id, kind: "agent", label: id, state, attention: false,
   });
-  return { hostId: "h", connection: "connected", revision: 1, readiness: { projects: true, workspaces: true, agents: true }, events: [], edges: [],
-    projects: [{ id: "p", projectId: "raw", name: "Project", workspaceIds: ["w"] }],
-    workspaces: [{ id: "w", projectId: "raw", projectName: "Project", name: "Workspace", agentIds: [] }],
+  return { hosts: [{ id: "h", label: "Host", connection: "connected", readiness: { projects: true, workspaces: true, agents: true } }], revision: 1, events: [], edges: [],
+    projects: [{ hostId: "h", id: "p", projectId: "raw", name: "Project", workspaceIds: ["w"] }],
+    workspaces: [{ hostId: "h", projectDisplayId: "p", id: "w", projectId: "raw", projectName: "Project", name: "Workspace", agentIds: [] }],
     nodes: [node("parent"), node("other-top"), node("a", "parent"), node("b", "parent", "idle"), node("grandchild", "a")] };
 }
 const compute = (model: OverviewModel, options = {}) => inactiveGroups(model, buildOwnershipIndex(model).parentByNode, options);

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOverviewStore } from "../client/store";
-import { observeDirectory, type DirectoryChange, type DirectoryPage, type Observation, type OverviewApi } from "../client/transport";
+import { createOverviewHosts } from "../client/hosts";
+import { observeDirectory, ReadGate, ReadQueue, type DirectoryChange, type DirectoryPage, type Observation, type OverviewApi } from "../client/transport";
+import { isHostAuthoritative, isHostLive } from "../shared/hosts";
 import type { AgentRecord, NativeRecord, ProjectIcon, RosterSnapshot } from "../shared/observation";
 import { BubbleStore } from "../client/bubbles";
 import { ActivityTracker } from "../client/activity";
@@ -589,5 +591,247 @@ describe("directory resynchronization", () => {
     retry.resolve(snapshot("recovered", "new", 2)); await flush();
     expect(test.changed).toHaveBeenLastCalledWith([{ id: "item", name: "recovered" }]);
     expect(test.freshness).toHaveBeenLastCalledWith("current");
+  });
+});
+
+describe("multi-host coordinator", () => {
+  function coordinatorHost(hostId: string, input: {
+    title?: string; directory?: FakeObservation<any>; workspace?: FakeObservation<any>; events?: FakeObservation<unknown>;
+  } = {}) {
+    const title = input.title ?? `Agent ${hostId}`;
+    const directory = input.directory ?? new FakeObservation({ entries: [{
+      agent: { id: "same", workspaceId: "same", provider: "codex", title, status: "idle" } as AgentRecord,
+    }], pageInfo });
+    const workspace = input.workspace ?? new FakeObservation({ entries: [{
+      id: "same", projectId: "project", name: `Workspace ${hostId}`, projectDisplayName: `Project ${hostId}`,
+    }], pageInfo });
+    const events = input.events ?? new FakeObservation<unknown>({});
+    const timelineHandlers = new Map<string, (value: unknown) => void>();
+    const timelineReleases = new Map<string, ReturnType<typeof vi.fn>>();
+    const roster: RosterSnapshot = { parentAgentId: "same", availability: "resident",
+      cursor: { generation: hostId, revision: 1 }, subagents: [] };
+    const api = {
+      observeEvents: vi.fn(() => events),
+      agents: {
+        list: vi.fn(async () => ({ ...(await directory.ready), subscription: directory })),
+        ref: vi.fn((id: string) => {
+          const subscribe = vi.fn((handler: (value: unknown) => void) => {
+            timelineHandlers.set(id, handler);
+            const release = vi.fn(async () => { if (timelineHandlers.get(id) === handler) timelineHandlers.delete(id); });
+            timelineReleases.set(id, release);
+            return Object.assign(() => { void release(); }, { ready: Promise.resolve(), release });
+          });
+          return { timeline: { subscribe, refetch: vi.fn() },
+            providerSubagents: { snapshot: vi.fn(async () => roster) } };
+        }),
+      },
+      workspaces: { list: vi.fn(async () => ({ ...(await workspace.ready), subscription: workspace })) },
+      projects: {
+        list: vi.fn(async () => ({ projects: [{ projectId: "project", projectDisplayName: `Project ${hostId}`, projectIconRevision: "one" }] })),
+        getIcon: vi.fn(async () => null),
+      },
+    };
+    return { api: api as unknown as OverviewApi, observations: [directory, workspace, events],
+      directory, workspace, events, timelineHandlers, timelineReleases };
+  }
+
+  it("isolates duplicate raw IDs and event sequences across two hosts", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const changed = vi.fn(), failed = vi.fn();
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true,
+      onChange: changed, onError: failed,
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+
+    expect(hosts.model.hosts.map(host => host.id)).toEqual(["one", "two"]);
+    expect(hosts.model.projects.map(project => project.id)).toEqual(["one:project:project", "two:project:project"]);
+    expect(hosts.model.nodes.map(node => node.id)).toEqual(["one:agent:same", "two:agent:same"]);
+    expect(hosts.model.nodes.map(node => node.label)).toEqual(["Agent one", "Agent two"]);
+    expect(hosts.model.nodes.every(node => node.workspaceId === `${node.hostId}:workspace:same`)).toBe(true);
+    expect(isHostAuthoritative(hosts.model, "one")).toBe(true);
+    expect(isHostAuthoritative(hosts.model, "two")).toBe(true);
+
+    expect(one.timelineHandlers.has("same")).toBe(true);
+    expect(two.timelineHandlers.has("same")).toBe(true);
+    one.timelineHandlers.get("same")?.({ timestamp: "same", event: { type: "turn_started", turnId: "same" } });
+    two.timelineHandlers.get("same")?.({ timestamp: "same", event: { type: "turn_started", turnId: "same" } });
+    await vi.advanceTimersByTimeAsync(50);
+    const events = hosts.model.events;
+    expect(events).toHaveLength(2);
+    expect(new Set(events.map(event => event.id)).size).toBe(2);
+    expect(events.map(event => event.hostId).sort()).toEqual(["one", "two"]);
+    expect(events.every(event => event.nodeId.startsWith(`${event.hostId}:agent:`))).toBe(true);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it("filters hosts without replaying their retained events or entities", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    two.timelineHandlers.get("same")?.({ timestamp: "before", event: { type: "turn_started", turnId: "before" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events.some(event => event.hostId === "two")).toBe(true);
+
+    hosts.setFilter("one");
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts.map(host => host.id)).toEqual(["one"]);
+    expect(hosts.model.nodes.map(node => node.hostId)).toEqual(["one"]);
+    expect(hosts.model.projects.map(project => project.hostId)).toEqual(["one"]);
+    expect(two.observations.every(observation => observation.release.mock.calls.length > 0)).toBe(true);
+
+    hosts.setFilter(null);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts.map(host => host.id)).toEqual(["one", "two"]);
+    expect(hosts.model.nodes.map(node => node.hostId)).toEqual(["one", "two"]);
+    expect(hosts.model.events.filter(event => event.hostId === "two")).toEqual([]);
+  });
+
+  it("retains a coherent snapshot while a replacement borrowed API starts reading", async () => {
+    const first = coordinatorHost("one", { title: "Old agent" });
+    let current = first.api;
+    const directories = deferred<{ entries: Array<{ agent: AgentRecord }>; pageInfo: typeof pageInfo }>();
+    const workspaces = deferred<{ entries: Array<{ id: string; projectId: string; name: string; projectDisplayName: string }>; pageInfo: typeof pageInfo }>();
+    const replacement = coordinatorHost("one", {
+      title: "New agent", directory: new FakeObservation(directories.promise), workspace: new FakeObservation(workspaces.promise),
+    });
+    const hosts = createOverviewHosts({
+      acquire: () => current, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.nodes[0]?.label).toBe("Old agent");
+    const oldHandler = first.timelineHandlers.get("same");
+    const before = hosts.model.events.length;
+
+    current = replacement.api;
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    // The replacement has not finished its directory reads, but the previous
+    // coherent graph remains visible instead of collapsing to an empty host.
+    expect(hosts.model.projects.map(project => project.id)).toEqual(["one:project:project"]);
+    expect(hosts.model.nodes[0]).toMatchObject({ id: "one:agent:same", label: "Old agent" });
+    expect(first.observations.every(observation => observation.release.mock.calls.length > 0)).toBe(true);
+    oldHandler?.({ timestamp: "late", event: { type: "turn_started", turnId: "late" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events).toHaveLength(before);
+
+    directories.resolve({ entries: [{ agent: {
+      id: "same", workspaceId: "same", provider: "codex", title: "New agent", status: "idle",
+    } }], pageInfo });
+    workspaces.resolve({ entries: [{ id: "same", projectId: "project", name: "Workspace one", projectDisplayName: "Project one" }], pageInfo });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.nodes[0]?.label).toBe("New agent");
+    expect(isHostAuthoritative(hosts.model, "one")).toBe(true);
+  });
+
+  it("marks an obsolete borrowed store stale on reacquire failure and reconnects safely", async () => {
+    const fixture = coordinatorHost("one");
+    let fail = false;
+    const failed = vi.fn();
+    const hosts = createOverviewHosts({
+      acquire: () => { if (fail) throw new Error("Borrowed host unavailable"); return fixture.api; },
+      observeActivity: false, onChange: vi.fn(), onError: failed,
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(isHostLive(hosts.model, "one")).toBe(true);
+
+    fail = true;
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(failed).toHaveBeenCalledWith("one", "Borrowed host unavailable");
+    expect(hosts.model.hosts[0]).toMatchObject({ id: "one", connection: "disconnected", error: "Borrowed host unavailable" });
+    expect(isHostLive(hosts.model, "one")).toBe(false);
+    expect(isHostAuthoritative(hosts.model, "one")).toBe(false);
+    expect(hosts.model.nodes.map(node => node.id)).toEqual(["one:agent:same"]);
+
+    fail = false;
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts[0]).toMatchObject({ id: "one", connection: "connected" });
+    expect(isHostAuthoritative(hosts.model, "one")).toBe(true);
+  });
+
+  it("disconnects one host without disturbing the other and does not replay its history", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    const summaries = [
+      { id: "one", label: "One", status: "online" as const },
+      { id: "two", label: "Two", status: "online" as const },
+    ];
+    hosts.setHosts(summaries);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    one.timelineHandlers.get("same")?.({ timestamp: "old", event: { type: "turn_started", turnId: "old" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events.some(event => event.hostId === "one")).toBe(true);
+
+    hosts.setHosts([{ ...summaries[0]!, status: "offline" }, summaries[1]!]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts.map(host => [host.id, host.connection])).toEqual([["one", "disconnected"], ["two", "connected"]]);
+    expect(isHostAuthoritative(hosts.model, "two")).toBe(true);
+    expect(hosts.model.nodes.filter(node => node.hostId === "two")).toHaveLength(1);
+    expect(hosts.model.events.filter(event => event.hostId === "one")).toEqual([]);
+    two.timelineHandlers.get("same")?.({ timestamp: "still-live", event: { type: "turn_started", turnId: "still-live" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events.some(event => event.hostId === "two")).toBe(true);
+
+    hosts.setHosts(summaries);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("connected");
+    expect(hosts.model.events.filter(event => event.hostId === "one")).toEqual([]);
+    one.timelineHandlers.get("same")?.({ timestamp: "fresh", event: { type: "turn_started", turnId: "fresh" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events.filter(event => event.hostId === "one")).toHaveLength(1);
+  });
+});
+
+describe("shared passive read gate", () => {
+  it("leaves global read capacity available when one host's reads stall", async () => {
+    const gate = new ReadGate(6), slow = new ReadQueue(4, gate), healthy = new ReadQueue(4, gate);
+    const pending = deferred<void>();
+    let slowStarted = 0;
+    const slowReads = Array.from({ length: 12 }, () => slow.run(async () => { slowStarted++; await pending.promise; }));
+    const completed = healthy.run(async () => "healthy host");
+    await flush();
+    expect(slowStarted).toBe(4);
+    await expect(completed).resolves.toBe("healthy host");
+    pending.resolve();
+    await Promise.all(slowReads);
+    slow.dispose(); healthy.dispose(); gate.close();
+  });
+  it("bounds reads across queues and cancels only the disposing owner's pending work", async () => {
+    const gate = new ReadGate(1);
+    const firstQueue = new ReadQueue(4, gate), secondQueue = new ReadQueue(4, gate);
+    const first = deferred<void>(), second = deferred<void>(), third = deferred<void>();
+    const started: string[] = [];
+    const one = firstQueue.run(async () => { started.push("one"); await first.promise; });
+    const cancelled = firstQueue.run(async () => { started.push("cancelled"); await second.promise; });
+    const other = secondQueue.run(async () => { started.push("other"); await third.promise; });
+    await flush();
+    expect(started).toEqual(["one"]);
+    firstQueue.dispose();
+    await expect(cancelled).rejects.toThrow("Observation closed");
+    first.resolve(); await flush();
+    expect(started).toEqual(["one", "other"]);
+    third.resolve(); await expect(other).resolves.toBeUndefined();
+    await expect(one).resolves.toBeUndefined();
   });
 });

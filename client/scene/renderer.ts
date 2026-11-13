@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { OverviewModel } from "../../shared/model";
+import { hostForDisplayId, isHostAuthoritative, isHostLive } from "../../shared/hosts";
 import type { OverviewAnchor, OverviewFocus, OverviewMountOptions, OverviewRenderer } from "../../shared/renderer";
 import { ActivityTracker, aggregateOwnedActivity, heartbeatBpm, normaliseActivity, PulseLimiter } from "../activity";
 import { BubbleStore, type ActivityBubble } from "../bubbles";
@@ -23,7 +24,7 @@ import { viewDepthForScale, type ProjectSpatialPresentation } from "./spatial";
 import { DEFAULT_APPEARANCE } from "../../shared/settings";
 import { appearancePolicy } from "../appearance-policy";
 
-interface VisualNode { halo: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; phase: number }
+interface VisualNode { halo: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; phase: number; colour?: string }
 interface Cluster {
   layout: ProjectLayout; group: THREE.Group;
   nodes: Map<string, VisualNode>; lines: Map<string, Line2>;
@@ -39,6 +40,26 @@ interface ProjectAnchor { x: number; y: number; scale: number }
 const phaseFor = (id: string) => { let value = 0; for (const char of id) value = (value * 31 + char.charCodeAt(0)) | 0; return (value >>> 0) / 0xffffffff; };
 const beat = (phase: number) => Math.min(1, Math.exp(-Math.pow((phase - 0.12) / 0.055, 2)) + 0.48 * Math.exp(-Math.pow((phase - 0.29) / 0.075, 2)));
 const sameFocus = (a: OverviewFocus, b: OverviewFocus) => a?.kind === b?.kind && a?.id === b?.id;
+
+/** Directory models are immutable but may recreate equivalent flat records on each text delta. */
+function sameRecords(left: readonly object[], right: readonly object[]): boolean {
+  return left === right || left.length === right.length && left.every((record, index) => {
+    const next = right[index]!;
+    if (record === next) return true;
+    const a = record as Record<string, unknown>, b = next as Record<string, unknown>;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(key => {
+      const value = a[key], other = b[key];
+      return value === other || Array.isArray(value) && Array.isArray(other)
+        && value.length === other.length && value.every((item, i) => item === other[i]);
+    });
+  });
+}
+
+function sameGraph(left: OverviewModel, right: OverviewModel): boolean {
+  return sameRecords(left.projects, right.projects) && sameRecords(left.workspaces, right.workspaces)
+    && sameRecords(left.nodes, right.nodes) && sameRecords(left.edges, right.edges);
+}
 
 /** Reuse the line buffers while attachments move; the expensive spine stays cached. */
 function updateLinePoints(line: Line2, points: readonly Point[]): void {
@@ -72,6 +93,16 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   let wakeTimer: ReturnType<typeof setTimeout> | undefined;
   let delegationDirty = true, delegationPlanDirty = true, structuralTransition = true;
   let graphDirty = true, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity;
+  let summaries = new Map<string, import("../activity").OwnedActivity>();
+  let agentById = new Map(model.nodes.map(node => [node.id, node]));
+  let owningHosts = new Map([...model.projects, ...model.workspaces, ...model.nodes].map(node => [node.id, node.hostId]));
+  const nodeScores = new Map<string, number>();
+  const opacityByNode = new Map<string, number>();
+  const presentationByNode = new Map<string, NodePresentation>();
+  const bubbleNodes = new Set<string>();
+  const ancestry = new Set<string>();
+  const inspectedProjects = new Set<string | undefined>();
+  const lineColours = new WeakMap<Line2, string>();
   let depthRoutes = new Map<string, CachedDelegation>();
   const media = window.matchMedia("(prefers-reduced-motion: reduce)");
   const motion = () => requestedMotion && !media.matches;
@@ -115,7 +146,6 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     renderer.clear();
     ambient.renderWithBackgroundFallback(renderScene);
   };
-  const point = new THREE.Vector3();
   const material = (colour: string, glow = false) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, ...(glow ? { map: glowTexture } : {}) });
   const requestFrame = (dirty = true) => {
     graphDirty ||= dirty;
@@ -126,12 +156,19 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   function scheduleFrame(now: number): void {
     if (!canRender()) return;
     if (graphAnimating && motion()) { requestFrame(false); return; }
-    const delay = Math.min(motion() && model.connection === "connected" && ambient.isAnimating() ? 1000 / 24 : Infinity,
+    const delay = Math.min(motion() && anyHostLive() && ambient.isAnimating() ? 1000 / 15 : Infinity,
       Math.min(nextBubbleExpiry, nextActivityUpdate) - now + 1);
     if (Number.isFinite(delay)) wakeTimer = setTimeout(() => { wakeTimer = undefined; requestFrame(false); }, Math.max(16, delay));
   }
 
-  const authoritative = () => Object.values(model.readiness).every(Boolean) && (!model.freshness || model.freshness === "current");
+  const anyHostLive = () => model.hosts.some(host => host.connection === "connected");
+  const ownerHost = (id: string) => owningHosts.get(id) ?? hostForDisplayId(id) ?? "";
+  const authoritative = (id: string) => isHostAuthoritative(model, ownerHost(id));
+  const projectLive = (id: string) => isHostLive(model, ownerHost(id));
+  function setLineColour(line: Line2, colour: string): void {
+    if (lineColours.get(line) === colour) return;
+    line.material.color.set(colour); lineColours.set(line, colour);
+  }
   function reportAnchor(anchor: OverviewAnchor | null): void {
     if (anchor && lastAnchor && Math.abs(anchor.x - lastAnchor.x) < 0.1 && Math.abs(anchor.y - lastAnchor.y) < 0.1 && anchor.width === lastAnchor.width && anchor.height === lastAnchor.height) return;
     if (!anchor && !lastAnchor) return;
@@ -149,7 +186,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   }
   function setFocus(target: OverviewFocus): void {
     let next = target;
-    if (target && authoritative() && !layout.nodes.has(target.id)) next = null;
+    if (target && authoritative(target.id) && !layout.nodes.has(target.id)) next = null;
     if (sameFocus(next, focused)) return;
     if (!focused && next) rememberFocusAnchors();
     if (!next) focusAnchors.clear();
@@ -263,7 +300,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       for (const member of members) bubbles.hold(member, member === selected);
       held.delete(id);
     }
-    if (focused && authoritative() && !layout.nodes.has(focused.id)) setFocus(null);
+    if (focused && authoritative(focused.id) && !layout.nodes.has(focused.id)) setFocus(null);
     if (selected && !canRetainSelection(model, selected)) setSelection(null);
   }
 
@@ -314,14 +351,34 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     for (const pulse of pulses) { pulse.light.object.removeFromParent(); pulse.light.object.visible = false; pool.push(pulse.light); }
     pulses.length = 0; limiter.clear(); arrivals.clear();
   }
+  function clearHostTransients(hostIds: ReadonlySet<string>): void {
+    const nodeIds = new Set(model.nodes.filter(node => hostIds.has(node.hostId)).map(node => node.id));
+    const projectIds = new Set([...clusters.keys()].filter(id => hostIds.has(ownerHost(id))));
+    for (let index = pulses.length - 1; index >= 0; index--) {
+      const pulse = pulses[index]!;
+      if (!projectIds.has(pulse.projectId)) continue;
+      pulse.light.object.removeFromParent(); pulse.light.object.visible = false;
+      pool.push(pulse.light); pulses.splice(index, 1);
+    }
+    for (const id of arrivals.keys()) if (hostIds.has(ownerHost(id))) arrivals.delete(id);
+    limiter.clearNodes(nodeIds); activity.clearNodes(nodeIds); bubbles.clearNodes(nodeIds);
+    ambient.clearProjects(projectIds);
+  }
   function acceptEvents(): void {
-    const now = Date.now(), fresh = activity.ingest(model.events, now);
-    if (!canRender() || model.connection !== "connected") { bubbles.discard(model.events, now); return; }
-    const agents = new Map(model.nodes.map(node => [node.id, node]));
-    bubbles.ingest(model.events, agents, now);
+    const now = Date.now();
+    const events = model.events.filter(event => isHostLive(model, event.hostId));
+    const discarded = model.events.filter(event => !isHostLive(model, event.hostId));
+    activity.discard(discarded, now); bubbles.discard(discarded, now);
+    const fresh = activity.ingest(events, now);
+    if (!canRender()) { bubbles.discard(events, now); return; }
+    // Disconnect clears previews, but inspection itself survives. Restore its
+    // hold before admitting new work after that host reconnects.
+    for (const members of held.values()) for (const id of members) if (isHostLive(model, ownerHost(id))) bubbles.hold(id, true);
+    if (selected && isHostLive(model, ownerHost(selected))) bubbles.hold(selected, true);
+    bubbles.ingest(events, agentById, now);
     if (!motion()) return;
     for (const event of fresh) {
-      const node = layout.nodes.get(layout.memberToDisplay.get(event.nodeId) ?? event.nodeId), agent = agents.get(event.nodeId);
+      const node = layout.nodes.get(layout.memberToDisplay.get(event.nodeId) ?? event.nodeId), agent = agentById.get(event.nodeId);
       if (!node || !agent || (agent.freshness && agent.freshness !== "current")) continue;
       // Background feeds share the fresh observed event source, with their own
       // bounded per-project admission. A visual arrival never creates work.
@@ -359,55 +416,69 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const dt = Math.min(0.05, elapsedSeconds);
     lastTime = time;
     const animate = motion(), smooth = animate ? 1 - Math.exp(-dt * 12) : 1;
-    const live = model.connection === "connected";
+    const live = anyHostLive();
     if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
       ambient.advanceTime(elapsedSeconds, animate && live);
       renderComposite(); scheduleFrame(now); return;
     }
+    const dirty = graphDirty;
+    const activityChanged = dirty || now >= nextActivityUpdate;
+    let positionsChanged = dirty;
+    let spatialChanged = dirty;
+    const bubblesChanged = dirty || now >= nextBubbleExpiry;
     graphDirty = false;
-    nextActivityUpdate = Infinity;
-    const summaries = aggregateOwnedActivity(model, ownership, activity, now);
+    if (activityChanged) {
+      summaries = aggregateOwnedActivity(model, ownership, activity, now);
+      nodeScores.clear();
+      for (const cluster of clusters.values()) for (const node of cluster.layout.nodes) {
+        nodeScores.set(node.id, normaliseActivity(node.memberIds
+          ? node.memberIds.reduce((sum, member) => sum + activity.score(member, now), 0)
+          : summaries.get(node.id)?.score ?? 0));
+      }
+      nextActivityUpdate = motion() && [...clusters.keys()].some(id => projectLive(id) && normaliseActivity(summaries.get(id)?.score ?? 0) > 0.001)
+        ? now + 250 : Infinity;
+    }
     const totalProjectActivity = [...clusters.keys()].reduce((sum, id) => sum + normaliseActivity(summaries.get(id)?.score ?? 0), 0);
-    const agentById = new Map(model.nodes.map(node => [node.id, node]));
     const focusNode = focused ? layout.nodes.get(focused.id) : undefined;
     const focusProject = focusNode?.projectId;
-    const ancestry = new Set<string>();
-    let ancestor: string | undefined = hovered ?? selected ?? undefined;
-    while (ancestor && !ancestry.has(ancestor)) { ancestry.add(ancestor); ancestor = layout.nodes.get(ancestor)?.parentId; }
-    const inspectedProjects = new Set([...held.keys(), ...[selected, hovered].filter((id): id is string => !!id)]
-      .map(id => layout.nodes.get(layout.memberToDisplay.get(id) ?? id)?.projectId));
+    if (dirty) {
+      ancestry.clear(); inspectedProjects.clear();
+      let ancestor: string | undefined = hovered ?? selected ?? undefined;
+      while (ancestor && !ancestry.has(ancestor)) { ancestry.add(ancestor); ancestor = layout.nodes.get(ancestor)?.parentId; }
+      for (const id of [...held.keys(), selected, hovered]) if (id) inspectedProjects.add(layout.nodes.get(layout.memberToDisplay.get(id) ?? id)?.projectId);
+    }
     let continuous = false, transitioning = false;
-    const opacityByNode = new Map<string, number>();
-    const presentationByNode = new Map<string, NodePresentation>();
-    const bubbleNodes = new Set<string>();
+    if (dirty) { opacityByNode.clear(); presentationByNode.clear(); bubbleNodes.clear(); }
     const spatialProjects: ProjectSpatialPresentation[] = [];
     for (const [id, cluster] of clusters) {
-      const summary = summaries.get(id), intensity = live ? normaliseActivity(summary?.score ?? 0) : 0;
-      if (animate && intensity > 0.001) nextActivityUpdate = now + 250;
+      const clusterLive = projectLive(id);
+      const summary = summaries.get(id), intensity = clusterLive ? normaliseActivity(summary?.score ?? 0) : 0;
       const foreground = focusProject === id, background = !!focused && !foreground;
       const heldDepth = inspectedProjects.has(id);
       const relation = foreground ? "foreground" : background ? "background" : "full-view";
       const relationChanged = relation !== cluster.relation;
+      const previousElevation = cluster.elevation;
       const targetElevation = elevationTarget({ activity: intensity, working: (summary?.working ?? 0) > 0,
-        fresh: live && authoritative(), relation,
+        fresh: clusterLive && authoritative(id), relation,
         otherActivity: 1 - Math.exp(-2 * Math.max(0, totalProjectActivity - intensity)) });
       // One displayed elevation drives scaling and grid deformation. Inspection
       // holds automatic motion; an explicit scope change still takes effect.
       if (relationChanged && relation === "full-view") cluster.elevation = cluster.fullViewElevation;
       else if (relationChanged && !animate) cluster.elevation = targetElevation;
-      else if (animate && (live || relation !== "full-view") && (!heldDepth || relation !== "full-view") &&
+      else if (animate && (clusterLive || relation !== "full-view") && (!heldDepth || relation !== "full-view") &&
         (!structuralTransition || relation !== "full-view")) {
         cluster.elevation = advanceElevation(cluster.elevation, targetElevation, elapsedSeconds, policy.responseRate);
         if (Math.abs(cluster.elevation - targetElevation) > 0.00001) continuous = true;
       }
       cluster.relation = relation;
+      spatialChanged ||= previousElevation !== cluster.elevation;
       if (!focused) {
         // Focus has its own elevation. Restore the retained full-view value
         // before the return transform, avoiding a second scale jump afterwards.
         cluster.fullViewElevation = cluster.elevation;
         if (heldDepth && !cluster.depthHeld && !structuralTransition) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
         cluster.depthHeld = heldDepth;
-        if (animate && live && !heldDepth && !structuralTransition) cluster.depth = 1 + (scaleForElevation(cluster.elevation, cluster.depthRange) - 1) * policy.depthStrength;
+        if (animate && clusterLive && !heldDepth && !structuralTransition) cluster.depth = 1 + (scaleForElevation(cluster.elevation, cluster.depthRange) - 1) * policy.depthStrength;
       }
       let bounds = cluster.layout.bounds;
       if (foreground && focused?.kind === "workspace") {
@@ -429,26 +500,29 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       const moving = animate && (Math.abs(cluster.group.position.x - targetX) + Math.abs(cluster.group.position.y - targetY) > 0.25 || Math.abs(cluster.group.scale.x - scale) > 0.001 || Math.abs(cluster.opacity - alpha) > 0.005);
       transitioning ||= structuralTransition && moving;
       continuous ||= moving;
-      const transformSmooth = structuralTransition ? smooth : 1;
+      const transformSmooth = structuralTransition && moving ? smooth : 1;
+      const previousX = cluster.group.position.x, previousY = cluster.group.position.y;
+      const previousScale = cluster.group.scale.x, previousOpacity = cluster.opacity;
       cluster.group.position.x += (targetX - cluster.group.position.x) * transformSmooth;
       cluster.group.position.y += (targetY - cluster.group.position.y) * transformSmooth;
       cluster.group.position.z += (z - cluster.group.position.z) * smooth;
       cluster.group.scale.setScalar(cluster.group.scale.x + (scale - cluster.group.scale.x) * transformSmooth);
       cluster.opacity += (alpha - cluster.opacity) * smooth;
+      positionsChanged ||= previousX !== cluster.group.position.x || previousY !== cluster.group.position.y ||
+        previousScale !== cluster.group.scale.x || previousOpacity !== cluster.opacity;
+      const presentationChanged = dirty || previousOpacity !== cluster.opacity;
       for (const node of cluster.layout.nodes) {
         const visual = cluster.nodes.get(node.id)!, count = summaries.get(node.id), agent = agentById.get(node.id);
-        const working = live && (count?.working ?? 0) > 0;
-        const score = live ? normaliseActivity(node.memberIds
-          ? node.memberIds.reduce((sum, member) => sum + activity.score(member, now), 0)
-          : count?.score ?? 0) : 0;
+        const working = clusterLive && (count?.working ?? 0) > 0;
+        const score = clusterLive ? nodeScores.get(node.id) ?? 0 : 0;
         const dimmedBranch = foreground && focused?.kind === "workspace" && node.id !== id && node.id !== focused.id && node.workspaceId !== focused.id;
         const nodeAlpha = cluster.opacity * (dimmedBranch ? 0.38 : 1);
         const emphasized = ancestry.has(node.id);
-        opacityByNode.set(node.id, emphasized ? Math.max(0.85, nodeAlpha) : nodeAlpha);
+        if (presentationChanged) opacityByNode.set(node.id, emphasized ? Math.max(0.85, nodeAlpha) : nodeAlpha);
         const distant = background || dimmedBranch;
         const root = node.kind === "project";
         const important = !!agent?.attention || (count?.errors ?? 0) > 0 || (count?.waiting ?? 0) > 0;
-        presentationByNode.set(node.id, {
+        if (presentationChanged) presentationByNode.set(node.id, {
           surfaceOpacity: emphasized ? 1 : distant ? Math.max(root ? 0.46 : 0.24, nodeAlpha) : 1,
           textOpacity: emphasized ? 1 : distant ? root ? 0.8 : 0.55 : 1,
           badgeOpacity: emphasized ? 1 : distant ? important ? 0.95 : 0.7 : 1,
@@ -456,12 +530,14 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
           interactive: true,
           elevation: distant ? 0.06 : cluster.elevation,
         });
-        if (!distant || selected === node.id || hovered === node.id || held.has(node.id)) bubbleNodes.add(node.id);
-        if (animate) visual.phase = (visual.phase + dt * heartbeatBpm(working, score) / 60) % 1;
+        if (dirty && (!distant || selected === node.id || hovered === node.id || held.has(node.id))) bubbleNodes.add(node.id);
+        if (animate && clusterLive) visual.phase = (visual.phase + dt * heartbeatBpm(working, score) / 60) % 1;
         const age = time - (arrivals.get(node.id) ?? -Infinity), arrival = age < 800 ? Math.exp(-age / 240) : 0;
         const wave = animate ? Math.max(working ? beat(visual.phase) * 0.35 : 0, arrival) : 0;
-        visual.halo.material.color.set(agent ? statusColour(agent, theme) : count?.errors ? theme.error : count?.waiting ? theme.waiting : working ? theme.working : theme.accent);
+        const colour = agent ? statusColour(agent, theme) : count?.errors ? theme.error : count?.waiting ? theme.waiting : working ? theme.working : theme.accent;
+        if (visual.colour !== colour) { visual.halo.material.color.set(colour); visual.colour = colour; }
         visual.halo.material.opacity = nodeAlpha * (working ? 0.08 + wave * 0.5 : wave * 0.4);
+        visual.halo.visible = visual.halo.material.opacity > 0.001;
         visual.halo.scale.set(node.body.width + 14 + wave * 15, node.body.height + 14 + wave * 15, 1);
         if (animate && (working || arrival > 0.02)) continuous = true;
       }
@@ -470,7 +546,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         const highlighted = ancestry.has(edge.source) && ancestry.has(edge.target);
         const reveal = animate ? Math.min(1, (time - cluster.routedAt) / 180) : 1;
         if (reveal < 1) continuous = true;
-        line.material.color.set(highlighted ? theme.selection ?? selectionColour(theme) : theme.muted);
+        setLineColour(line, highlighted ? theme.selection ?? selectionColour(theme) : theme.muted);
         line.material.linewidth = highlighted ? 2.1 : 1.35;
         line.material.opacity = Math.min(opacityByNode.get(edge.source) ?? 1, opacityByNode.get(edge.target) ?? 1) * (highlighted ? 0.9 : 0.36) * reveal;
       }
@@ -481,7 +557,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         width: bounds.width * displayedScale,
         height: bounds.height * displayedScale,
       };
-      const workingFloor = live && authoritative() && (summary?.working ?? 0) > 0 ? 0.12 : 0;
+      const workingFloor = clusterLive && authoritative(id) && (summary?.working ?? 0) > 0 ? 0.12 : 0;
       const scaleMultiplier = displayedScale / Math.max(0.01, cluster.layout.scale);
       spatialProjects.push({
         projectId: id,
@@ -494,16 +570,17 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         elevation: cluster.elevation,
         inspected: heldDepth,
         focused: foreground,
+        live: clusterLive,
       });
     }
-    scene.updateMatrixWorld(true);
+    scene.updateMatrixWorld();
     // The field follows the presentation transform rather than the packed layout.
     // An unchanged influence list leaves its typed-array attributes untouched.
-    ambient.updateProjects(spatialProjects);
+    if (positionsChanged || spatialChanged || activityChanged) ambient.updateProjects(spatialProjects, live);
     ambient.advanceTime(elapsedSeconds, animate && live);
     if (structuralTransition && !transitioning) { structuralTransition = false; continuous = true; }
     if (transitioning) { delegationDirty = true; continuous = true; }
-    else if (delegationDirty) rebuildDelegations();
+    else if (delegationDirty) { rebuildDelegations(); positionsChanged = true; }
     for (const item of delegations.values()) {
       item.line.visible = item.arrow.visible = !transitioning;
       if (!transitioning && item.sourceSide) {
@@ -520,13 +597,13 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         }
       }
       const highlighted = hovered === item.route.source || hovered === item.route.target || selected === item.route.source || selected === item.route.target;
-      item.line.material.color.set(theme.accent); item.arrow.material.color.set(theme.accent);
+      setLineColour(item.line, theme.accent); setLineColour(item.arrow, theme.accent);
       item.line.material.opacity = highlighted ? 0.9 : focused ? 0.18 : 0.3;
       item.arrow.material.opacity = highlighted ? 1 : focused ? 0.3 : 0.65;
     }
     for (let i = pulses.length - 1; i >= 0; i--) {
       const pulse = pulses[i]!, cluster = clusters.get(pulse.projectId);
-      const permitted = !!cluster && animate && live && !transitioning;
+      const permitted = !!cluster && animate && projectLive(pulse.projectId) && !transitioning;
       const complete = permitted && advancePulseJourney(pulse.journey, time, (id, at) => {
         arrivals.set(id, at);
         // Halo evaluation precedes journey advancement. Even a final arrival
@@ -538,18 +615,22 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       }
       pulse.light.update(pulse.journey, time, cluster.group.scale.x, cluster.opacity); continuous = true;
     }
-    overlay.beginPositions();
-    for (const cluster of clusters.values()) for (const node of cluster.layout.nodes) {
-      point.set(node.position.x, node.position.y, 0); cluster.group.localToWorld(point);
-      overlay.positionNode(node.id, point.x, point.y, cluster.group.scale.x, presentationByNode.get(node.id)!, selected === node.id, focused?.id === node.id, ancestry.has(node.id), focusProject === cluster.layout.id);
+    if (positionsChanged) {
+      overlay.beginPositions();
+      for (const cluster of clusters.values()) for (const node of cluster.layout.nodes) {
+        overlay.positionNode(node.id, cluster.group.position.x + node.position.x * cluster.group.scale.x,
+          cluster.group.position.y + node.position.y * cluster.group.scale.x, cluster.group.scale.x,
+          presentationByNode.get(node.id)!, selected === node.id, focused?.id === node.id, ancestry.has(node.id), focusProject === cluster.layout.id);
+      }
+      reportAnchor(selected ? overlay.anchor(selected) : null);
+      const screenRoutes: Point[][] = [];
+      for (const cluster of clusters.values()) {
+        for (const edge of cluster.layout.edges) screenRoutes.push(edge.points.map(location => ({ x: cluster.group.position.x + location.x * cluster.group.scale.x, y: cluster.group.position.y + location.y * cluster.group.scale.x })));
+      }
+      for (const item of delegations.values()) if (item.line.visible) screenRoutes.push([...item.route.points]);
+      overlay.setRoutes(screenRoutes);
     }
-    reportAnchor(selected ? overlay.anchor(selected) : null);
-    const screenRoutes: Point[][] = [];
-    for (const cluster of clusters.values()) {
-      for (const edge of cluster.layout.edges) screenRoutes.push(edge.points.map(location => ({ x: cluster.group.position.x + location.x * cluster.group.scale.x, y: cluster.group.position.y + location.y * cluster.group.scale.x })));
-    }
-    for (const item of delegations.values()) if (item.line.visible) screenRoutes.push([...item.route.points]);
-    overlay.setRoutes(screenRoutes);
+    if (positionsChanged || bubblesChanged) {
     const displayedBubbles = new Map<string, ActivityBubble>();
     for (const bubble of bubbles.current(now)) {
       const nodeId = layout.memberToDisplay.get(bubble.nodeId) ?? bubble.nodeId;
@@ -561,10 +642,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     }
     const shown = [...displayedBubbles.values()];
     overlay.finishPositions(shown, width, height);
-    renderComposite();
-    graphAnimating = continuous && animate;
     nextBubbleExpiry = shown.reduce((expiry, bubble) => selected === bubble.nodeId || held.has(bubble.nodeId)
       ? expiry : Math.min(expiry, bubble.expiresAt), Infinity);
+    }
+    renderComposite();
+    graphAnimating = continuous && animate;
     scheduleFrame(now);
   }
 
@@ -643,17 +725,31 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   return {
     update(next) {
       if (disposed || failed) return;
+      const graphChanged = !sameGraph(model, next);
+      const protectedGroupChanged = next.events.some(event => event.timestamp >= Date.now() - 6500 &&
+        layout.memberToDisplay.has(event.nodeId) && layout.memberToDisplay.get(event.nodeId) !== event.nodeId);
       // Offline time is not visible animation time. Reconnection must resume
       // the retained grid phase without catching up the unscheduled interval.
-      if (next.connection !== model.connection) {
-        lastTime = 0;
-        ambient.clearTransient(); clearPulses(); bubbles.clear();
-        bubbles.discard(next.events, Date.now());
+      const changedHosts = new Set(model.hosts.filter(host => next.hosts.find(candidate => candidate.id === host.id)?.connection !== host.connection).map(host => host.id));
+      if (changedHosts.size) {
+        clearHostTransients(changedHosts);
+        const staleEvents = next.events.filter(event => changedHosts.has(event.hostId));
+        bubbles.discard(staleEvents, Date.now()); activity.discard(staleEvents, Date.now());
       }
+      if (anyHostLive() !== next.hosts.some(host => host.connection === "connected")) lastTime = 0;
       model = next;
+      agentById = new Map(model.nodes.map(node => [node.id, node]));
+      owningHosts = new Map([...model.projects, ...model.workspaces, ...model.nodes].map(node => [node.id, node.hostId]));
       const nodeIds = new Set(model.nodes.map(node => node.id));
       activity.prune(nodeIds); bubbles.prune(nodeIds);
-      try { rebuildLayout(); acceptEvents(); requestFrame(); }
+      try {
+        if (graphChanged || protectedGroupChanged) rebuildLayout();
+        else {
+          if (selected && !canRetainSelection(model, selected)) setSelection(null);
+          if (focused && authoritative(focused.id) && !layout.nodes.has(focused.id)) setFocus(null);
+        }
+        acceptEvents(); requestFrame();
+      }
       catch (error) { failed = true; options.onError?.(error instanceof Error ? error.message : "The graph layout is unavailable."); }
     },
     updateTheme(next) {

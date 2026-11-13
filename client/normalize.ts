@@ -1,4 +1,6 @@
-import type { AttentionReason, OverviewEdge, OverviewModel, OverviewNode, OverviewReadiness, OverviewState, OwnershipIndex } from "../shared/model";
+import type {
+  AttentionReason, OverviewEdge, OverviewHostSnapshot, OverviewModel, OverviewNode, OverviewReadiness, OverviewState, OwnershipIndex,
+} from "../shared/model";
 import type { AgentRecord, ProjectRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 
 export function displayId(hostId: string, kind: string, ...parts: string[]): string {
@@ -24,10 +26,10 @@ export function attentionReason(agent: AgentRecord): AttentionReason {
 export function normalise(input: {
   hostId: string; agents: readonly AgentRecord[]; workspaces: readonly WorkspaceRecord[];
   projects: readonly ProjectRecord[]; rosters: ReadonlyMap<string, RosterState>;
-  icons: ReadonlyMap<string, string>; events: OverviewModel["events"];
-  connection: OverviewModel["connection"]; revision: number; readiness?: OverviewReadiness;
-  freshness?: OverviewModel["freshness"];
-}): OverviewModel {
+  icons: ReadonlyMap<string, string>; events: OverviewHostSnapshot["events"];
+  connection: OverviewHostSnapshot["connection"]; revision: number; readiness?: OverviewReadiness;
+  freshness?: OverviewHostSnapshot["freshness"];
+}): OverviewHostSnapshot {
   const { hostId } = input;
   const projects = new Map(input.projects.map(project => [project.projectId, project]));
   const knownWorkspaces = new Set(input.workspaces.map(workspace => workspace.id));
@@ -36,9 +38,11 @@ export function normalise(input: {
     const parent = agent.labels?.["paseo.parent-agent-id"];
     const parentHost = agent.labels?.["paseo.parent-server-id"] || hostId;
     return {
-      id: displayId(hostId, "agent", agent.id), kind: "agent", managedAgentId: agent.id,
+      id: displayId(hostId, "agent", agent.id), hostId, kind: "agent", managedAgentId: agent.id,
       workspaceId: agent.workspaceId && knownWorkspaces.has(agent.workspaceId) ? displayId(hostId, "workspace", agent.workspaceId) : null,
       parentId: parent && parent !== agent.id && parentHost === hostId ? displayId(hostId, "agent", parent) : undefined,
+      delegationParentId: parent && parentHost !== hostId
+        ? displayId(parentHost, "agent", parent) : undefined,
       label: agent.title || "Untitled agent", state: agentState(agent),
       attention: !!agent.requiresAttention || !!agent.pendingPermissions?.length,
       attentionReason: attentionReason(agent),
@@ -56,7 +60,7 @@ export function normalise(input: {
     for (const child of roster.subagents) {
       if (child.parentAgentId !== parentId) continue;
       nodes.push({
-        id: displayId(hostId, "native", parentId, child.id), kind: "provider-subagent",
+        id: displayId(hostId, "native", parentId, child.id), hostId, kind: "provider-subagent",
         workspaceId: parent.workspaceId, managedAgentId: parentId, providerSubagentId: child.id,
         parentId: child.parentSubagentId && child.parentSubagentId !== child.id
           ? displayId(hostId, "native", parentId, child.parentSubagentId) : parent.id,
@@ -102,17 +106,20 @@ export function normalise(input: {
     freshness: input.freshness ?? "current", revision: input.revision,
     readiness: input.readiness ? { ...input.readiness } : { projects: true, workspaces: true, agents: true },
     projects: [...projects.values()].map(project => ({
-      id: displayId(hostId, "project", project.projectId), projectId: project.projectId,
+      id: displayId(hostId, "project", project.projectId), hostId, projectId: project.projectId,
       name: project.projectDisplayName, iconUrl: input.icons.get(project.projectId),
       workspaceIds: input.workspaces.filter(workspace => workspace.projectId === project.projectId)
         .map(workspace => displayId(hostId, "workspace", workspace.id)),
     })),
     workspaces: input.workspaces.map(workspace => {
       const id = displayId(hostId, "workspace", workspace.id);
+      const known = workspace.projectId ? projects.get(workspace.projectId) : undefined;
       return {
-        id, projectId: workspace.projectId, name: workspace.name,
-        projectName: projects.get(workspace.projectId)?.projectDisplayName || workspace.projectDisplayName,
-        iconUrl: input.icons.get(workspace.projectId),
+        id, hostId, projectId: workspace.projectId,
+        projectDisplayId: known ? displayId(hostId, "project", known.projectId) : null,
+        name: workspace.name,
+        projectName: known?.projectDisplayName || workspace.projectDisplayName,
+        iconUrl: workspace.projectId ? input.icons.get(workspace.projectId) : undefined,
         agentIds: nodes.filter(node => node.workspaceId === id).map(node => node.id),
       };
     }),
@@ -120,12 +127,12 @@ export function normalise(input: {
 }
 
 /** One ownership tree per actual project; delegation never changes ownership. */
-export function buildOwnershipIndex(model: OverviewModel): OwnershipIndex {
+export function buildOwnershipIndex(model: OverviewHostSnapshot | OverviewModel): OwnershipIndex {
   const parentByNode = new Map<string, string>();
   const projectByNode = new Map<string, string>();
   const workspaceByNode = new Map<string, string>();
   const childrenByNode = new Map<string, string[]>();
-  const projects = new Map(model.projects.map(project => [project.projectId, project]));
+  const projects = new Map(model.projects.map(project => [project.id, project]));
   const workspaces = new Map(model.workspaces.map(workspace => [workspace.id, workspace]));
   const nodes = new Map(model.nodes.map(node => [node.id, node]));
   const attach = (id: string, parent: string) => {
@@ -140,7 +147,9 @@ export function buildOwnershipIndex(model: OverviewModel): OwnershipIndex {
   for (const workspace of model.workspaces) {
     workspaceByNode.set(workspace.id, workspace.id);
     childrenByNode.set(workspace.id, []);
-    const project = workspace.projectId ? projects.get(workspace.projectId) : undefined;
+    // projectDisplayId is host-qualified. A raw same-id project on another host
+    // can therefore never become this workspace's owner.
+    const project = workspace.projectDisplayId ? projects.get(workspace.projectDisplayId) : undefined;
     if (project) { projectByNode.set(workspace.id, project.id); attach(workspace.id, project.id); }
   }
   for (const node of model.nodes) childrenByNode.set(node.id, []);

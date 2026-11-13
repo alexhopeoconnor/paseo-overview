@@ -24,18 +24,82 @@ export function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
 }
 
+interface GateEntry {
+  start(): void;
+  reject(error: Error): void;
+  signal?: AbortSignal;
+  abort?: () => void;
+}
+
+/**
+ * One admission gate shared by every host's passive reads. A host's lifetime
+ * only cancels its own queued work; it never rejects another host's queue.
+ */
+export class ReadGate {
+  private active = 0;
+  private closed = false;
+  private readonly pending: GateEntry[] = [];
+
+  constructor(private readonly limit = 6) {}
+
+  run<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (this.closed || signal?.aborted) { reject(new Error("Observation closed")); return; }
+      let started = false;
+      const entry: GateEntry = {
+        signal,
+        reject,
+        start: () => {
+          started = true;
+          if (entry.abort) signal?.removeEventListener("abort", entry.abort);
+          entry.abort = undefined;
+          this.active++;
+          void Promise.resolve().then(work).then(resolve, reject).finally(() => {
+            this.active--;
+            if (!this.closed) this.pending.shift()?.start();
+          });
+        },
+      };
+      if (signal) {
+        entry.abort = () => {
+          if (started) return;
+          const index = this.pending.indexOf(entry);
+          if (index >= 0) this.pending.splice(index, 1);
+          reject(new Error("Observation closed"));
+        };
+        signal.addEventListener("abort", entry.abort, { once: true });
+      }
+      if (this.active < this.limit) entry.start();
+      else this.pending.push(entry);
+    });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const entry of this.pending.splice(0)) {
+      if (entry.abort && entry.signal) entry.signal.removeEventListener("abort", entry.abort);
+      entry.reject(new Error("Observation closed"));
+    }
+  }
+}
+
 /** Bound expensive passive RPCs without letting hidden screens retain queued work. */
 export class ReadQueue {
   private active = 0;
   private disposed = false;
+  private readonly controller = new AbortController();
   private pending: Array<{ start(): void; reject(error: Error): void }> = [];
-  constructor(private readonly limit = 4) {}
+  constructor(private readonly limit = 4, private readonly gate?: ReadGate) {}
+
   run<T>(work: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.disposed) { reject(new Error("Observation closed")); return; }
       const start = () => {
         this.active++;
-        void Promise.resolve().then(work).then(resolve, reject).finally(() => {
+        // Keep the per-host cap inside the shared budget, so one slow host
+        // cannot occupy every global slot with its roster and icon reads.
+        void Promise.resolve().then(() => this.gate ? this.gate.run(work, this.controller.signal) : work()).then(resolve, reject).finally(() => {
           this.active--;
           if (!this.disposed) this.pending.shift()?.start();
         });
@@ -44,8 +108,11 @@ export class ReadQueue {
       else this.pending.push({ start, reject });
     });
   }
+
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.controller.abort();
     for (const item of this.pending.splice(0)) item.reject(new Error("Observation closed"));
   }
 }
@@ -60,10 +127,15 @@ export async function observeDirectory<T>(options: {
   freshness?(state: ObservationFreshness): void;
   failed(error: unknown): void;
   alive(): boolean;
+  /** Optional shared admission gate for the initial read and every later page. */
+  run?<R>(work: () => Promise<R>): Promise<R>;
 }): Promise<() => void> {
+  const read = (cursor?: string, subscribe?: boolean) => options.run
+    ? options.run(() => options.read(cursor, subscribe))
+    : options.read(cursor, subscribe);
   options.freshness?.("refreshing");
   let first: DirectoryPage<T>;
-  try { first = await options.read(undefined, true); }
+  try { first = await read(undefined, true); }
   catch (error) { if (options.alive()) options.freshness?.("stale"); throw error; }
   const observation = first.subscription;
   if (!observation) throw new Error("This Paseo client cannot observe workspace directories.");
@@ -102,7 +174,7 @@ export async function observeDirectory<T>(options: {
     const current = () => alive() && collecting === collection;
     const next = new Map<string, T>(), nextVersions = new Map<string, number>();
     try {
-      let page = firstPage ?? await options.read();
+      let page = firstPage ?? await read();
       if (!current()) return;
       const snapshotGeneration = page.sync?.generation, snapshotHead = page.sync?.headSeq ?? 0;
       const cursors = new Set<string>();
@@ -116,7 +188,7 @@ export async function observeDirectory<T>(options: {
         const cursor = page.pageInfo.nextCursor;
         if (cursors.has(cursor)) throw new Error("The host repeated a directory page cursor.");
         cursors.add(cursor);
-        page = await options.read(cursor, false);
+        page = await read(cursor, false);
         if (!current()) return;
       }
       if (!current()) return;

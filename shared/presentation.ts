@@ -1,5 +1,7 @@
 /** Presentation choices are independent of observation and provider lifecycle. */
-export const UNASSIGNED_SCOPE_ID = "overview:unassigned";
+export function unassignedScopeId(hostId: string): string {
+  return [hostId, "unassigned"].map(encodeURIComponent).join(":");
+}
 
 export type OverviewScope = null | {
   kind: "project" | "workspace" | "unassigned";
@@ -13,6 +15,8 @@ export interface OverviewPresentation {
   selectedId: string | null;
   groups: GroupPreferences;
   motion: boolean;
+  /** A host's display ID, or null for every configured host. */
+  hostFilter: string | null;
 }
 
 export type PresentationAction =
@@ -20,4 +24,5 @@ export type PresentationAction =
   | { type: "select"; id: string | null }
   | { type: "expand-group"; id: string }
   | { type: "collapse-group"; id: string }
-  | { type: "set-motion"; enabled: boolean };
+  | { type: "set-motion"; enabled: boolean }
+  | { type: "set-host-filter"; hostId: string | null };

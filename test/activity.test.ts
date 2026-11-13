@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ActivityTracker, aggregateOwnedActivity, decay, heartbeatBpm, normaliseActivity, PulseLimiter } from "../client/activity";
 import type { OverviewEvent } from "../shared/model";
-import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
+import { unassignedScopeId } from "../shared/presentation";
 import { buildOwnershipIndex, normalise } from "../client/normalize";
+import { composeHostSnapshots } from "../shared/hosts";
 
 describe("activity", () => {
   it("never counts presentation flushes as work or pulse candidates", () => {
     const tracker = new ActivityTracker();
-    const delta: OverviewEvent = { id: "delta", nodeId: "agent", kind: "message", timestamp: 1000 };
+    const delta: OverviewEvent = { id: "delta", hostId: "h", nodeId: "agent", kind: "message", timestamp: 1000 };
     const preview: OverviewEvent = { ...delta, id: "preview", displayOnly: true,
       preview: { title: "Assistant update", detail: "Readable sentence.", truncated: false } };
     expect(tracker.ingest([delta, preview], 1000)).toEqual([delta]);
@@ -17,7 +18,7 @@ describe("activity", () => {
   });
   it("counts each event once and decays smoothly without inventing stalled state", () => {
     const tracker = new ActivityTracker();
-    const event: OverviewEvent = { id: "one", nodeId: "agent", kind: "tool", timestamp: 1000 };
+    const event: OverviewEvent = { id: "one", hostId: "h", nodeId: "agent", kind: "tool", timestamp: 1000 };
     expect(tracker.ingest([event], 1000)).toHaveLength(1);
     expect(tracker.ingest([event], 1000)).toHaveLength(0);
     expect(tracker.score("agent", 1000)).toBe(1);
@@ -31,27 +32,39 @@ describe("activity", () => {
   it("rejects historical or invalid activity and prunes removed nodes", () => {
     const tracker = new ActivityTracker();
     expect(tracker.ingest([
-      { id: "old", nodeId: "agent", kind: "tool", timestamp: 0 },
-      { id: "invalid", nodeId: "agent", kind: "tool", timestamp: Number.NaN },
+      { id: "old", hostId: "h", nodeId: "agent", kind: "tool", timestamp: 0 },
+      { id: "invalid", hostId: "h", nodeId: "agent", kind: "tool", timestamp: Number.NaN },
     ], 20_000)).toEqual([]);
-    tracker.ingest([{ id: "new", nodeId: "agent", kind: "tool", timestamp: 20_000 }], 20_000);
+    tracker.ingest([{ id: "new", hostId: "h", nodeId: "agent", kind: "tool", timestamp: 20_000 }], 20_000);
     tracker.prune(new Set());
     expect(tracker.score("agent", 20_000)).toBe(0);
     expect(decay(2, -1)).toBe(2);
   });
 
-  it("retains decaying activity through refresh without claiming cached agents are working", () => {
-    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+  it("discards offline events without scoring and clears only the selected host's scores", () => {
+    const tracker = new ActivityTracker();
+    const online: OverviewEvent = { id: "one:event", hostId: "one", nodeId: "one:agent:a", kind: "tool", timestamp: 1000 };
+    const offline: OverviewEvent = { id: "two:event", hostId: "two", nodeId: "two:agent:b", kind: "tool", timestamp: 1000 };
+    tracker.ingest([online], 1000);
+    tracker.discard([offline], 1000);
+    expect(tracker.score("two:agent:b", 1000)).toBe(0);
+    expect(tracker.ingest([offline], 1000)).toEqual([]);
+    tracker.clearNodes(new Set(["one:agent:a"]));
+    expect(tracker.score("one:agent:a", 1000)).toBe(0);
+    expect(tracker.ingest([online], 1000)).toEqual([]);
+  });
+
+  it("retains decaying activity through refresh without claiming cached agents are working", () => {    const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
       projects: [], workspaces: [], agents: [{ id: "a", title: "A", provider: "codex", status: "running" }],
     });
     const tracker = new ActivityTracker(), id = "h:agent:a";
-    const event: OverviewEvent = { id: "live", nodeId: id, kind: "tool", timestamp: 1000 };
+    const event: OverviewEvent = { id: "live", hostId: "h", nodeId: id, kind: "tool", timestamp: 1000 };
     tracker.ingest([event], 1000);
     for (const freshness of ["refreshing", "stale"] as const) {
       const retained = { ...model, nodes: model.nodes.map(node => ({ ...node, freshness })) };
       const totals = aggregateOwnedActivity(retained, buildOwnershipIndex(retained), tracker, 6000);
       expect(totals.get(id)).toMatchObject({ managed: 1, working: 0, score: 0.5 });
-      expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual(totals.get(id));
+      expect(totals.get(unassignedScopeId("h"))).toEqual(totals.get(id));
     }
     expect(tracker.ingest([event], 6000)).toEqual([]);
     expect(aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 6000).get(id))
@@ -71,6 +84,15 @@ describe("activity", () => {
     expect(limiter.admit("a", "w1", 2000)).toBe(true);
   });
 
+  it("clears admission state only for disconnected host nodes", () => {
+    const limiter = new PulseLimiter();
+    expect(limiter.admit("one:agent:a", "one:workspace:w", 1000)).toBe(true);
+    expect(limiter.admit("two:agent:b", "two:workspace:w", 1000)).toBe(true);
+    limiter.clearNodes(new Set(["one:agent:a"]));
+    expect(limiter.admit("one:agent:a", "one:workspace:w", 1100)).toBe(true);
+    expect(limiter.admit("two:agent:b", "two:workspace:w", 1100)).toBe(false);
+  });
+
   it("aggregates each owned source once through nested parents without feeding parent totals back", () => {
     const model = normalise({ hostId: "h", connection: "connected", revision: 1, events: [], icons: new Map(),
       projects: [{ projectId: "project", projectDisplayName: "Project" }, { projectId: "empty", projectDisplayName: "Empty" }],
@@ -82,7 +104,7 @@ describe("activity", () => {
       ] }]]),
     });
     const tracker = new ActivityTracker();
-    tracker.ingest(model.nodes.map((node, index) => ({ id: `event-${index}`, nodeId: node.id, kind: "tool", timestamp: 1000 })), 1000);
+    tracker.ingest(model.nodes.map((node, index) => ({ id: `event-${index}`, hostId: node.hostId, nodeId: node.id, kind: "tool", timestamp: 1000 })), 1000);
     const ownership = buildOwnershipIndex(model);
     const totals = aggregateOwnedActivity(model, ownership, tracker, 1000);
     expect(totals.get("h:native:parent:grandchild")?.score).toBe(1);
@@ -110,12 +132,12 @@ describe("activity", () => {
       ],
     });
     const tracker = new ActivityTracker();
-    tracker.ingest([{ id: "event", nodeId: "h:agent:delegated", kind: "tool", timestamp: 1000 }], 1000);
+    tracker.ingest([{ id: "event", hostId: "h", nodeId: "h:agent:delegated", kind: "tool", timestamp: 1000 }], 1000);
     const totals = aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 1000);
     expect(totals.get("h:project:p1")).toMatchObject({ score: 0, managed: 1, working: 0, waiting: 0, unread: 1 });
     expect(totals.get("h:project:p2")).toMatchObject({ score: 1, managed: 1, working: 0, waiting: 1, unread: 0 });
     expect(totals.get("h:agent:unassigned")).toMatchObject({ managed: 1, working: 1 });
-    expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual(totals.get("h:agent:unassigned"));
+    expect(totals.get(unassignedScopeId("h"))).toEqual(totals.get("h:agent:unassigned"));
     expect(totals.size).toBe(8);
   });
 
@@ -140,7 +162,7 @@ describe("activity", () => {
     const projectsBefore = [...model.projects];
     const repeated = { ...model, nodes: [...model.nodes, model.nodes[1]!] };
     const totals = aggregateOwnedActivity(repeated, buildOwnershipIndex(repeated), { score: () => 1 }, 1000);
-    expect(totals.get(UNASSIGNED_SCOPE_ID)).toEqual({ score: 4, working: 3, waiting: 0, errors: 0, unread: 0, managed: 3, native: 1 });
+    expect(totals.get(unassignedScopeId("h"))).toEqual({ score: 4, working: 3, waiting: 0, errors: 0, unread: 0, managed: 3, native: 1 });
     expect(totals.get("h:agent:orphan")).toMatchObject({ score: 3, working: 2, managed: 2, native: 1 });
     expect(totals.get("h:workspace:unresolved")).toMatchObject({ score: 1, working: 1, managed: 1 });
     expect(totals.get("h:project:known")).toMatchObject({ score: 1, working: 0, managed: 1 });
@@ -148,13 +170,41 @@ describe("activity", () => {
     expect(model.projects).toEqual(projectsBefore);
 
     const empty = { ...model, nodes: [] };
-    expect(aggregateOwnedActivity(empty, buildOwnershipIndex(empty), { score: () => 0 }, 1000).get(UNASSIGNED_SCOPE_ID))
+    expect(aggregateOwnedActivity(empty, buildOwnershipIndex(empty), { score: () => 0 }, 1000).get(unassignedScopeId("h")))
       .toEqual({ score: 0, working: 0, waiting: 0, errors: 0, unread: 0, managed: 0, native: 0 });
 
-    const resolved = { ...model, projects: [...model.projects, { id: "h:project:missing", projectId: "missing", name: "Arrived", workspaceIds: ["h:workspace:unresolved", "h:workspace:empty"] }] };
+    const resolved = { ...model,
+      projects: [...model.projects, { id: "h:project:missing", hostId: "h", projectId: "missing", name: "Arrived", workspaceIds: ["h:workspace:unresolved", "h:workspace:empty"] }],
+      workspaces: model.workspaces.map(workspace => workspace.projectId === "missing"
+        ? { ...workspace, projectDisplayId: "h:project:missing" } : workspace) };
     const resolvedTotals = aggregateOwnedActivity(resolved, buildOwnershipIndex(resolved), { score: () => 1 }, 1000);
-    expect(resolvedTotals.get(UNASSIGNED_SCOPE_ID)).toMatchObject({ score: 3, working: 2, managed: 2, native: 1 });
+    expect(resolvedTotals.get(unassignedScopeId("h"))).toMatchObject({ score: 3, working: 2, managed: 2, native: 1 });
     expect(resolvedTotals.get("h:project:missing")).toMatchObject({ score: 1, working: 1, managed: 1 });
+  });
+
+  it("keeps each host's Unassigned aggregate independent", () => {
+    const one = normalise({ hostId: "one", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+      projects: [], workspaces: [],
+      agents: [{ id: "orphan", title: null, provider: "codex", status: "running" }],
+    });
+    const two = normalise({ hostId: "two", connection: "connected", revision: 1, events: [], icons: new Map(), rosters: new Map(),
+      projects: [{ projectId: "known", projectDisplayName: "Known" }],
+      workspaces: [{ id: "known", projectId: "known", name: "Known", projectDisplayName: "Known" }],
+      agents: [{ id: "known", workspaceId: "known", title: null, provider: "codex", status: "running" }],
+    });
+    const model = composeHostSnapshots([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ], new Map([["one", one], ["two", two]]), 1);
+    const tracker = new ActivityTracker();
+    tracker.ingest([
+      { id: "one:event", hostId: "one", nodeId: "one:agent:orphan", kind: "tool", timestamp: 1000 },
+      { id: "two:event", hostId: "two", nodeId: "two:agent:known", kind: "tool", timestamp: 1000 },
+    ], 1000);
+    const totals = aggregateOwnedActivity(model, buildOwnershipIndex(model), tracker, 1000);
+    expect(totals.get(unassignedScopeId("one"))).toMatchObject({ score: 1, working: 1, managed: 1 });
+    expect(totals.get("two:project:known")).toMatchObject({ score: 1, working: 1, managed: 1 });
+    expect(totals.has(unassignedScopeId("two"))).toBe(false);
   });
 
   it("guards repeated node identities and invalid parent cycles without inventing aggregate owners", () => {

@@ -3,6 +3,7 @@ import { addEdges, full } from "./fixture";
 
 /** Native acceptance keeps real terminal outcomes in one mixed inactive group. */
 const closedChild: OverviewNode = {
+  hostId: "fixture-host",
   id: "closed-child",
   kind: "agent",
   workspaceId: "w0",

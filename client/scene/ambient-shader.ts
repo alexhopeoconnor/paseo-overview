@@ -1,5 +1,6 @@
-// A bounded integrated clock shared by the restrained cloud drift. The period
-// uses simple sine harmonics so wrapping does not introduce a visible jump.
+import { ROOM_FIELD_SHADER_CHUNK } from "./room-field";
+
+// Integrated phases wrap on integer harmonics of this period, without a jump.
 export const AMBIENT_PHASE_PERIOD_SECONDS = 256;
 
 export const roomVertexShader = /* glsl */ `
@@ -7,11 +8,13 @@ attribute vec2 aRoomCoord;
 attribute float aRoomSurface;
 varying vec2 vRoomCoord;
 varying float vRoomSurface;
+${ROOM_FIELD_SHADER_CHUNK}
 
 void main() {
   vRoomCoord = aRoomCoord;
   vRoomSurface = aRoomSurface;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec3 world = warpedRoomSurface(aRoomCoord, aRoomSurface);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
 }
 `;
 
@@ -40,8 +43,6 @@ void main() {
   vec2 minorAxes = gridAxes(vRoomCoord * 2.5, 0.24 * uPixelRatio);
   float major = max(majorAxes.x, majorAxes.y);
   float minor = max(minorAxes.x, minorAxes.y) * 0.24;
-  // The shared floor/wall coordinate is zero at their exact 3D seam. Fading
-  // both coincident contours avoids a false glowing horizon or a double line.
   float seamQuiet = smoothstep(0.0, 0.1, abs(vRoomCoord.y));
   float grid = (major + minor) * seamQuiet;
   vec3 colour = mix(uLine, uRim, uRimOpacity * 0.3);
@@ -61,43 +62,65 @@ export const cloudVertexShader = /* glsl */ `
 uniform float uPhase;
 uniform float uPixelRatio;
 uniform float uViewportHeight;
+uniform float uVolume;
+uniform sampler2D uCloudStates;
+uniform vec2 uCloudStateSize;
+attribute float aCloudIndex;
 attribute float aCloudSize;
-attribute float aCloudEnergy;
 attribute float aCloudAlpha;
 attribute float aCloudRim;
 attribute float aCloudSeed;
 varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
+varying float vCloudSeed;
+
+vec4 cloudState(float column) {
+  return texture2D(uCloudStates, vec2((column + 0.5) / uCloudStateSize.x,
+    (aCloudIndex + 0.5) / uCloudStateSize.y));
+}
 
 void main() {
-  vec3 displaced = position;
-  // Only the particle volume breathes. Its centre and therefore the stream
-  // destination remain fixed on the graph's exactly projected centre.
-  float phase = 6.28318530718 * uPhase / ${AMBIENT_PHASE_PERIOD_SECONDS.toFixed(1)};
-  displaced.x += sin(phase + aCloudSeed * 19.0) * aCloudSize * 0.32;
-  displaced.y += cos(phase * 2.0 + aCloudSeed * 23.0) * aCloudSize * 0.25;
+  vec4 centrePhase = cloudState(0.0);
+  vec4 radiusEnergy = cloudState(1.0);
+  vec4 metadata = cloudState(2.0);
+  float phase = 6.28318530718 * centrePhase.w / ${AMBIENT_PHASE_PERIOD_SECONDS.toFixed(1)};
+  float frequencyX = 7.0 + floor(aCloudSeed * 7.0);
+  float frequencyY = 8.0 + floor(aCloudSeed * 8.0);
+  float driftCss = 3.0 + aCloudSeed * 5.0;
+  vec3 drift = vec3(
+    sin(phase * frequencyX + aCloudSeed * 19.0),
+    cos(phase * frequencyY + aCloudSeed * 23.0),
+    sin(phase * (frequencyX - 1.0) + aCloudSeed * 29.0) * 0.35
+  ) * driftCss * metadata.y;
+  vec3 displaced = centrePhase.xyz + position * radiusEnergy.xyz + drift;
   vec4 viewPosition = modelViewMatrix * vec4(displaced, 1.0);
   gl_Position = projectionMatrix * viewPosition;
-  float pointSize = aCloudSize * projectionMatrix[1][1] * uViewportHeight * 0.5 / max(1.0, -viewPosition.z);
-  gl_PointSize = clamp(pointSize, 0.65 * uPixelRatio, 3.4 * uPixelRatio);
-  vCloudEnergy = aCloudEnergy;
-  vCloudAlpha = aCloudAlpha;
+  float cssSize = aCloudSize * (0.8 + radiusEnergy.w * 0.55);
+  float volumeSize = (7.0 + 11.0 * (1.0 - clamp(length(position), 0.0, 1.0))) *
+    (0.75 + radiusEnergy.w * 0.35);
+  gl_PointSize = mix(clamp(cssSize, 0.65, 3.4), clamp(volumeSize, 4.0, 22.0), uVolume) * uPixelRatio;
+  vCloudEnergy = radiusEnergy.w;
+  vCloudAlpha = metadata.x * aCloudAlpha;
   vCloudRim = aCloudRim;
+  vCloudSeed = aCloudSeed;
 }
 `;
 
 export const cloudLineFragmentShader = /* glsl */ `
 uniform vec3 uInk;
 uniform vec3 uEnergy;
+uniform vec3 uShade;
 uniform vec3 uRim;
 uniform float uOpacity;
 varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
+varying float vCloudSeed;
 
 void main() {
   vec3 colour = mix(uInk, uEnergy, clamp(vCloudEnergy, 0.0, 1.0) * 0.7);
+  colour = mix(colour, uShade, 0.2 + (1.0 - vCloudSeed) * 0.18);
   colour = mix(colour, uRim, vCloudRim * 0.48);
   gl_FragColor = vec4(colour, vCloudAlpha * 0.42 * uOpacity);
   #include <colorspace_fragment>
@@ -107,19 +130,26 @@ void main() {
 export const cloudFragmentShader = /* glsl */ `
 uniform vec3 uInk;
 uniform vec3 uEnergy;
+uniform vec3 uShade;
 uniform vec3 uRim;
 uniform float uOpacity;
+uniform float uVolume;
 varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
+varying float vCloudSeed;
 
 void main() {
   vec2 centred = gl_PointCoord * 2.0 - 1.0;
   float radius = length(centred);
   if (radius > 1.0) discard;
-  float coverage = (1.0 - smoothstep(0.25, 1.0, radius)) * vCloudAlpha;
   vec3 colour = mix(uInk, uEnergy, clamp(vCloudEnergy, 0.0, 1.0) * 0.7);
-  colour = mix(colour, uRim, vCloudRim * 0.48);
+  float light = clamp(0.78 - centred.x * 0.2 + centred.y * 0.3 - radius * 0.3, 0.0, 1.0);
+  colour = mix(uShade, colour, 0.3 + light * 0.7);
+  colour = mix(colour, uRim, smoothstep(0.42, 0.96, radius) * vCloudRim * 0.48);
+  float particle = pow(1.0 - smoothstep(0.12, 1.0, radius), 1.35);
+  float volume = exp(-3.8 * radius * radius) * (1.0 - smoothstep(0.62, 1.0, radius));
+  float coverage = mix(particle, volume * 0.22, uVolume) * vCloudAlpha;
   gl_FragColor = vec4(colour, coverage * uOpacity);
   #include <colorspace_fragment>
 }

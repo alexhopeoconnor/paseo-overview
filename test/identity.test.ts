@@ -17,12 +17,12 @@ describe("stable graph identity", () => {
   });
 
   it("uses actual same-workspace ownership for visual role while identity remains unchanged", () => {
-    const node = (id: string, workspaceId: string, parentId?: string): OverviewNode => ({ id, workspaceId, parentId,
+    const node = (id: string, workspaceId: string, parentId?: string): OverviewNode => ({ hostId: "host", id, workspaceId, parentId,
       managedAgentId: id, kind: "agent", label: id, state: "idle", attention: false });
-    const model: OverviewModel = { hostId: "host", projects: [{ id: "p", projectId: "raw", name: "Project", workspaceIds: ["one", "two"] }],
-      workspaces: ["one", "two"].map(id => ({ id, projectId: "raw", projectName: "Project", name: id, agentIds: [] })),
+    const model: OverviewModel = { hosts: [{ id: "host", label: "Host", connection: "connected", readiness: { projects: true, workspaces: true, agents: true } }], projects: [{ hostId: "host", id: "p", projectId: "raw", name: "Project", workspaceIds: ["one", "two"] }],
+      workspaces: ["one", "two"].map(id => ({ hostId: "host", projectDisplayId: "p", id, projectId: "raw", projectName: "Project", name: id, agentIds: [] })),
       nodes: [node("parent", "one"), node("child", "one", "parent"), node("remote", "two", "parent")],
-      events: [], edges: [], connection: "connected", revision: 1, readiness: { projects: true, workspaces: true, agents: true } };
+      events: [], edges: [], revision: 1 };
     const ownership = buildOwnershipIndex(model), agents = new Map(model.nodes.map(node => [node.id, node]));
     expect(agentRole("parent", ownership, agents)).toBe("agent");
     expect(agentRole("child", ownership, agents)).toBe("subagent");

@@ -5,6 +5,7 @@ const net = require("node:net");
 const { spawn } = require("node:child_process");
 const { setTimeout: delay } = require("node:timers/promises");
 const { createHash } = require("node:crypto");
+const { checkMultipleHosts } = require("./multi-host.cjs");
 
 function readExpectation(env) {
   const runtimeVersion = env.OVERVIEW_EXPECT_RUNTIME_VERSION;
@@ -208,16 +209,17 @@ async function run() {
           message.page = { ...(message.page || {}), limit: 5 };
           proxiedPages++;
         }
-        if (message.type === "plugin.rpc.invoke.request" && message.method === "overview.roster") rosterRequests.set(message.requestId, message.input.parentAgentId);
+        if (message.type === "agent.provider_subagents.snapshot.request") rosterRequests.set(message.requestId, message.parentAgentId);
         upstream.send(JSON.stringify(packet));
       });
       upstream.onMessage(async raw => {
         const packet = JSON.parse(String(raw));
         const message = packet.message || packet;
         if (message.type === "agent_stream") liveRows.push(message);
-        if (message.type === "plugin.rpc.invoke.response" && nativeParents.has(rosterRequests.get(message.payload.requestId))) {
-          const snapshot = message.payload.output;
-          // Transport fixture tests dense native presentation; the real passive RPC still executes.
+        if (message.type === "agent.provider_subagents.snapshot.response" && nativeParents.has(rosterRequests.get(message.payload.requestId))) {
+          const snapshot = message.payload;
+          rosterRequests.delete(message.payload.requestId);
+          // The real public per-host passive read executes before this dense fixture is substituted.
           snapshot.subagents = Array.from({ length: nativeParents.get(snapshot.parentAgentId) }, (_, index) => ({
             id: `fixture-native-${String(index).padStart(3, "0")}`, parentAgentId: snapshot.parentAgentId,
             parentSubagentId: null,
@@ -237,6 +239,7 @@ async function run() {
     await page.getByRole("button", { name: "Overview", exact: true }).click();
     await page.getByTestId("overview-screen").waitFor({ state: "visible" });
     await page.getByTestId("overview-canvas-host").locator("canvas").waitFor({ state: "visible" });
+    const overviewUrl = page.url();
     await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 0, "empty initial project graph");
     await page.screenshot({ path: path.join(output, "empty.png") });
     await delay(250);
@@ -244,9 +247,9 @@ async function run() {
     await delay(600);
     const gridMoved = await packagedGridPixels(page, "motion");
     assert.ok(gridLight.structurePixels > 800, "Prepared plugin renders visible grid structure in the empty graph");
-    // An empty room has no invented activity feeds. Real feed motion is covered
-    // by the event-driven renderer fixture; this packaged check proves coverage.
-    assert.ok(gridMoved.structurePixels > 800, "Empty room remains covered without synthetic traffic");
+    // Sparse ambient transit is decorative; real activity feeds are covered by
+    // the event-driven fixture. Neither requires invented cloud activity here.
+    assert.ok(gridMoved.structurePixels > 800, "Empty room remains covered during ambient transit");
     await page.emulateMedia({ colorScheme: "dark" });
     await delay(250);
     const gridDark = await packagedGridPixels(page, "dark");
@@ -549,9 +552,11 @@ async function run() {
       await waitFor(async () => (await page.locator("body").innerText()).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
       assert.equal(await page.getByText("Show less",{exact:true}).count(),0);
     }
+    const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version });
+    fs.writeFileSync(path.join(output, "multi-host.json"), JSON.stringify(multipleHosts, null, 2));
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {

@@ -1,16 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { nativeGraphLayout, nativeInitialScrollX, nativeSummary, NATIVE_UNASSIGNED, type NativeGraphLayout } from "../client/native-layout";
+import { nativeGraphLayout, nativeInitialScrollX, nativeSummary, nativeUnassignedScope, type NativeGraphLayout } from "../client/native-layout";
 import { StableLayout } from "../client/layout";
 import { rectsOverlap, segmentIntersectsRect, segmentsCross } from "../client/geometry";
-import type { OverviewModel, OverviewNode } from "../shared/model";
+import type { OverviewHostState, OverviewModel, OverviewNode } from "../shared/model";
 
-const agent = (id: string, workspaceId: string | null, parentId?: string, native = false): OverviewNode => ({
-  id, workspaceId, parentId, managedAgentId: native ? "a0" : id, kind: native ? "provider-subagent" : "agent", label: id, state: native ? "working" : "idle", attention: false,
+const hostId = "host";
+const hostState = (id = hostId, connection: OverviewHostState["connection"] = "connected"): OverviewHostState => ({
+  id, label: `${id} host`, connection, readiness: { projects: true, workspaces: true, agents: true }, freshness: "current",
+});
+const agent = (id: string, workspaceId: string | null, parentId?: string, native = false, owner = hostId): OverviewNode => ({
+  id, hostId: owner, workspaceId, parentId, managedAgentId: native ? "a0" : id, kind: native ? "provider-subagent" : "agent",
+  label: id, state: native ? "working" : "idle", attention: false,
 });
 function fixture(): OverviewModel {
-  const workspaces = Array.from({ length: 4 }, (_, index) => ({ id: `w${index}`, projectId: "raw", name: `Workspace ${index}`, projectName: "Project", agentIds: [`a${index}`] }));
-  return { hostId: "host", revision: 1, connection: "connected", events: [], edges: [], readiness: { projects: true, workspaces: true, agents: true },
-    projects: [{ id: "p", projectId: "raw", name: "Project", workspaceIds: workspaces.map(workspace => workspace.id) }, { id: "empty", projectId: "empty-raw", name: "Empty", workspaceIds: [] }],
+  const workspaces = Array.from({ length: 4 }, (_, index) => ({
+    hostId, id: `w${index}`, projectId: "raw", projectDisplayId: "p", name: `Workspace ${index}`, projectName: "Project", agentIds: [`a${index}`],
+  }));
+  return {
+    hosts: [hostState()], revision: 1, events: [], edges: [],
+    projects: [{ hostId, id: "p", projectId: "raw", name: "Project", workspaceIds: workspaces.map(workspace => workspace.id) },
+      { hostId, id: "empty", projectId: "empty-raw", name: "Empty", workspaceIds: [] }],
     workspaces, nodes: workspaces.map((workspace, index) => agent(`a${index}`, workspace.id)),
   };
 }
@@ -99,20 +108,43 @@ describe("native spatial ownership graph", () => {
   });
   it("preserves actual ownership, including unknown workspaces, orphans and cycles", () => {
     const model = fixture();
-    model.workspaces = [...model.workspaces, { id: "unknown", projectId: "missing", name: "Unknown project", projectName: "Missing", agentIds: [] }];
+    model.workspaces = [...model.workspaces, { hostId, id: "unknown", projectId: "missing", projectDisplayId: null, name: "Unknown project", projectName: "Missing", agentIds: [] }];
     model.nodes = [...model.nodes, agent("cross", "w1", "a0"), agent("orphan", null), agent("cycle-a", null, "cycle-b"), agent("cycle-b", null, "cycle-a"), agent("unknown-agent", "unknown")];
     const one = nativeGraphLayout(model, { kind: "workspace", id: "w1" }, 360);
     expect(one.nodes.find(node => node.id === "cross")!.parentId).toBe("w1"); valid(one);
-    const unassigned = nativeGraphLayout(model, { kind: "unassigned", id: NATIVE_UNASSIGNED }, 360);
+    const unassigned = nativeGraphLayout(model, nativeUnassignedScope(hostId), 360);
     for (const id of ["unknown", "orphan", "cycle-a", "cycle-b"]) expect(unassigned.nodes.some(node => node.id === id)).toBe(true);
     valid(unassigned);
     expect(nativeGraphLayout(model, { kind: "project", id: "gone" }, 360).focus).toBeNull();
+  });
+  it("keeps equal raw project identities separate across hosts and scopes unassigned per host", () => {
+    const model = fixture();
+    model.hosts = [...model.hosts, hostState("other")];
+    model.projects = [...model.projects, { hostId: "other", id: "q", projectId: "raw", name: "Project", workspaceIds: ["w-other"] }];
+    model.workspaces = [...model.workspaces,
+      { hostId: "other", id: "w-other", projectId: "raw", projectDisplayId: "q", name: "Other workspace", projectName: "Project", agentIds: [] },
+      { hostId: "other", id: "loose-other", projectId: null, projectDisplayId: null, name: "Loose", projectName: "Other", agentIds: [] },
+      { hostId, id: "loose-host", projectId: null, projectDisplayId: null, name: "Loose host", projectName: "Host", agentIds: [] }];
+    model.nodes = [...model.nodes, agent("other-agent", "w-other", undefined, false, "other"),
+      agent("loose-agent", "loose-other", undefined, false, "other"), agent("host-loose-agent", "loose-host")];
+    const other = nativeGraphLayout(model, { kind: "project", id: "q" }, 360);
+    expect(other.nodes.find(node => node.id === "w-other")).toBeTruthy();
+    expect(other.nodes.some(node => node.id === "w0")).toBe(false);
+    const unassignedOther = nativeGraphLayout(model, nativeUnassignedScope("other"), 360);
+    expect(unassignedOther.nodes.some(node => node.id === "loose-other")).toBe(true);
+    expect(unassignedOther.nodes.some(node => node.id === "loose-host")).toBe(false);
+    const unassignedHost = nativeGraphLayout(model, nativeUnassignedScope(hostId), 360);
+    expect(unassignedHost.nodes.some(node => node.id === "loose-host")).toBe(true);
+    expect(unassignedHost.nodes.some(node => node.id === "loose-other")).toBe(false);
+    const roots = nativeGraphLayout(model, null, 360);
+    expect(roots.nodes.filter(node => node.kind === "unassigned")).toHaveLength(2);
+    valid(other); valid(unassignedOther); valid(unassignedHost); valid(roots);
   });
   it("keeps geometry stable on renamed metadata, icons and response reordering", () => {
     const model = fixture();
     model.nodes = [...model.nodes, agent("native-a", "w0", "a0", true), agent("native-b", "w0", "a0", true)];
     const first = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360);
-    const changed = { ...model, projects: [...model.projects].reverse().map(project => ({ ...project, name: "Renamed", iconUrl: "updated-icon" })),
+    const changed = { ...model, hosts: [...model.hosts], projects: [...model.projects].reverse().map(project => ({ ...project, name: "Renamed", iconUrl: "updated-icon" })),
       workspaces: [...model.workspaces].reverse(), nodes: [...model.nodes].reverse().map(node => ({ ...node, label: "New title" })) };
     const next = nativeGraphLayout(changed, { kind: "workspace", id: "w0" }, 360);
     expect(next.nodes.map(node => ({ id: node.id, bounds: node.bounds }))).toEqual(first.nodes.map(node => ({ id: node.id, bounds: node.bounds })));

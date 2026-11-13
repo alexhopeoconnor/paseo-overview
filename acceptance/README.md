@@ -11,12 +11,17 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   appearance changes; pause/static/off/reduced-motion/visibility; shader
   isolation and disposal. Instrumentation stays in the fixture. Pixel evidence
   accompanies geometry assertions: nonzero attributes alone are not visual
-  acceptance. An empty room need not invent feeds or continuously move.
+  acceptance. An online empty room may show sparse decorative transit; these
+  streams have no cloud destination and never create observed activity.
+  Two-host fixtures verify duplicate local IDs, isolated disconnect cleanup,
+  retained selection and unchanged overlay geometry during heartbeat-only frames.
 - `performance.cjs` connects to an explicitly supplied isolated hardware-browser
   CDP endpoint. It records frame intervals, browser main-thread/script work,
   resource counts and automated pointer-selection timing. It rejects software
   rendering; its timings are observations of the tested machine, not universal
-  performance guarantees.
+  performance guarantees. Matching no-event on/off runs remain comparable; a
+  separate streaming scenario exercises event admission and bubbles. Counters
+  distinguish layout, overlay positioning and transient-placement work.
 - `native-preview.cjs` renders the actual native graph and shared header through
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
@@ -40,6 +45,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
   tests use a real user click and inspect `document.fullscreenElement`; controller
   mocks alone are not fullscreen acceptance.
+  Its `multi-host.cjs` helper starts a second isolated daemon from that same
+  package, with no Overview installation, and checks borrowed remote reads,
+  host/project menus, correct-host chat navigation and offline retention.
   Light-mode movement must change enough composited pixels with a meaningful
   contrast delta; merely changing a few pixel values is insufficient.
 
@@ -62,17 +70,17 @@ hardware frame-time, draw-call and pointer-response conclusions.
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-080` in this example:
+`/tmp/overview-090` in this example:
 
 ```bash
-mkdir -p /tmp/overview-080
+mkdir -p /tmp/overview-090
 overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-080,dst=/out \
+  --mount type=bind,src=/tmp/overview-090,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   "$overview_check_image" \

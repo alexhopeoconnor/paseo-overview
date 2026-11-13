@@ -8,7 +8,7 @@ const theme: OverviewTheme = {
   border: "border", accent: "accent", working: "working", waiting: "waiting", error: "error",
 };
 const node = (extra: Partial<OverviewNode> = {}): OverviewNode => ({
-  id: "agent", kind: "agent", workspaceId: "workspace", managedAgentId: "agent", label: "Agent",
+  id: "agent", hostId: "status-test", kind: "agent", workspaceId: "workspace", managedAgentId: "agent", label: "Agent",
   state: "idle", attention: false, attentionReason: null, ...extra,
 });
 

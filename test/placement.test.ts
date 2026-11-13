@@ -1,8 +1,13 @@
 import { createGraphFullscreen } from "../client/scene/fullscreen";
-import { nodeObstacleRects, resolveNodePresentation, type NodePresentation } from "../client/scene/overlay";
-import { describe, expect, it, vi } from "vitest";
+import { GraphOverlay, nodeObstacleRects, resolveNodePresentation, type NodePresentation } from "../client/scene/overlay";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { placeNearby } from "../client/placement";
-import { rectsOverlap } from "../client/geometry";
+import { rectsOverlap, type Point } from "../client/geometry";
+import type { ActivityBubble } from "../client/bubbles";
+import type { InactiveGroup } from "../client/collapse";
+import type { SceneLayout, PositionedNode } from "../client/layout";
+import type { OverviewModel } from "../shared/model";
+import type { OverviewTheme } from "../shared/renderer";
 
 describe("nearby graph text", () => {
   const anchor = { x: 200, y: 200, width: 32, height: 32 };
@@ -92,6 +97,204 @@ describe("explicit node presentation", () => {
     };
     expect(nodeObstacleRects(group, distant, origin)).toEqual([group.body, group.labelBounds, group.controlBounds]);
     expect(nodeObstacleRects(group, { ...distant, interactive: false }, origin)).toEqual([group.body, group.labelBounds]);
+  });
+});
+
+interface StyleWrite { property: string; value: string }
+function fakeStyle() {
+  const values: Record<string, string> = {};
+  const writes: StyleWrite[] = [];
+  const style = new Proxy(values, {
+    set(target, property, value) {
+      const key = String(property);
+      writes.push({ property: key, value: String(value) });
+      target[key] = String(value);
+      return true;
+    },
+    get(target, property) { return target[String(property)]; },
+  }) as unknown as CSSStyleDeclaration;
+  return { style, writes };
+}
+
+class FakeElement {
+  private readonly styleState = fakeStyle();
+  readonly attributes = new Map<string, string>();
+  readonly dataset: Record<string, string> = {};
+  readonly children: FakeElement[] = [];
+  readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
+  textContent = "";
+  type = "";
+  disabled = false;
+  tabIndex = -1;
+  offsetHeight = 40;
+  alt = "";
+  draggable = false;
+  src = "";
+  parent?: FakeElement;
+  constructor(readonly tag: string) {}
+  get style() { return this.styleState.style; }
+  get styleWrites() { return this.styleState.writes; }
+  setAttribute(name: string, value: string) { this.attributes.set(name, String(value)); }
+  removeAttribute(name: string) { this.attributes.delete(name); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+  addEventListener(type: string, callback: (...args: any[]) => void) {
+    const group = this.listeners.get(type) ?? new Set<(...args: any[]) => void>();
+    group.add(callback); this.listeners.set(type, group);
+  }
+  appendChild(child: FakeElement) { child.parent = this; this.children.push(child); return child; }
+  append(...nodes: FakeElement[]) { for (const node of nodes) this.appendChild(node); }
+  remove() {
+    if (!this.parent) return;
+    const index = this.parent.children.indexOf(this);
+    if (index >= 0) this.parent.children.splice(index, 1);
+    this.parent = undefined;
+  }
+  focus() { fakeDocument.activeElement = this; }
+  blur() { if (fakeDocument.activeElement === this) fakeDocument.activeElement = null; }
+  matches() { return false; }
+}
+
+const fakeDocument = {
+  activeElement: null as FakeElement | null,
+  createElement: (tag: string) => new FakeElement(tag),
+};
+
+const theme: OverviewTheme = {
+  background: "#ffffff", surface: "#ffffff", foreground: "#111111", muted: "#777777", border: "#cccccc",
+  accent: "#2f7d32", working: "#2f7d32", waiting: "#b26a00", error: "#b3261e",
+};
+const presentation: NodePresentation = { surfaceOpacity: 1, textOpacity: 1, badgeOpacity: 1, edgeOpacity: 1, interactive: true };
+
+function positionedNode(id: string, overrides: Partial<PositionedNode> = {}): PositionedNode {
+  return {
+    id, kind: "agent", projectId: "project", workspaceId: null, label: id,
+    position: { x: 0, y: 0 },
+    body: { x: -16, y: -16, width: 32, height: 32 },
+    bounds: { x: -20, y: -20, width: 40, height: 40 },
+    ...overrides,
+  };
+}
+
+function sceneLayout(nodes: PositionedNode[], groups: InactiveGroup[] = []): SceneLayout {
+  return {
+    projects: [], nodes: new Map(nodes.map(node => [node.id, node])), ownershipEdges: [], delegationEdges: [],
+    groups, memberToDisplay: new Map(nodes.map(node => [node.id, node.id])), width: 800, height: 500,
+  };
+}
+
+function modelWith(ids: string[]): OverviewModel {
+  return {
+    hosts: [], revision: 1, projects: [], workspaces: [], edges: [], events: [],
+    nodes: ids.map(id => ({ id, hostId: "host", kind: "agent", workspaceId: null, managedAgentId: id,
+      label: id, state: "working", attention: false })),
+  };
+}
+
+function graphFixture() {
+  const parent = new FakeElement("div");
+  const callbacks = { activate: vi.fn(), hover: vi.fn(), hold: vi.fn(), collapse: vi.fn() };
+  return { parent, callbacks, overlay: new GraphOverlay(parent as unknown as HTMLElement, theme, callbacks) };
+}
+const childrenOf = (overlay: GraphOverlay) => (overlay.element as unknown as FakeElement).children;
+const nodeButton = (overlay: GraphOverlay, id: string) => childrenOf(overlay).find(child => child.dataset.overviewId === id)!;
+const bubbleButton = (overlay: GraphOverlay, id: string) => childrenOf(overlay).find(child => child.dataset.overviewBubble === id)!;
+const activityBubble = (nodeId: string): ActivityBubble => ({
+  eventId: `event:${nodeId}`, nodeId, workspaceId: null, text: "hello", kind: "message",
+  timestamp: 1, expiresAt: 999_999, priority: 1,
+});
+const inactiveGroup = (parentId: string): InactiveGroup => ({
+  id: "group", parentId, memberIds: ["a", "b"], expanded: true,
+  finished: 2, idle: 0, closed: 0, canceled: 0,
+});
+
+describe("incremental graph overlay", () => {
+  const originalDocument = (globalThis as { document?: unknown }).document;
+  beforeEach(() => {
+    fakeDocument.activeElement = null;
+    (globalThis as { document?: unknown }).document = fakeDocument;
+  });
+  afterEach(() => { (globalThis as { document?: unknown }).document = originalDocument; });
+
+  it("keeps project status counts isolated when hosts share raw project IDs", () => {
+    const { overlay } = graphFixture();
+    const model = modelWith(["first-agent", "second-agent"]);
+    model.projects = ["first", "second"].map(hostId => ({ id: `${hostId}:project:p`, hostId, projectId: "p", name: "Shared name", workspaceIds: [`${hostId}:workspace:w`] }));
+    model.workspaces = model.projects.map(project => ({ id: `${project.hostId}:workspace:w`, hostId: project.hostId, projectId: "p", projectDisplayId: project.id, name: "Work", projectName: project.name, agentIds: [] }));
+    model.nodes = model.nodes.map((node, index) => ({ ...node, hostId: index ? "second" : "first", workspaceId: model.workspaces[index]!.id, state: index ? "error" : "working" }));
+    overlay.sync(sceneLayout(model.projects.map(project => positionedNode(project.id, { kind: "project", label: project.name }))), model);
+    expect(nodeButton(overlay, model.projects[0]!.id).attributes.get("aria-label")).toContain("1 working · 0 waiting · 0 errors");
+    expect(nodeButton(overlay, model.projects[1]!.id).attributes.get("aria-label")).toContain("0 working · 0 waiting · 1 errors");
+  });
+
+  it("writes no styles for an unchanged node frame", () => {
+    const { overlay } = graphFixture();
+    overlay.sync(sceneLayout([positionedNode("agent")]), modelWith(["agent"]));
+    const button = nodeButton(overlay, "agent");
+    overlay.beginPositions(); overlay.positionNode("agent", 100, 100, 1, presentation, false, false, false, false);
+    button.styleWrites.length = 0;
+    overlay.beginPositions(); overlay.positionNode("agent", 100, 100, 1, presentation, false, false, false, false);
+    expect(button.styleWrites).toEqual([]);
+  });
+
+  it("applies selection and focus feedback without waiting for a transform change", () => {
+    const { overlay } = graphFixture();
+    overlay.sync(sceneLayout([positionedNode("agent")]), modelWith(["agent"]));
+    overlay.beginPositions(); overlay.positionNode("agent", 100, 100, 1, presentation, false, false, false, false);
+    const button = nodeButton(overlay, "agent"), ring = button.children[1]!;
+    button.styleWrites.length = 0; ring.styleWrites.length = 0;
+    overlay.beginPositions(); overlay.positionNode("agent", 100, 100, 1, presentation, true, false, false, false);
+    expect(button.attributes.get("aria-pressed")).toBe("true");
+    expect(button.styleWrites).toContainEqual({ property: "zIndex", value: "7" });
+    expect(ring.styleWrites).toContainEqual({ property: "display", value: "block" });
+    expect(ring.styleWrites.some(write => write.property === "outline" && write.value.startsWith("2px solid"))).toBe(true);
+  });
+
+  it("recomputes retained anchors on every transform", () => {
+    const { overlay } = graphFixture();
+    overlay.sync(sceneLayout([positionedNode("agent")]), modelWith(["agent"]));
+    overlay.beginPositions(); overlay.positionNode("agent", 200, 150, 2, presentation, false, false, false, false);
+    expect(overlay.anchor("agent")).toEqual({ x: 168, y: 118, width: 64, height: 64 });
+    overlay.beginPositions(); overlay.positionNode("agent", 220, 160, 2, presentation, false, false, false, false);
+    expect(overlay.anchor("agent")).toEqual({ x: 188, y: 128, width: 64, height: 64 });
+  });
+
+  it("reindexes collapse controls when a group changes parent", () => {
+    const { overlay } = graphFixture();
+    const controlBounds = { x: 10, y: 10, width: 74, height: 28 };
+    overlay.sync(sceneLayout([positionedNode("agent", { controlBounds }), positionedNode("other", { controlBounds })], [inactiveGroup("agent")]), modelWith(["agent", "other"]));
+    const control = childrenOf(overlay).find(child => child.dataset.overviewCollapse === "group")!;
+    overlay.beginPositions(); overlay.positionNode("agent", 100, 100, 1, presentation, false, false, false, false);
+    expect(control.styleWrites).toContainEqual({ property: "left", value: "110px" });
+    overlay.sync(sceneLayout([positionedNode("agent", { controlBounds }), positionedNode("other", { controlBounds })], [inactiveGroup("other")]), modelWith(["agent", "other"]));
+    control.styleWrites.length = 0;
+    overlay.beginPositions(); overlay.positionNode("agent", 60, 100, 1, presentation, false, false, false, false);
+    expect(control.styleWrites).toEqual([]);
+    overlay.positionNode("other", 400, 100, 1, presentation, false, false, false, false);
+    expect(control.styleWrites).toContainEqual({ property: "left", value: "410px" });
+  });
+
+  it("keeps a placed bubble on a finish-only frame and reacts to mutable routes", () => {
+    const { overlay } = graphFixture();
+    overlay.sync(sceneLayout([positionedNode("agent")]), modelWith(["agent"]));
+    overlay.beginPositions(); overlay.positionNode("agent", 200, 200, 1, presentation, false, false, false, false);
+    const routes: Point[][] = [[{ x: 0, y: 0 }, { x: 0, y: 500 }]];
+    overlay.setRoutes(routes);
+    overlay.finishPositions([activityBubble("agent")], 800, 500);
+    const button = bubbleButton(overlay, "agent");
+    expect(button.styleWrites).toContainEqual({ property: "left", value: "226px" });
+    button.styleWrites.length = 0;
+    overlay.finishPositions([activityBubble("agent")], 800, 500);
+    expect(button.styleWrites).toEqual([]);
+    routes[0]![0]!.x = 300; routes[0]![1]!.x = 300;
+    overlay.setRoutes(routes);
+    button.styleWrites.length = 0;
+    overlay.finishPositions([activityBubble("agent")], 800, 500);
+    expect(button.styleWrites).toContainEqual({ property: "left", value: "29px" });
+    overlay.beginPositions(); overlay.positionNode("agent", 300, 200, 1, presentation, false, false, false, false);
+    overlay.setRoutes([[{ x: 0, y: 0 }, { x: 0, y: 500 }]]);
+    button.styleWrites.length = 0;
+    overlay.finishPositions([activityBubble("agent")], 800, 500);
+    expect(button.styleWrites).toContainEqual({ property: "left", value: "129px" });
   });
 });
 

@@ -3,6 +3,8 @@ export type OverviewState = "working" | "waiting" | "idle" | "finished" | "close
 export type RosterAvailability = "resident" | "not_resident" | "unknown";
 export type AttentionReason = "finished" | "permission" | "error" | null;
 export type ObservationFreshness = "current" | "refreshing" | "stale";
+export type OverviewConnection = "connected" | "connecting" | "disconnected";
+export type OverviewHostStatus = "idle" | "connecting" | "online" | "offline" | "error";
 
 export interface EventPreview {
   title: string;
@@ -12,6 +14,7 @@ export interface EventPreview {
 
 export interface OverviewProject {
   id: string;
+  hostId: string;
   projectId: string;
   name: string;
   iconUrl?: string;
@@ -26,7 +29,11 @@ export interface OverviewReadiness {
 
 export interface OverviewWorkspace {
   id: string;
+  hostId: string;
+  /** The host-local project identity. Never used as a cross-host ownership key. */
   projectId: string | null;
+  /** The host-qualified project identity, when that project is known. */
+  projectDisplayId: string | null;
   name: string;
   projectName: string;
   iconUrl?: string;
@@ -35,11 +42,19 @@ export interface OverviewWorkspace {
 
 export interface OverviewNode {
   id: string;
+  hostId: string;
   kind: "agent" | "provider-subagent";
   workspaceId: string | null;
   managedAgentId: string;
   providerSubagentId?: string;
+  /** Ownership parent inside the same workspace. */
   parentId?: string;
+  /**
+   * Host-qualified delegation metadata for an explicit cross-host parent.
+   * It is never an ownership parent and only becomes an edge once both
+   * endpoints are present in the composed graph.
+   */
+  delegationParentId?: string;
   label: string;
   state: OverviewState;
   attention: boolean;
@@ -62,6 +77,7 @@ export interface OverviewEdge {
 
 export interface OverviewEvent {
   id: string;
+  hostId: string;
   nodeId: string;
   kind: "activity" | "message" | "tool" | "finished" | "error" | "attention";
   text?: string;
@@ -74,16 +90,47 @@ export interface OverviewEvent {
   timestamp: number;
 }
 
-export interface OverviewModel {
-  hostId: string;
+/** The host-independent graph shared by one host snapshot and the composed model. */
+export interface OverviewGraph {
   projects: readonly OverviewProject[];
   workspaces: readonly OverviewWorkspace[];
   nodes: readonly OverviewNode[];
   edges: readonly OverviewEdge[];
   events: readonly OverviewEvent[];
+}
+
+/** One host's isolated observation. It never contains another host's entities. */
+export interface OverviewHostSnapshot extends OverviewGraph {
+  hostId: string;
   readiness: OverviewReadiness;
-  connection: "connected" | "connecting" | "disconnected";
+  connection: OverviewConnection;
   freshness?: ObservationFreshness;
+  revision: number;
+}
+
+/**
+ * A configured host as presented by the client's host directory.
+ * UI maps `useHosts()`'s `serverId` to this `id`.
+ */
+export interface OverviewHostSummary {
+  id: string;
+  label: string;
+  status: OverviewHostStatus;
+  error?: string;
+}
+
+export interface OverviewHostState {
+  id: string;
+  label: string;
+  connection: OverviewConnection;
+  readiness: OverviewReadiness;
+  freshness?: ObservationFreshness;
+  error?: string;
+}
+
+/** The composed view across configured hosts. Readiness and connection are per host. */
+export interface OverviewModel extends OverviewGraph {
+  hosts: readonly OverviewHostState[];
   revision: number;
 }
 

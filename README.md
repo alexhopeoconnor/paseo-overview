@@ -7,8 +7,10 @@ A read-only view of project, workspace and agent activity, contributed as a sepa
 **Overview** page in Paseo. The existing workspace, chat and editor surfaces keep
 their normal behaviour.
 
-Every live project on the selected host has its own graph, including empty
-projects. The project uses its current icon and name; its actual workspaces,
+Every project on the included hosts has its own graph, including empty
+projects. **All hosts** and **All projects** are the defaults; use the toolbar
+selectors to narrow the view. Hosts with unavailable data remain listed with
+their connection state, and duplicate project names include their host. The project uses its current icon and name; its actual workspaces,
 managed agents and known provider-native subagents branch beneath it. Project
 membership is automatic and follows Paseo IDs, not directory nesting or a fixed
 selection. Ownership routes avoid unrelated nodes and labels. Cross-workspace
@@ -55,11 +57,14 @@ unfinished fragments do not replace readable text. Storage is bounded, final
 excerpts accompany turn completion, and preview publication never adds activity.
 
 The browser graph floats in front of a procedural room with a perspective floor
-and back wall. Each project has a faint, stable particle cloud behind its graph.
-Fresh observed activity admits short, bounded binary streams along the room grid
-toward that cloud; their arrival briefly brightens it. These are visual summaries,
-not byte counters. They never add activity scores or replay missed events. Quiet
-projects retain a calm background, and empty projects remain visible.
+and back wall. Soft particle clouds drift behind the graphs, with their sparse
+connecting lines following the same particles. Active clouds gently bend the
+grid behind them. Small binary heads and fading light trails follow that same
+surface, including the floor/wall seam. Fresh activity admits a bounded feed
+to a grid junction behind its cloud; arrival briefly brightens the cloud. A few
+decorative streams also cross the room without a cloud destination. These are
+visual summaries and decoration, not byte counters. They never add activity
+scores or replay missed events. Quiet and empty projects remain visible.
 
 The graph and room share one resolved depth projection. Recent owned activity
 brings a graph forward while quieter neighbours recede modestly. Packing reserves
@@ -79,15 +84,17 @@ Plugins → Overview → Appearance** for the full controls:
 - **Response:** Relaxed, Balanced or Responsive activity-depth changes.
 - **Background speed:** Slow, Normal or Fast without changing observed activity.
 
-These appearance preferences are saved on the host and shared by its clients.
-They update the existing view without losing focus, selection or group choices.
+These appearance preferences are saved on the host where Overview is installed
+and shared by its clients. Filtering to another host does not change the settings
+owner. They update the existing view without losing focus, selection or group choices.
 The phone graph uses the theme and compact controls; the spatial background and
 its speed/depth settings apply to the browser graph.
 
 **Pause motion** is a temporary master control: it freezes graph and background
 animation while live status and readable previews continue. Reduced motion uses
-a static background. Hidden tabs and disconnected sessions schedule no background
-animation, and returning does not replay missed feeds. Theme, resize and explicit
+a static background. Hidden tabs and a view with no connected hosts schedule no
+background animation. A disconnected host retains its last coherent graph and
+frozen cloud while other hosts continue; returning does not replay missed feeds. Theme, resize and explicit
 navigation can still redraw. Background rendering shares the graph's WebGL
 renderer and fails independently, leaving the graph usable if a shader fails.
 
@@ -102,11 +109,16 @@ stop animations while status remains readable.
 
 ## Observation and coverage
 
-Overview reads the selected host's projects, workspaces and public agents,
-including background workspaces. It observes current activity without fetching
+Overview borrows the application's existing APIs for the included configured
+hosts and reads their projects, workspaces and public agents, including background
+workspaces. It opens no additional host connections. Each host owns an independent
+observation store and freshness state; one slow or offline host does not block the
+others. Project references, native identities and events are host-qualified.
+Cross-host delegation is shown only when explicit parent metadata and both
+known endpoints are available; ownership and activity totals remain local. It observes current activity without fetching
 chat history. It does not prompt, stop, archive, answer permissions, change
 metadata or clear attention. **Open chat** deliberately navigates into the normal
-Paseo chat screen, where that screen's usual behaviour applies.
+Paseo chat screen on the agent's owning host, where that screen's usual behaviour applies.
 
 Native subagent coverage is the daemon's known resident roster. An unloaded
 parent is labelled unavailable, rather than shown as an empty known roster.
@@ -159,9 +171,12 @@ cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
 empty-to-populated loading, suspension, stable identity, explicit grouping,
 branch layout, routed geometry, preview assembly, fullscreen ownership, bounded
-depth, once-only pulse/feed arrivals, persisted appearance and room projection. Activity and icon
-updates preserve packed positions; ambient-only frames reuse their field without
-layout or route work. Structural changes may expand an affected branch.
+depth, once-only pulse/feed arrivals, persisted appearance, multi-host isolation
+and room projection. Activity and icon updates preserve packed positions.
+Heartbeat-only frames reuse node presentation, routes and activity aggregation;
+unchanged overlay properties are not rewritten. Cloud particle motion runs in
+GPU shaders from cached offsets and per-project state. Background-only frames
+reuse their field without layout or route work. Structural changes may expand an affected branch.
 
 An optional managed workstation installation uses lock schema 5 and recipe 1: signed source,
 pinned Docker inputs, normal production dependencies and exact host validation.
@@ -184,10 +199,11 @@ is found; browser-only rendering changes do not add an unrelated device gate.
 ## Source layout
 
 - `index.client.tsx`, `client/screen.tsx`, `client/native.tsx`: contributed UI.
-- `client/header.tsx`, `agent-details.tsx`, `presentation.ts`: shared interaction state.
+- `client/header.tsx`, `agent-details.tsx`, `presentation.ts`: toolbar and shared interaction state.
 - `client/native-layout.ts`, `native-node.tsx`, `native-motion.ts`: touch graph.
 - `client/identity.ts`, `appearance.ts`, `collapse.ts`: shared visual policies.
-- `client/transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: passive observation.
+- `client/hosts.ts`, `host-api.ts`, `transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: independent passive host observation.
+- `shared/hosts.ts`, `shared/model.ts`: host-qualified composition and freshness contracts.
 - `client/normalize.ts`: ownership and display model.
 - `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.
 - `client/activity.ts`, `assistant-preview.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: activity and bounded previews.
