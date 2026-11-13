@@ -17,7 +17,7 @@ export function placeNearby(input: {
   previous?: NearbyPlacement; maximumGap?: number;
 }): NearbyPlacement | undefined {
   const { anchor, width, height, viewport, occupied } = input;
-  const maximumGap = input.maximumGap ?? 64, padding = 8, gap = 10;
+  const maximumGap = input.maximumGap ?? 64, padding = 8;
   if (width <= 0 || height <= 0 || width > viewport.width - 16 || height > viewport.height - 16) return;
   const valid = (candidate: NearbyPlacement) => {
     const box = candidate.box;
@@ -35,7 +35,9 @@ export function placeNearby(input: {
     y: side === "top" || side === "bottom" ? y : Math.max(viewport.y + padding, Math.min(viewport.y + viewport.height - height - padding, y)), width, height,
   } });
   const order = input.previous ? [input.previous.side, ...(["right", "left", "top", "bottom"] as const).filter(side => side !== input.previous!.side)] : ["right", "left", "top", "bottom"] as const;
-  for (const side of order) for (const displacement of [0, -24, 24, -48, 48]) {
+  // Try the closest ring first, then two bounded alternatives. A readable
+  // distant label can block the first ring without blocking nearby space.
+  for (const gap of [10, 32, 54]) for (const side of order) for (const displacement of [0, -24, 24, -48, 48]) {
     if (side === "right" || side === "left") push(side, side === "right" ? anchor.x + anchor.width + gap : anchor.x - width - gap, anchor.y + (anchor.height - height) / 2 + displacement);
     else push(side, anchor.x + (anchor.width - width) / 2 + displacement, side === "bottom" ? anchor.y + anchor.height + gap : anchor.y - height - gap);
   }

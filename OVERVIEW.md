@@ -29,15 +29,18 @@ Brief, nearby bubbles show bounded activity previews; long text has an ellipsis.
 Streaming text is assembled into readable sentences or chunks, updated about once
 a second, rather than displaying each token. Preview updates do not create work.
 
-Unfocused projects gain a small, bounded prominence from recent activity while
-their layout stays fixed. Inspection holds the graph steady. A browser-only
+Unfocused projects rise proportionally with recent owned activity while quiet
+graphs recede slightly. Enlargement respects neighbouring graphs and the viewport;
+their centres stay fixed. Inspection holds the graph steady. Focused graphs come
+forward while distant roots keep readable names and status indicators. A browser-only
 cyberspace grid follows Paseo's effective light or dark theme: thin perspective
 lines and sparse travelling highlights are decorative, never activity or pulses.
 Light-mode motion uses darker, higher-contrast strokes while the base grid stays
 restrained. Long-running animation keeps a bounded, continuous phase.
 Every displayed project supplies a bounded local field from its current displayed
-bounds; owned activity brightens and gently bends nearby grid coordinates, while
-focus strengthens its branch and calms surrounding interiors. **Pause motion**
+bounds; shared elevation bends and shades the grid beneath raised graphs while
+owned activity brightens nearby lines. Focus strengthens its branch and calms
+surrounding interiors without creating activity. **Pause motion**
 freezes these effects while status and readable previews continue. Reduced motion,
 hidden tabs and disconnection use a static or unscheduled grid. If its shader is
 unavailable, the grid is removed independently and the graph remains usable.

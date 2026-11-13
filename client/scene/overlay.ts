@@ -18,7 +18,7 @@ export function createCollapseTextMeasure(): (text: string) => number {
 }
 
 interface Element {
-  button: HTMLButtonElement; glyph: HTMLSpanElement; avatar: HTMLSpanElement; image: HTMLImageElement; activity: HTMLSpanElement;
+  button: HTMLButtonElement; glyph: HTMLSpanElement; ring: HTMLSpanElement; avatar: HTMLSpanElement; image: HTMLImageElement; activity: HTMLSpanElement;
   label: HTMLSpanElement; badge: HTMLSpanElement; node: PositionedNode;
   failedIcon?: string;
   summary: string;
@@ -31,6 +31,74 @@ interface Bubble {
 }
 interface Callbacks { activate(id: string): void; hover(id: string | null): void; hold(id: string, held: boolean): void; collapse(id: string): void }
 const css = (element: HTMLElement, values: Partial<CSSStyleDeclaration>) => Object.assign(element.style, values);
+const opacityInRange = (value: number) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 1));
+
+/**
+ * The renderer describes a node's readable parts separately. A distant project
+ * can keep its name legible while its backing surface recedes, and interaction
+ * is a decision rather than a side effect of the whole button's alpha.
+ */
+export interface NodePresentation {
+  /** Backing tile, icon border and its theme shadow. */
+  surfaceOpacity: number;
+  /** Label, animal identity and project icon. */
+  textOpacity: number;
+  /** Status badge and activity pip. */
+  badgeOpacity: number;
+  /** Ownership/delegation routes attached to this node. */
+  edgeOpacity: number;
+  /** Whether the node itself accepts pointer, keyboard and focus input. */
+  interactive: boolean;
+  /**
+   * Optional scene elevation. Accepted so the renderer can share one contract;
+   * the overlay deliberately does not repaint a blur every frame for it.
+   */
+  elevation?: number;
+}
+
+export interface ResolvedNodePresentation extends NodePresentation {
+  /** Collapse controls follow the parent's explicit interaction decision. */
+  controlVisible: boolean;
+}
+
+/** Clamp the renderer's presentation values into usable CSS opacities. */
+export function resolveNodePresentation(presentation: NodePresentation): ResolvedNodePresentation {
+  return {
+    surfaceOpacity: opacityInRange(presentation.surfaceOpacity),
+    textOpacity: opacityInRange(presentation.textOpacity),
+    badgeOpacity: opacityInRange(presentation.badgeOpacity),
+    edgeOpacity: opacityInRange(presentation.edgeOpacity),
+    interactive: presentation.interactive,
+    elevation: presentation.elevation,
+    controlVisible: presentation.interactive,
+  };
+}
+
+/**
+ * Visible surfaces, labels and controls reserve space for transient bubbles.
+ * Measured body/label/control rectangles keep hit-target inflation from
+ * blocking readable text.
+ */
+export function nodeObstacleRects(
+  node: Pick<PositionedNode, "position" | "body" | "labelBounds" | "controlBounds">,
+  presentation: NodePresentation,
+  transform: { x: number; y: number; scale: number },
+): Rect[] {
+  const resolved = resolveNodePresentation(presentation);
+  const screen = (rect: Rect): Rect => ({
+    x: transform.x + (rect.x - node.position.x) * transform.scale,
+    y: transform.y + (rect.y - node.position.y) * transform.scale,
+    width: rect.width * transform.scale,
+    height: rect.height * transform.scale,
+  });
+  const rects: Rect[] = [];
+  // A faded backing still occupies space; a label or avatar does too. Only a
+  // fully transparent node stops being an obstacle for nearby text.
+  if (resolved.surfaceOpacity > 0 || resolved.textOpacity > 0) rects.push(screen(node.body));
+  if (node.labelBounds && resolved.textOpacity > 0) rects.push(screen(node.labelBounds));
+  if (node.controlBounds && resolved.controlVisible) rects.push(screen(node.controlBounds));
+  return rects;
+}
 
 /** Permanent elements use the exact layout bounds; transient text uses free screen space. */
 export class GraphOverlay {
@@ -77,7 +145,7 @@ export class GraphOverlay {
       let control = this.collapseControls.get(id);
       if (!control) {
         const button = document.createElement("button"); button.type = "button";
-        css(button, { position: "absolute", padding: "2px 8px", borderRadius: "8px", font: collapseControlFont, whiteSpace: "nowrap", pointerEvents: "auto", cursor: "pointer", zIndex: "8", boxSizing: "border-box", transformOrigin: "top left" });
+        css(button, { position: "absolute", padding: "2px 8px", borderRadius: "8px", font: collapseControlFont, whiteSpace: "nowrap", pointerEvents: "auto", cursor: "pointer", zIndex: "3", boxSizing: "border-box", transformOrigin: "top left" });
         button.dataset.overviewCollapse = id;
         button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.collapse(id); });
         this.element.appendChild(button);
@@ -95,6 +163,8 @@ export class GraphOverlay {
         css(button, { position: "absolute", display: "grid", placeItems: "center", padding: "0", margin: "0", border: "0", background: "transparent", cursor: "pointer", pointerEvents: "auto", transformOrigin: "center", outlineOffset: "5px", font: "inherit", touchAction: "manipulation" });
         const glyph = document.createElement("span");
         css(glyph, { position: "absolute", display: "grid", placeItems: "center", boxSizing: "border-box", pointerEvents: "none" });
+        const ring = document.createElement("span");
+        css(ring, { position: "absolute", display: "none", boxSizing: "border-box", pointerEvents: "none", transformOrigin: "center" });
         const avatar = document.createElement("span");
         css(avatar, { position: "absolute", display: "grid", placeItems: "center", pointerEvents: "none", fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif', lineHeight: "1" });
         const activity = document.createElement("span");
@@ -110,7 +180,7 @@ export class GraphOverlay {
         css(label, { position: "absolute", fontWeight: "600", lineHeight: "1.3", textAlign: "center", overflow: "hidden", display: "-webkit-box", webkitBoxOrient: "vertical", webkitLineClamp: "2", overflowWrap: "anywhere", pointerEvents: "none" });
         const badge = document.createElement("span");
         css(badge, { position: "absolute", top: "-4px", right: "-4px", minWidth: "15px", height: "15px", padding: "0 3px", boxSizing: "border-box", borderRadius: "8px", fontSize: "9px", fontWeight: "700", lineHeight: "15px", pointerEvents: "none" });
-        button.append(glyph, avatar, image, label, badge, activity);
+        button.append(glyph, ring, avatar, image, label, badge, activity);
         button.addEventListener("click", event => { event.stopPropagation(); this.callbacks.activate(node.id); });
         button.addEventListener("pointerenter", () => this.hover(node.id));
         button.addEventListener("pointerleave", () => { if (document.activeElement !== button) this.hover(null); });
@@ -118,7 +188,7 @@ export class GraphOverlay {
         button.addEventListener("blur", () => { if (!button.matches(":hover")) this.hover(null); });
         button.addEventListener("keydown", event => this.onKey(event, node.id));
         this.element.appendChild(button);
-        item = { button, glyph, avatar, image, label, badge, activity, node, summary: "", badgeTone: "accent" }; this.nodes.set(node.id, item);
+        item = { button, glyph, ring, avatar, image, label, badge, activity, node, summary: "", badgeTone: "accent" }; this.nodes.set(node.id, item);
       }
       item.node = node;
       const agent = agents.get(node.id), w = node.body.width, h = node.body.height;
@@ -128,7 +198,9 @@ export class GraphOverlay {
       const hitW = Math.max(nodeAppearance.desktopHitTarget, w), hitH = Math.max(nodeAppearance.desktopHitTarget, h);
       css(item.button, { width: `${hitW}px`, height: `${hitH}px`, borderRadius: node.kind === "workspace" || completedGroup ? "12px" : "10px" });
       const glyphWidth = subordinate ? nodeAppearance.subagent.backingSize : w, glyphHeight = subordinate ? nodeAppearance.subagent.backingSize : h;
-      css(item.glyph, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: completedGroup ? "10px" : node.kind === "workspace" ? "11px" : node.kind === "project" ? "16px" : subordinate ? "6px" : "10px", fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650", transform: subordinate ? "rotate(45deg)" : "none" });
+      const glyphRadius = completedGroup ? "10px" : node.kind === "workspace" ? "11px" : node.kind === "project" ? "16px" : subordinate ? "6px" : "10px";
+      css(item.glyph, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: glyphRadius, fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650", transform: subordinate ? "rotate(45deg)" : "none" });
+      css(item.ring, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: glyphRadius, transform: subordinate ? "rotate(45deg)" : "none" });
       css(item.avatar, { fontSize: `${subordinate ? nodeAppearance.subagent.emojiSize : nodeAppearance.agent.emojiSize}px`, width: `${w}px`, height: `${h}px` });
       item.avatar.textContent = agent ? agentIdentity(agent.id).emoji : "";
       item.button.dataset.overviewRole = node.role ?? "";
@@ -189,14 +261,14 @@ export class GraphOverlay {
   /** Transfer keyboard focus when expanding a summary removes its own button. */
   focusNode(id: string): boolean {
     const item = this.nodes.get(id);
-    if (!item) return false;
+    if (!item || item.button.disabled) return false;
     item.button.focus({ preventScroll: true });
     return document.activeElement === item.button;
   }
 
   private onKey(event: KeyboardEvent, id: string): void {
-    const node = this.nodes.get(id)?.node;
-    if (!node || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+    const item = this.nodes.get(id), node = item?.node;
+    if (!item || item.button.disabled || !node || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
     let next: Element | undefined;
     if (event.key === "ArrowUp") next = node.parentId ? this.nodes.get(node.parentId) : undefined;
     else if (event.key === "ArrowDown") next = [...this.nodes.values()].find(item => item.node.parentId === id);
@@ -206,7 +278,7 @@ export class GraphOverlay {
       const index = siblings.findIndex(item => item.node.id === id);
       next = siblings[(index + (event.key === "ArrowRight" ? 1 : siblings.length - 1)) % siblings.length];
     }
-    if (next) { event.preventDefault(); next.button.focus({ preventScroll: true }); }
+    if (next && !next.button.disabled) { event.preventDefault(); next.button.focus({ preventScroll: true }); }
   }
 
   updateTheme(theme: OverviewTheme): void {
@@ -235,27 +307,54 @@ export class GraphOverlay {
 
   beginPositions(): void { this.occupied = []; this.positions.clear(); this.bodies.clear(); }
   anchor(id: string): Rect | null { return this.bodies.get(id) ?? null; }
-  positionNode(id: string, x: number, y: number, scale: number, opacity: number, selected: boolean, focused: boolean, highlighted: boolean, foreground = false): void {
+  positionNode(id: string, x: number, y: number, scale: number, presentation: NodePresentation, selected: boolean, focused: boolean, highlighted: boolean, foreground = false): void {
     const item = this.nodes.get(id); if (!item) return;
-    css(item.button, { left: `${x}px`, top: `${y}px`, transform: `translate(-50%, -50%) scale(${scale})`, opacity: String(opacity), zIndex: selected ? "6" : focused ? "5" : foreground ? "4" : "2", outline: "none", pointerEvents: opacity < 0.08 ? "none" : "auto" });
+    const resolved = resolveNodePresentation(presentation);
+    item.button.dataset.overviewVisible = String(resolved.surfaceOpacity > 0 || resolved.textOpacity > 0 ||
+      resolved.badgeOpacity > 0 || selected || focused || highlighted);
+    const stack = selected ? 7 : focused ? 5 : foreground ? 3 : 1;
+    // The button stays fully opaque so its surface, text and badge can recede
+    // independently. Interaction is explicit, including keyboard access.
+    if (!resolved.interactive) {
+      if (document.activeElement === item.button) item.button.blur();
+      if (this.hovered === id) this.hover(null);
+    }
+    item.button.disabled = !resolved.interactive;
+    item.button.tabIndex = resolved.interactive ? 0 : -1;
+    css(item.button, { left: `${x}px`, top: `${y}px`, transform: `translate(-50%, -50%) scale(${scale})`, opacity: "1", zIndex: String(stack), outline: "none", pointerEvents: resolved.interactive ? "auto" : "none" });
+    item.glyph.style.opacity = String(resolved.surfaceOpacity);
+    for (const part of [item.avatar, item.image, item.label]) part.style.opacity = String(resolved.textOpacity);
+    for (const part of [item.badge, item.activity]) part.style.opacity = String(resolved.badgeOpacity);
     const emphasis = this.theme.selection ?? selectionColour(this.theme);
-    item.glyph.style.outline = selected ? `2px solid ${emphasis}` : focused || highlighted ? `1.5px solid ${emphasis}` : "none";
-    item.glyph.style.outlineOffset = selected ? "3px" : "2px";
-    item.glyph.style.filter = selected ? `drop-shadow(0 2px 4px ${emphasis}55)` : "none";
+    // The ring carries focus/selection outside the faded surface, so a distant
+    // root remains identifiable without inflating its hit target.
+    item.ring.style.display = selected || focused || highlighted ? "block" : "none";
+    item.ring.style.outline = selected ? `2px solid ${emphasis}` : `1.5px solid ${emphasis}`;
+    item.ring.style.outlineOffset = selected ? "3px" : "2px";
+    item.ring.style.boxShadow = selected ? `0 0 0 3px ${emphasis}22` : "none";
     item.button.dataset.overviewHighlighted = String(highlighted || selected || focused);
+    item.button.dataset.overviewInteractive = String(resolved.interactive);
     if (item.node.kind === "completed-group") item.button.removeAttribute("aria-pressed");
     else item.button.setAttribute("aria-pressed", String(selected || focused));
     const b = item.node.bounds;
     const rect = { x: x + (b.x - item.node.position.x) * scale, y: y + (b.y - item.node.position.y) * scale, width: b.width * scale, height: b.height * scale };
-    this.positions.set(id, rect); if (opacity > 0.25) this.occupied.push(rect);
+    this.positions.set(id, rect);
+    for (const obstacle of nodeObstacleRects(item.node, presentation, { x, y, scale })) this.occupied.push(obstacle);
     const body = item.node.body;
     this.bodies.set(id, { x: x + (body.x - item.node.position.x) * scale, y: y + (body.y - item.node.position.y) * scale, width: body.width * scale, height: body.height * scale });
     for (const control of this.collapseControls.values()) if (control.parentId === id) {
       const controlBounds = item.node.controlBounds;
-      if (!controlBounds) { control.button.style.display = "none"; continue; }
+      if (!controlBounds || !resolved.controlVisible) {
+        if (document.activeElement === control.button) control.button.blur();
+        control.button.style.display = "none";
+        continue;
+      }
       const box = { x: x + (controlBounds.x - item.node.position.x) * scale, y: y + (controlBounds.y - item.node.position.y) * scale, width: controlBounds.width * scale, height: controlBounds.height * scale };
-      css(control.button, { left: `${box.x}px`, top: `${box.y}px`, width: `${controlBounds.width}px`, height: `${controlBounds.height}px`, transform: `scale(${scale})`, opacity: String(opacity), display: opacity > 0.25 ? "block" : "none" });
-      if (opacity > 0.25) this.occupied.push(box);
+      // The parent's explicit interaction decision owns the measured control;
+      // its obstacle rectangle is already included by nodeObstacleRects. Each
+      // control sits one step above its parent tier but below the next tier, so
+      // a background control can never float over foreground nodes.
+      css(control.button, { left: `${box.x}px`, top: `${box.y}px`, width: `${controlBounds.width}px`, height: `${controlBounds.height}px`, transform: `scale(${scale})`, opacity: "1", display: "block", zIndex: String(stack + 1) });
     }
   }
   setRoutes(routes: readonly (readonly Point[])[]): void {

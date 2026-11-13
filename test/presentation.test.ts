@@ -1,5 +1,4 @@
-import { activityDepth, advanceDepth, depthTransform, projectDepthRange, sweptBounds, transformRouteNode } from "../client/scene/depth";
-import { centre } from "../client/geometry";
+import { depthTransform, projectDepthRange, sweptBounds, transformRouteNode } from "../client/scene/depth";
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import type { OverviewModel } from "../shared/model";
@@ -7,7 +6,7 @@ import type { OverviewTheme } from "../shared/renderer";
 import { canRetainSelection, initialPresentation, parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation, scopedNodes } from "../client/presentation";
 import { UNASSIGNED_SCOPE_ID } from "../shared/presentation";
 import { gridPalette, isDarkBackground } from "../client/appearance";
-import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, GridInfluenceSmoother, maximumWarp, sampleGridField } from "../client/scene/ambient-field";
+import { createGridField, fieldContainsOnlyFiniteValues, gridFalloff, GridInfluenceSmoother, GRID_ACTIVITY_ELEVATION, GRID_WARP_PEAK, maximumWarp, maximumWarpJacobian, MAXIMUM_GRID_WARP, MAXIMUM_GRID_WARP_JACOBIAN, minimumWarpMappingDeterminant, sampleGridField } from "../client/scene/ambient-field";
 import { ProceduralAmbientGrid } from "../client/scene/ambient";
 import { GRID_PHASE_PERIOD_SECONDS, GRID_TRACE_CYCLE_COUNT, GRID_TRACE_MIN_CYCLES } from "../client/scene/ambient-shader";
 
@@ -83,36 +82,11 @@ describe("shared Overview presentation", () => {
 });
 
 describe("project activity depth", () => {
-  it("keeps asymmetric packed graph centres fixed and caps growth to eight pixels per side", () => {
-    const project = { position: { x: 200, y: 80 }, scale: 1, bounds: { x: -100, y: -30, width: 1000, height: 300 } };
-    const range = projectDepthRange(project, { x: 8, y: 8, width: 1300, height: 800 });
-    expect(range.max).toBeCloseTo(1.016); expect(range.min).toBeCloseTo(0.984);
-    const c = centre(project.bounds);
-    for (const value of [range.min, 1, range.max]) {
-      const transform = depthTransform(project, value);
-      expect(transform.x + c.x * transform.scale).toBeCloseTo(project.position.x + c.x);
-      expect(transform.y + c.y * transform.scale).toBeCloseTo(project.position.y + c.y);
-      expect(Math.abs(project.bounds.width * (value - 1) / 2)).toBeLessThanOrEqual(8.000001);
-    }
-  });
-
   it("preserves viewport clearance and does not shrink already-small text", () => {
     const bounds = { x: 0, y: 0, width: 200, height: 100 };
     const viewport = { x: 8, y: 8, width: 1000, height: 700 };
     expect(projectDepthRange({ bounds, position: { x: 10, y: 30 }, scale: 1 }, viewport).max).toBeCloseTo(1.02);
     expect(projectDepthRange({ bounds, position: { x: 100, y: 100 }, scale: 0.5 }, viewport).min).toBe(1);
-  });
-
-  it("uses absolute observed activity, a current-working baseline, and bounded gradual changes", () => {
-    const range = { min: 0.97, max: 1.06 };
-    expect(activityDepth(0, 0, true, range)).toBe(0.97);
-    expect(activityDepth(0, 1, true, range)).toBe(1);
-    expect(activityDepth(30, 0, true, range)).toBeGreaterThan(1.05);
-    expect(activityDepth(30, 10, false, range)).toBe(1);
-    expect(activityDepth(100, 10, true, { min: 0.99, max: 1.01 })).toBe(1.01);
-    const next = advanceDepth(0.97, 1.06, 0.05);
-    expect(next).toBeGreaterThan(0.97); expect(next).toBeLessThan(0.98);
-    expect(advanceDepth(next, 0.97, 0.05)).toBeGreaterThan(0.97);
   });
 
   it("envelopes peripheral nodes during both contraction and enlargement", () => {
@@ -141,9 +115,14 @@ describe("procedural ambient grid", () => {
   it("selects a muted palette from Paseo's effective background", () => {
     const theme = (background: string): OverviewTheme => ({ background, surface: "#fff", foreground: "#111", muted: "#667", border: "#dde", accent: "#38a", working: "#3a8", waiting: "#c92", error: "#c44" });
     expect(isDarkBackground("#121926")).toBe(true);
-    expect(gridPalette(theme("#121926")).lineOpacity).toBe(0.18);
+    const dark = gridPalette(theme("#121926"));
+    expect(dark).toMatchObject({ lineOpacity: 0.18, shade: "#010913", rim: "#7fb9dc" });
+    expect(dark.shadeOpacity).toBeGreaterThan(0); expect(dark.rimOpacity).toBeGreaterThan(0);
+    expect(dark.shade).not.toBe(theme("#121926").working);
     const light = gridPalette(theme("#f7f8fb"));
-    expect(light).toMatchObject({ line: "#617f9b", lineOpacity: 0.12, highlightOpacity: 0.45 });
+    expect(light).toMatchObject({ line: "#617f9b", lineOpacity: 0.12, highlightOpacity: 0.45, shade: "#3d5a78", rim: "#7ba6c7" });
+    expect(light.shadeOpacity).toBeGreaterThan(0); expect(light.rimOpacity).toBeGreaterThan(0);
+    expect(light.shade).not.toBe(theme("#f7f8fb").working);
     expect(light.highlightOpacity * light.highlightBaseline * light.highlightQuiet).toBeGreaterThan(0.2);
   });
 
@@ -159,14 +138,101 @@ describe("procedural ambient grid", () => {
     expect(maximumWarp(field)).toBeLessThanOrEqual(12);
     expect(Math.max(...field.intensity)).toBeGreaterThan(0.5);
     expect(Math.max(...field.quietMask)).toBeGreaterThan(0.5);
+    expect(Math.max(...field.contactShade)).toBeGreaterThan(0.5);
+    expect(Math.max(...field.contactRim)).toBeGreaterThan(0.2);
+    expect(Math.max(...field.contactShade)).toBeLessThanOrEqual(1);
+    expect(Math.max(...field.contactRim)).toBeLessThanOrEqual(1);
     expect(gridFalloff(50, 50, influences[0]!)).toBe(1);
     expect(gridFalloff(106, 50, influences[0]!)).toBe(0);
+  });
+
+  it("normalises raw activity and focus peaks to six and eight CSS pixels", () => {
+    const field = createGridField();
+    const peak = (values: { activity?: number; focus?: number; elevation?: number }): number => {
+      sampleGridField(field, 640, 400, [{
+        id: "peak", centreX: 320, centreY: 200, radiusX: 200, radiusY: 160,
+        activity: 0, visibility: 1, focus: 0, ...values,
+      }]);
+      return maximumWarp(field);
+    };
+    expect(peak({ activity: 1, elevation: GRID_ACTIVITY_ELEVATION })).toBeCloseTo(6, 2);
+    expect(peak({ focus: 1, elevation: 1 })).toBeCloseTo(8, 2);
+    expect(peak({ activity: 1 })).toBeCloseTo(6, 2);
+    expect(peak({ focus: 1 })).toBeCloseTo(8, 2);
+    expect(GRID_WARP_PEAK * GRID_ACTIVITY_ELEVATION).toBe(6);
+  });
+
+  it("uses the actual CSS radial direction for an anisotropic influence", () => {
+    const field = createGridField(81);
+    sampleGridField(field, 100, 100, [{
+      id: "wide", centreX: 50, centreY: 50, radiusX: 80, radiusY: 40,
+      activity: 0, visibility: 1, focus: 1, elevation: 1,
+    }], 9, 9);
+    const index = 2 * 9 + 6;
+    const x = field.warp[index * 2]!, y = field.warp[index * 2 + 1]!;
+    expect(x).toBeGreaterThan(0); expect(y).toBeLessThan(0);
+    expect(x + y).toBeCloseTo(0, 5);
+  });
+
+  it("uniformly bounds combined warp length and triangle Jacobian with the plane topology", () => {
+    const field = createGridField();
+    const influences = Array.from({ length: 2 }, (_, index) => ({
+      id: `combined-${index}`, centreX: 320, centreY: 200, radiusX: 250, radiusY: 200,
+      activity: 0, visibility: 1, focus: 0, elevation: 1,
+    }));
+    sampleGridField(field, 640, 400, influences);
+    expect(maximumWarp(field)).toBeLessThanOrEqual(MAXIMUM_GRID_WARP);
+    expect(maximumWarp(field)).toBeGreaterThan(MAXIMUM_GRID_WARP - 0.01);
+    // Length is the binding constraint here; the steep case below covers the
+    // Jacobian limit instead of letting both limits blur together.
+    expect(maximumWarpJacobian(field, 640, 400)).toBeLessThan(MAXIMUM_GRID_WARP_JACOBIAN * 0.8);
+    expect(maximumWarpJacobian(field, 640, 400)).toBeLessThanOrEqual(MAXIMUM_GRID_WARP_JACOBIAN + 1e-6);
+    expect(minimumWarpMappingDeterminant(field, 640, 400)).toBeGreaterThan(0);
+    expect(fieldContainsOnlyFiniteValues(field)).toBe(true);
+  });
+
+  it("reduces a steep small-radius field to the Jacobian limit rather than peak alone", () => {
+    const field = createGridField();
+    sampleGridField(field, 640, 400, [{
+      id: "steep", centreX: 320, centreY: 200, radiusX: 80, radiusY: 72,
+      activity: 0, visibility: 1, focus: 1, elevation: 1,
+    }]);
+    expect(maximumWarp(field)).toBeLessThan(8);
+    expect(maximumWarpJacobian(field, 640, 400)).toBeLessThanOrEqual(MAXIMUM_GRID_WARP_JACOBIAN + 1e-6);
+    expect(minimumWarpMappingDeterminant(field, 640, 400)).toBeGreaterThan(0);
+  });
+
+  it("samples a broad elevation shade and softer rim with tapered plane edges", () => {
+    const field = createGridField();
+    sampleGridField(field, 640, 400, [{
+      id: "elevated", centreX: 320, centreY: 200, radiusX: 400, radiusY: 320,
+      activity: 1, visibility: 1, focus: 1, elevation: 1,
+    }]);
+    const centre = 20 * 65 + 32;
+    expect(field.contactShade[centre]).toBeCloseTo(1, 5);
+    expect(field.contactRim[centre]).toBe(0);
+    expect(Math.max(...field.contactRim)).toBeGreaterThan(0.9);
+    expect(field.warp[0]).toBe(0); expect(field.contactShade[0]).toBe(0);
+    expect(field.intensity[0]).toBe(0); expect(field.quietMask[0]).toBe(0);
+    expect(field.warp[40 * 65 * 2]).toBe(0);
+    let largestShadeStep = 0, largestRimStep = 0;
+    // Ignore the deliberate two-cell edge fade when checking low-frequency
+    // shading: an interior transition should be broader than a single cell.
+    for (let row = 3; row < 38; row++) for (let column = 3; column < 61; column++) {
+      const index = row * 65 + column;
+      largestShadeStep = Math.max(largestShadeStep, Math.abs(field.contactShade[index]! - field.contactShade[index + 1]!));
+      largestRimStep = Math.max(largestRimStep, Math.abs(field.contactRim[index]! - field.contactRim[index + 65]!));
+    }
+    expect(largestShadeStep).toBeLessThan(0.05);
+    expect(largestRimStep).toBeLessThan(0.1);
   });
 
   it("uses no hidden project-count cutoff and resets reusable arrays for removals", () => {
     const field = createGridField(25);
     const projects = Array.from({ length: 23 }, (_, index) => ({
-      id: `project-${index}`, centreX: 5 + index * 4, centreY: 50, radiusX: 10, radiusY: 20,
+      // The active project sits inside the field, not in the deliberate edge
+      // fade, so this test isolates the absent project-count cutoff.
+      id: `project-${index}`, centreX: index === 22 ? 50 : 5 + index * 4, centreY: 50, radiusX: 10, radiusY: 20,
       activity: index === 22 ? 0.8 : 0, visibility: 1, focus: 0,
     }));
     sampleGridField(field, 100, 100, projects, 5, 5);
@@ -176,16 +242,29 @@ describe("procedural ambient grid", () => {
     expect(maximumWarp(field)).toBe(0);
   });
 
-  it("smooths illumination faster than distortion using elapsed time rather than frame count", () => {
+  it("smooths illumination independently while consuming supplied elevation without a second ease", () => {
     const slow = new GridInfluenceSmoother(), fast = new GridInfluenceSmoother();
-    slow.setTargets([influence]); fast.setTargets([influence]);
+    const elevated = { ...influence, elevation: 0.9 };
+    slow.setTargets([elevated]); fast.setTargets([elevated]);
     slow.advance(0.5, true);
     for (let index = 0; index < 30; index++) fast.advance(1 / 60, true);
     const shown = slow.values[0]!;
-    expect(shown.activity).toBeGreaterThan(shown.distortion!);
     expect(shown.activity).toBeLessThan(influence.activity);
+    expect(shown.elevation).toBe(0.9);
     expect(fast.values[0]!.activity).toBeCloseTo(shown.activity, 10);
-    expect(fast.values[0]!.distortion).toBeCloseTo(shown.distortion!, 10);
+    expect(fast.values[0]!.elevation).toBe(0.9);
+  });
+
+  it("accepts a changed supplied elevation while paused without easing it", () => {
+    const smoother = new GridInfluenceSmoother();
+    smoother.setTargets([{ ...influence, elevation: 0.2 }]); smoother.advance(0.5, true);
+    const activity = smoother.values[0]!.activity;
+    smoother.setTargets([{ ...influence, activity: 1, elevation: 0.85 }]);
+    expect(smoother.advance(5, false)).toBe(true);
+    expect(smoother.values[0]).toMatchObject({ activity, elevation: 0.85 });
+    smoother.setTargets([{ ...influence, activity: 0.1, elevation: 0.85 }]);
+    expect(smoother.advance(5, false)).toBe(false);
+    expect(smoother.values[0]!.activity).toBe(activity);
   });
 
   it("freezes activity while paused but aligns explicit focus and geometry changes", () => {
@@ -197,7 +276,7 @@ describe("procedural ambient grid", () => {
     expect(smoother.values[0]).toEqual(before);
     smoother.setTargets([{ ...influence, centreX: 90, radiusX: 80, activity: 1, focus: 0.48 }]);
     expect(smoother.advance(0, false)).toBe(true);
-    expect(smoother.values[0]).toMatchObject({ centreX: 90, radiusX: 80, focus: 0.48, activity: before.activity, distortion: before.distortion });
+    expect(smoother.values[0]).toMatchObject({ centreX: 90, radiusX: 80, focus: 0.48, activity: before.activity });
     smoother.advance(0.5, true);
     expect(smoother.values[0]!.activity).toBeGreaterThan(before.activity);
   });
@@ -232,7 +311,7 @@ describe("procedural ambient grid", () => {
     const ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
     ambient.resize(100, 100, 1); ambient.updateField([influence]); ambient.advanceTime(0.5, true);
     const mesh = scene.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
-    const attributes = ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet"].map(name => mesh.geometry.getAttribute(name) as THREE.BufferAttribute);
+    const attributes = ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet", "aOverviewGridShade", "aOverviewGridRim"].map(name => mesh.geometry.getAttribute(name) as THREE.BufferAttribute);
     const versions = attributes.map(attribute => attribute.version);
     const values = attributes.map(attribute => Array.from(attribute.array));
     ambient.updateField([{ ...influence, activity: 1 }]); ambient.advanceTime(5, false);
@@ -247,6 +326,31 @@ describe("procedural ambient grid", () => {
     expect(attributes.map(attribute => attribute.version)).toEqual(cleared);
     expect(attributes.every(attribute => Array.from(attribute.array).every(value => value === 0))).toBe(true);
     ambient.dispose(); expect(scene.children).toHaveLength(0);
+  });
+
+  it("resamples a supplied elevation change while paused and refreshes shade/rim uniforms by theme", () => {
+    const scene = new THREE.Scene();
+    const renderer = { debug: { onShaderError: null, checkShaderErrors: true } } as unknown as THREE.WebGLRenderer;
+    const ambient = new ProceduralAmbientGrid(scene, renderer, gridTheme);
+    const mesh = scene.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
+    const shade = mesh.geometry.getAttribute("aOverviewGridShade") as THREE.BufferAttribute;
+    const rim = mesh.geometry.getAttribute("aOverviewGridRim") as THREE.BufferAttribute;
+    expect(shade).toBeDefined(); expect(rim).toBeDefined();
+    expect((mesh.material.uniforms.uShade!.value as THREE.Color).getHexString()).toBe("3d5a78");
+    expect((mesh.material.uniforms.uRim!.value as THREE.Color).getHexString()).toBe("7ba6c7");
+    ambient.resize(100, 100, 1); ambient.updateField([{ ...influence, elevation: 0.2 }]); ambient.advanceTime(0.5, true);
+    const version = shade.version, before = Array.from(mesh.geometry.getAttribute("aOverviewGridWarp").array);
+    ambient.updateField([{ ...influence, activity: 1, elevation: 0.9 }]); ambient.advanceTime(5, false);
+    expect(shade.version).toBeGreaterThan(version);
+    expect(Array.from(mesh.geometry.getAttribute("aOverviewGridWarp").array)).not.toEqual(before);
+    expect(mesh.material.uniforms.uTime!.value).toBe(0.5);
+    const settled = shade.version;
+    ambient.updateField([{ ...influence, activity: 0.1, elevation: 0.9 }]); ambient.advanceTime(5, false);
+    expect(shade.version).toBe(settled);
+    ambient.updateTheme({ ...gridTheme, background: "#121926" });
+    expect((mesh.material.uniforms.uShade!.value as THREE.Color).getHexString()).toBe("010913");
+    expect((mesh.material.uniforms.uRim!.value as THREE.Color).getHexString()).toBe("7fb9dc");
+    ambient.dispose();
   });
 
   it("bounds long-lived shader time while pause and resize retain the same visible phase", () => {

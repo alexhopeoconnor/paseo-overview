@@ -11,10 +11,14 @@ uniform vec2 uViewport;
 attribute vec2 aOverviewGridWarp;
 attribute float aOverviewGridIntensity;
 attribute float aOverviewGridQuiet;
+attribute float aOverviewGridShade;
+attribute float aOverviewGridRim;
 varying vec2 vCss;
 varying vec2 vPatternCss;
 varying float vIntensity;
 varying float vQuiet;
+varying float vShade;
+varying float vRim;
 
 void main() {
   vec2 css = vec2((position.x * 0.5 + 0.5) * uViewport.x, (0.5 - position.y * 0.5) * uViewport.y);
@@ -22,6 +26,8 @@ void main() {
   vPatternCss = css + aOverviewGridWarp;
   vIntensity = aOverviewGridIntensity;
   vQuiet = aOverviewGridQuiet;
+  vShade = aOverviewGridShade;
+  vRim = aOverviewGridRim;
   // aOverviewGridWarp deliberately affects only pattern coordinates. The plane
   // itself stays fitted to the viewport, so local distortion cannot reveal edges.
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -32,10 +38,14 @@ export const ambientFragmentShader = /* glsl */ `
 uniform vec3 uLine;
 uniform vec3 uHighlight;
 uniform vec3 uGlow;
+uniform vec3 uShade;
+uniform vec3 uRim;
 uniform vec2 uViewport;
 uniform float uPixelRatio;
 uniform float uTime;
 uniform float uLineOpacity;
+uniform float uShadeOpacity;
+uniform float uRimOpacity;
 uniform float uHighlightOpacity;
 uniform float uHighlightBaseline;
 uniform float uHighlightQuiet;
@@ -43,6 +53,8 @@ varying vec2 vCss;
 varying vec2 vPatternCss;
 varying float vIntensity;
 varying float vQuiet;
+varying float vShade;
+varying float vRim;
 
 vec2 gridAxes(vec2 gridPosition, float halfWidthPx) {
   vec2 distanceToLine = abs(fract(gridPosition + 0.5) - 0.5);
@@ -102,8 +114,21 @@ void main() {
   // Crossing traces can add brightness, but must not extrapolate past the
   // highlight colour (particularly the darker light-theme palette).
   gridColour = mix(gridColour, uHighlight, min(highlights, 1.0));
-  float gridAlpha = grid * (uLineOpacity + illumination * 0.11) + highlights * uHighlightOpacity;
-  gl_FragColor = vec4(gridColour, clamp(gridAlpha, 0.0, 0.72));
+  float gridAlpha = clamp(grid * (uLineOpacity + illumination * 0.11) + highlights * uHighlightOpacity, 0.0, 0.72);
+
+  // Broad elevation coverage sits behind the ink. Composite premultiplied
+  // layers internally and divide once at the end, leaving the material's
+  // straight-alpha blending and colours transform unchanged.
+  float shadeCoverage = clamp(vShade, 0.0, 1.0) * uShadeOpacity;
+  float rimCoverage = clamp(vRim, 0.0, 1.0) * uRimOpacity;
+  vec3 premultiplied = uShade * shadeCoverage;
+  float coverage = shadeCoverage;
+  premultiplied = uRim * rimCoverage + premultiplied * (1.0 - rimCoverage);
+  coverage = rimCoverage + coverage * (1.0 - rimCoverage);
+  premultiplied = gridColour * gridAlpha + premultiplied * (1.0 - gridAlpha);
+  coverage = gridAlpha + coverage * (1.0 - gridAlpha);
+  vec3 straightColour = coverage > 0.0001 ? premultiplied / coverage : vec3(0.0);
+  gl_FragColor = vec4(straightColour, min(coverage, 0.86));
   #include <colorspace_fragment>
 }
 `;

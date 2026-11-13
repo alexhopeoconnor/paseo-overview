@@ -263,7 +263,10 @@ function localGeometry(project: ProjectDefinition, measureCollapseText?: (text: 
   }
   return { positions: new Map(nodes.map(node => [node.id, node.position])),
     controls: new Map(nodes.flatMap(node => node.controlBounds ? [[node.id, node.controlBounds] as const] : [])),
-    bounds: inflateRect(unionRects(nodes.map(node => node.bounds)), 12), edges };
+    // Detoured ownership connections belong to the graph's visible footprint
+    // too, so presentation growth cannot push them into a neighbouring graph.
+    bounds: inflateRect(unionRects([...nodes.map(node => node.bounds), ...edges.flatMap(edge =>
+      edge.points.map(point => ({ x: point.x, y: point.y, width: 0, height: 0 })))]), 12), edges };
 }
 
 function contains(outer: Rect, inner: Rect): boolean {

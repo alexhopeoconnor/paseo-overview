@@ -28,17 +28,26 @@ export interface GridPalette {
   line: string;
   highlight: string;
   glow: string;
+  /** Broad elevation shadow and its rim, kept cool and distinct from status green. */
+  shade: string;
+  rim: string;
   lineOpacity: number;
   highlightOpacity: number;
   highlightBaseline: number;
   highlightQuiet: number;
+  shadeOpacity: number;
+  rimOpacity: number;
 }
 
 /** Keep the base grid quiet; moving ink needs stronger contrast against a light surface. */
 export function gridPalette(theme: OverviewTheme): GridPalette {
   return isDarkBackground(theme.background)
-    ? { line: "#507b9e", highlight: "#59c8ec", glow: "#397bb5", lineOpacity: 0.18, highlightOpacity: 0.38, highlightBaseline: 0.35, highlightQuiet: 0.52 }
-    : { line: "#617f9b", highlight: "#1f6285", glow: "#5e8eb5", lineOpacity: 0.12, highlightOpacity: 0.45, highlightBaseline: 0.7, highlightQuiet: 0.8 };
+    ? { line: "#507b9e", highlight: "#59c8ec", glow: "#397bb5", shade: "#010913", rim: "#7fb9dc",
+      lineOpacity: 0.18, highlightOpacity: 0.38, highlightBaseline: 0.35, highlightQuiet: 0.52,
+      shadeOpacity: 0.4, rimOpacity: 0.2 }
+    : { line: "#617f9b", highlight: "#1f6285", glow: "#5e8eb5", shade: "#3d5a78", rim: "#7ba6c7",
+      lineOpacity: 0.12, highlightOpacity: 0.45, highlightBaseline: 0.7, highlightQuiet: 0.8,
+      shadeOpacity: 0.14, rimOpacity: 0.34 };
 }
 
 /** A separate blue selection cue prevents green activity from implying selection. */

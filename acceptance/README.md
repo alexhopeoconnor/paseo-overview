@@ -9,7 +9,8 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   background framing, visibility restoration, bounded bubbles and disposal. It
   also observes real depth transforms, fixed centres, pulse continuity, visible
   grid structure and actual rendered pixel movement, local illumination changes
-  at a fixed animation phase, bounded field warp, unchanged GPU attributes on
+  at a fixed animation phase, bounded field warp, elevation shade/rim attributes,
+  readable distant roots and unchanged GPU attributes on
   cached ambient-only frames and the shader-failure fallback,
   with pause/visibility/reduced-motion checks. New activity while paused must leave
   the field unchanged. Theme checks compare pixels after a rendered frame and
@@ -52,9 +53,12 @@ Browser screenshots and JSON results go under `/out` in the container, or the
 path selected by `OVERVIEW_ACCEPTANCE_OUTPUT`. Keep outputs outside Git. Chromium
 uses software rendering for these checks, so its timings do not establish GPU
 performance on a user's workstation. Native Web rendering and mocked component
-checks do not establish physical-device behaviour. Browser-only changes retain
-these native regression checks; repeat paired-phone acceptance if native behaviour
-changes or a native regression is found.
+checks do not establish physical-device behaviour. Choose checks for the changed
+behaviour: browser-only presentation changes retain native compilation coverage;
+repeat native interaction or paired-phone acceptance when native behaviour changes
+or a native regression is found. Run focused unit tests while editing and let the
+artifact builder perform its final declared checks. Repeat affected checks after
+fixes rather than rerunning every runner after documentation or lock-only edits.
 
 Inspect the saved full, selected, activity and dark-theme captures after a pass:
 the grid must be noticeable at normal browser zoom while labels, ownership links,
@@ -68,6 +72,7 @@ checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
 
 ```bash
 mkdir -p /tmp/overview-v06
+overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
@@ -76,11 +81,11 @@ docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount type=bind,src=/tmp/overview-v06,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
-  sha256:4af0a666444ca69a855eb0c7ff5ade27adb3dc6529644bc3a48ec588d153277c \
+  "$overview_check_image" \
   node /plugin/acceptance/renderer.cjs
 ```
 
-Repeat with `native-preview.cjs`, `floating.cjs` and `native-interaction.cjs`. The native
+For changes to those components, select `native-preview.cjs`, `floating.cjs` or `native-interaction.cjs`. The native
 interaction runner needs neither the browser cache nor the font mount. Read
 `compile.mjs` for its exact output requirements before running it. With the same
 `/fork`, `/plugin` and `/out` mounts, its successful compiler command is:

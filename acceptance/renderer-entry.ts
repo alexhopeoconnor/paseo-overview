@@ -3,15 +3,24 @@ import { initialPresentation, reducePresentation } from "../client/presentation"
 import type { OverviewModel } from "../shared/model";
 import type { OverviewScope, PresentationAction } from "../shared/presentation";
 import { addEdges, darkTheme, full, icon, lightTheme, managed, projects, workspaces } from "./fixture";
-import { Box3, Scene, type Camera, type WebGLRenderer, type Group, type Mesh, type ShaderMaterial } from "three";
+import { Scene, type Camera, type WebGLRenderer, type Mesh, type ShaderMaterial } from "three";
 import { FibreLight } from "../client/scene/lines";
-import { StableLayout } from "../client/layout";
+import { StableLayout, type ProjectLayout } from "../client/layout";
 
 // Fixture-only observation of the actual renderer, without a production debug API.
 const performanceMode = new URLSearchParams(location.search).get("performance") === "1";
-const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number }[], ambient: [] as number[] };
+const telemetry = { frameTimes: [] as number[], frames: 0, pulseUpdates: 0, layoutBuilds: 0, graphs: [] as { id: number; x: number; y: number; width: number; height: number; neutralWidth: number; neutralHeight: number }[], graphFrames: [] as { id: number; width: number }[][], ambient: [] as number[] };
 const layoutUpdate = StableLayout.prototype.update;
-StableLayout.prototype.update = function (...args) { telemetry.layoutBuilds++; return layoutUpdate.apply(this, args as Parameters<typeof layoutUpdate>); };
+let displayedProjects = new Map<string, ProjectLayout>();
+StableLayout.prototype.update = function (...args) {
+  telemetry.layoutBuilds++;
+  const layout = layoutUpdate.apply(this, args as Parameters<typeof layoutUpdate>);
+  const next = new Map(layout.projects.map(project => [project.id, project]));
+  // Match the renderer's insertion-ordered groups across updates and removals.
+  for (const id of displayedProjects.keys()) if (!next.has(id)) displayedProjects.delete(id);
+  for (const [id, project] of next) displayedProjects.set(id, project);
+  return layout;
+};
 let observedScene: Scene | undefined, observedRenderer: WebGLRenderer | undefined, observedCamera: Camera | undefined;
 const beforeRender = Scene.prototype.onBeforeRender;
 Scene.prototype.onBeforeRender = function (...args) {
@@ -20,10 +29,18 @@ Scene.prototype.onBeforeRender = function (...args) {
   telemetry.frameTimes.push(performance.now());
   if (telemetry.frameTimes.length > 4096) telemetry.frameTimes.splice(0, 2048);
   if (performanceMode) return;
-  telemetry.graphs = this.children.filter(child => child.type === "Group").map(child => {
-    const box = new Box3().setFromObject(child as Group);
-    return { id: child.id, x: box.min.x, y: box.min.y, width: box.max.x - box.min.x, height: box.max.y - box.min.y };
+  const projects = [...displayedProjects.values()];
+  telemetry.graphs = this.children.filter(child => child.type === "Group").map((child, index) => {
+    // Measure the actual packed footprint, not an animated halo's Box3. The
+    // latter changes size/asymmetry with heartbeats and is not the layout centre.
+    const bounds = projects[index]!.bounds;
+    return { id: child.id, x: child.position.x + bounds.x * child.scale.x,
+      y: child.position.y + bounds.y * child.scale.y,
+      width: bounds.width * child.scale.x, height: bounds.height * child.scale.y,
+      neutralWidth: bounds.width * projects[index]!.scale, neutralHeight: bounds.height * projects[index]!.scale };
   }).filter(graph => Number.isFinite(graph.x) && Number.isFinite(graph.y));
+  telemetry.graphFrames.push(telemetry.graphs.map(graph => ({ id: graph.id, width: graph.width })));
+  if (telemetry.graphFrames.length > 240) telemetry.graphFrames.shift();
   telemetry.ambient = this.children.filter(child => child.userData.overviewAmbientGrid).flatMap(child => [((child as Mesh).material as ShaderMaterial).uniforms.uTime?.value ?? 0]);
 };
 const observedPulses = new Set<FibreLight>();
@@ -73,7 +90,7 @@ function update(value: OverviewModel, stage: string) {
   refresh() { update(current, "refreshed"); },
   activity() { update({ ...current, events: [{ id: `live-${Date.now()}`, nodeId: "n0", kind: "tool", text: "Command finished · npm test · 40 checks passed. " + "Detailed tool output ".repeat(60), timestamp: Date.now() }] }, "activity"); },
   depthFixture() {
-    renderer.dispose(); presentation = initialPresentation(); presentation = { ...presentation, motion: false };
+    renderer.dispose(); displayedProjects.clear(); presentation = initialPresentation(); presentation = { ...presentation, motion: false };
     current = addEdges({ ...full, projects: projects.slice(0, 3), events: [],
       workspaces: projects.slice(0, 3).map((project, index) => ({ id: `depth-w${index}`, projectId: project.projectId, projectName: project.name, name: `Workspace ${index}`, agentIds: [] })),
       nodes: ["depth-a", "depth-b", "depth-c"].map((id, index) => ({ id, kind: "agent", workspaceId: `depth-w${index}`, managedAgentId: id,
@@ -83,7 +100,7 @@ function update(value: OverviewModel, stage: string) {
   burst() { update({ ...current, events: Array.from({ length: 40 }, (_, index) => ({ id: `depth-${Date.now()}-${index}`, nodeId: "depth-a", kind: "activity", timestamp: Date.now() })) }, "depth"); },
   connection(connection: OverviewModel["connection"]) { update({ ...current, connection }, "connection"); },
   telemetry() { return telemetry; },
-  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; },
+  resetTelemetry() { telemetry.frameTimes.length = 0; telemetry.graphFrames.length = 0; telemetry.frames = 0; telemetry.pulseUpdates = 0; telemetry.layoutBuilds = 0; },
   ambientEvidence(key = "default", time?: number, regions: { x: number; y: number; width: number; height: number }[] = []) {
     const scene = observedScene!, renderer = observedRenderer!, camera = observedCamera!;
     const grids = scene.children.filter(child => child.userData.overviewAmbientGrid);
@@ -118,12 +135,15 @@ function update(value: OverviewModel, stage: string) {
   },
   fieldEvidence() {
     const grid = observedScene!.children.find(child => child.userData.overviewAmbientGrid) as Mesh;
-    return ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet"].map(name => {
+    return ["aOverviewGridWarp", "aOverviewGridIntensity", "aOverviewGridQuiet", "aOverviewGridShade", "aOverviewGridRim"].map(name => {
       const attribute = grid.geometry.getAttribute(name);
       let hash = 2166136261;
       const values = new Uint8Array(attribute.array.buffer, attribute.array.byteOffset, attribute.array.byteLength);
       for (const value of values) hash = Math.imul(hash ^ value, 16777619);
-      return { name, version: attribute.version, hash: hash >>> 0 };
+      let maximum = 0;
+      for (let index = 0; index < attribute.count; index++) maximum = Math.max(maximum,
+        attribute.itemSize === 2 ? Math.hypot(attribute.getX(index), attribute.getY(index)) : attribute.getX(index));
+      return { name, version: attribute.version, hash: hash >>> 0, maximum };
     });
   },
   pulseEvidence() {

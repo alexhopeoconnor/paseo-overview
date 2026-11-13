@@ -28,7 +28,7 @@ function sameInfluences(previous: readonly ProjectGridInfluence[], next: readonl
     const other = next[index]!;
     return value.id === other.id && value.centreX === other.centreX && value.centreY === other.centreY &&
       value.radiusX === other.radiusX && value.radiusY === other.radiusY && value.activity === other.activity &&
-      value.visibility === other.visibility && value.focus === other.focus;
+      value.elevation === other.elevation && value.visibility === other.visibility && value.focus === other.focus;
   });
 }
 
@@ -53,6 +53,8 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     this.geometry.setAttribute("aOverviewGridWarp", new THREE.BufferAttribute(this.field.warp, 2));
     this.geometry.setAttribute("aOverviewGridIntensity", new THREE.BufferAttribute(this.field.intensity, 1));
     this.geometry.setAttribute("aOverviewGridQuiet", new THREE.BufferAttribute(this.field.quietMask, 1));
+    this.geometry.setAttribute("aOverviewGridShade", new THREE.BufferAttribute(this.field.contactShade, 1));
+    this.geometry.setAttribute("aOverviewGridRim", new THREE.BufferAttribute(this.field.contactRim, 1));
     if (position.count !== GRID_COLUMNS * GRID_ROWS) throw new Error("Unexpected ambient grid geometry resolution.");
     const palette = gridPalette(theme);
     this.material = new THREE.ShaderMaterial({
@@ -63,6 +65,8 @@ export class ProceduralAmbientGrid implements AmbientGrid {
         uViewport: { value: new THREE.Vector2(1, 1) }, uPixelRatio: { value: 1 }, uTime: { value: 0 },
         uLine: { value: new THREE.Color(palette.line) }, uHighlight: { value: new THREE.Color(palette.highlight) },
         uGlow: { value: new THREE.Color(palette.glow) }, uLineOpacity: { value: palette.lineOpacity },
+        uShade: { value: new THREE.Color(palette.shade) }, uRim: { value: new THREE.Color(palette.rim) },
+        uShadeOpacity: { value: palette.shadeOpacity }, uRimOpacity: { value: palette.rimOpacity },
         uHighlightOpacity: { value: palette.highlightOpacity },
         uHighlightBaseline: { value: palette.highlightBaseline }, uHighlightQuiet: { value: palette.highlightQuiet },
       },
@@ -84,7 +88,11 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     (this.material.uniforms.uLine!.value as THREE.Color).set(palette.line);
     (this.material.uniforms.uHighlight!.value as THREE.Color).set(palette.highlight);
     (this.material.uniforms.uGlow!.value as THREE.Color).set(palette.glow);
+    (this.material.uniforms.uShade!.value as THREE.Color).set(palette.shade);
+    (this.material.uniforms.uRim!.value as THREE.Color).set(palette.rim);
     this.material.uniforms.uLineOpacity!.value = palette.lineOpacity;
+    this.material.uniforms.uShadeOpacity!.value = palette.shadeOpacity;
+    this.material.uniforms.uRimOpacity!.value = palette.rimOpacity;
     this.material.uniforms.uHighlightOpacity!.value = palette.highlightOpacity;
     this.material.uniforms.uHighlightBaseline!.value = palette.highlightBaseline;
     this.material.uniforms.uHighlightQuiet!.value = palette.highlightQuiet;
@@ -114,6 +122,8 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     this.geometry.getAttribute("aOverviewGridWarp").needsUpdate = true;
     this.geometry.getAttribute("aOverviewGridIntensity").needsUpdate = true;
     this.geometry.getAttribute("aOverviewGridQuiet").needsUpdate = true;
+    this.geometry.getAttribute("aOverviewGridShade").needsUpdate = true;
+    this.geometry.getAttribute("aOverviewGridRim").needsUpdate = true;
     this.fieldDirty = false;
   }
 

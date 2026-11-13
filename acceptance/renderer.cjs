@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
 const node = (page, id) => page.locator(`[data-overview-id="${id}"]`);
+const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const inspect = page => page.evaluate(() => {
   const bounds = element => {
     const rect = element.getBoundingClientRect();
@@ -23,7 +24,7 @@ function sameGeometry(before, after) {
   for (const prior of before) {
     const next = after.find(item => item.id === prior.id);
     for (const axis of ['x', 'y', 'width', 'height']) {
-      assert.ok(Math.abs(next.box[axis] - prior.box[axis]) < 1, `${prior.id} moved on ${axis}`);
+      assert.ok(Math.abs(next.box[axis] - prior.box[axis]) < 1, `${prior.id} moved on ${axis}: ${prior.box[axis]} -> ${next.box[axis]}`);
     }
   }
 }
@@ -50,7 +51,7 @@ function checkRepresentation(nodes) {
       await page.waitForTimeout(150);
     }
     await page.evaluate(() => window.overviewTest.motion(false));
-    await page.waitForTimeout(100);
+    await settle(page);
     assert.equal(await page.locator('canvas').count(), 1);
     const full = await inspect(page);
     assert.equal(full.filter(item => item.kind === 'project').length, 7);
@@ -67,15 +68,15 @@ function checkRepresentation(nodes) {
     const backgroundGeometry = current => current.filter(item => background.some(root => root.id === item.id));
     assert.ok(group && group.members.length > 1);
     await node(page, 'p0').click();
-    await page.waitForTimeout(100);
+    await settle(page);
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.focused), { kind: 'project', id: 'p0' });
     assert.equal(await node(page, group.id).count(), 1, 'Focus preserves explicit group choices');
     sameGeometry(background, backgroundGeometry(await inspect(page)));
     await page.screenshot({ path: `${output}/desktop-project.png` });
     await node(page, 'w0').click();
-    await page.waitForTimeout(100);
+    await settle(page);
     await node(page, group.id).click();
-    await page.waitForTimeout(100);
+    await settle(page);
     for (const id of group.members) assert.equal(await node(page, id).count(), 1);
     sameGeometry(background, backgroundGeometry(await inspect(page)));
     await page.screenshot({ path: `${output}/desktop-expanded.png` });
@@ -83,18 +84,18 @@ function checkRepresentation(nodes) {
     assert.equal(await collapse.innerText(), `Collapse ${group.members.length}`);
     assert.equal(await collapse.evaluate(button => button.scrollWidth <= button.clientWidth), true, 'Measured control fits its full label');
     await collapse.click();
-    await page.waitForTimeout(100);
+    await settle(page);
     assert.equal(await node(page, group.id).count(), 1);
     sameGeometry(background, backgroundGeometry(await inspect(page)));
 
     await node(page, 'n0').click();
-    await page.waitForTimeout(100);
+    await settle(page);
     const selected = await inspect(page);
     for (const id of ['n0', 'a0-0', 'w0', 'p0']) assert.equal(selected.find(item => item.id === id).highlighted, 'true');
     await page.screenshot({ path: `${output}/desktop-selected.png` });
     const avatars = selected.map(item => [item.id, item.avatar]);
     await page.evaluate(() => { window.overviewTest.visibility(false); window.overviewTest.visibility(true); window.overviewTest.refresh(); });
-    await page.waitForTimeout(100);
+    await settle(page);
     sameGeometry(selected, await inspect(page));
     assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'n0');
     assert.deepEqual((await inspect(page)).map(item => [item.id, item.avatar]), avatars);
@@ -103,15 +104,15 @@ function checkRepresentation(nodes) {
     assert.equal(await page.evaluate(() => window.overviewTest.state.selected), null);
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => window.overviewTest.state.focused), null);
-    await page.waitForTimeout(100);
+    await settle(page);
     sameGeometry(full, await inspect(page));
     const beforeWheel = await inspect(page);
     await page.mouse.wheel(0, 600);
-    await page.waitForTimeout(100);
+    await settle(page);
     sameGeometry(beforeWheel, await inspect(page));
     const beforeIcon = await inspect(page);
     await page.evaluate(() => window.overviewTest.updateIcon());
-    await page.waitForTimeout(100);
+    await settle(page);
     sameGeometry(beforeIcon, await inspect(page));
 
     await node(page, 'w0').click();
@@ -130,11 +131,11 @@ function checkRepresentation(nodes) {
     await page.evaluate(() => window.overviewTest.motion(false));
     await page.keyboard.press('Escape');
     await page.setViewportSize({ width: 1024, height: 900 });
-    await page.waitForTimeout(100);
+    await settle(page);
     checkRepresentation(await inspect(page));
     await page.screenshot({ path: `${output}/desktop-compact.png` });
     await page.evaluate(() => window.overviewTest.dark());
-    await page.waitForTimeout(100);
+    await settle(page);
     await page.screenshot({ path: `${output}/desktop-dark.png` });
 
     // Exercise real scale transforms and pulse rendering together, without debug hooks in the product.
@@ -167,8 +168,18 @@ function checkRepresentation(nodes) {
     for (const before of graphBefore) {
       const after = graphAfter.find(item => item.id === before.id);
       assert.ok(Math.abs((after.x + after.width / 2) - (before.x + before.width / 2)) < 1.5 && Math.abs((after.y + after.height / 2) - (before.y + before.height / 2)) < 1.5, 'Packed graph centres stay fixed');
-      assert.ok(Math.abs(after.width - before.width) <= 16.01 && Math.abs(after.height - before.height) <= 16.01, 'Depth remains within eight pixels per side');
+      assert.ok(after.width <= after.neutralWidth * 1.1 + 0.1 && after.height <= after.neutralHeight * 1.1 + 0.1,
+        'Activity growth stays within the maximum proportional allowance');
     }
+    const spatialFields = await page.evaluate(() => window.overviewTest.fieldEvidence());
+    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridWarp').maximum <= 12.00001, 'Combined deformation remains bounded');
+    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridShade').maximum > 0, 'Raised graphs contribute visible surface shading');
+    assert.ok(spatialFields.find(field => field.name === 'aOverviewGridRim').maximum > 0, 'Raised graphs contribute a broad contact rim');
+    await page.screenshot({ path: `${output}/desktop-depth-dark.png` });
+    await page.evaluate(() => window.overviewTest.theme(false));
+    await settle(page);
+    await page.screenshot({ path: `${output}/desktop-depth-light.png` });
+    await page.evaluate(() => window.overviewTest.theme(true));
     const centre = graph => ({ x: graph.x + graph.width / 2, y: graph.y + graph.height / 2 });
     const localGrid = await page.evaluate(({ busy, quiet }) => ({ busy: window.overviewTest.gridFieldAt(busy.x, busy.y), quiet: window.overviewTest.gridFieldAt(quiet.x, quiet.y) }), {
       busy: centre(graphAfter[0]), quiet: centre(graphAfter[1]),
@@ -193,12 +204,37 @@ function checkRepresentation(nodes) {
 
     // Pause freezes influence values even when fresh work arrives; observations still update.
     await page.evaluate(() => window.overviewTest.motion(false));
-    await page.waitForTimeout(100);
+    await settle(page);
     const frozenField = await page.evaluate(() => window.overviewTest.fieldEvidence());
     await page.evaluate(() => window.overviewTest.burst());
     await page.waitForTimeout(200);
     assert.deepEqual(await page.evaluate(() => window.overviewTest.fieldEvidence()), frozenField, 'Fresh activity does not move the paused grid');
     await page.evaluate(() => window.overviewTest.motion(true));
+
+    // A quiet project's focused elevation must not leak into its full-view scale.
+    await page.evaluate(() => { window.overviewTest.depthFixture(); window.overviewTest.motion(true); });
+    await page.waitForTimeout(900);
+    const quietBefore = (await page.evaluate(() => window.overviewTest.telemetry())).graphs[1];
+    await page.evaluate(() => window.overviewTest.focus({ kind: 'project', id: 'p1' }));
+    await page.waitForTimeout(1000);
+    await page.evaluate(() => { window.overviewTest.resetTelemetry(); window.overviewTest.focus(null); });
+    await page.waitForTimeout(1400);
+    const returned = await page.evaluate(() => window.overviewTest.telemetry());
+    const widths = returned.graphFrames.map(frame => frame.find(graph => graph.id === quietBefore.id)?.width).filter(Number.isFinite);
+    assert.ok(widths.length > 3);
+    assert.ok(widths.slice(1).every((width, index) => width <= widths[index] + 0.5), 'Unfocus returns smoothly without a second enlargement');
+    assert.ok(widths.at(-1) <= quietBefore.width + 0.5);
+    await page.evaluate(() => window.overviewTest.motion(false));
+    await settle(page);
+    const pausedReturn = await inspect(page);
+    await page.evaluate(() => window.overviewTest.focus({ kind: 'project', id: 'p1' }));
+    await settle(page);
+    await page.evaluate(() => window.overviewTest.focus(null));
+    await settle(page);
+    sameGeometry(pausedReturn, await inspect(page));
+    await page.evaluate(() => window.overviewTest.motion(true));
+    await settle(page);
+    sameGeometry(pausedReturn, await inspect(page));
 
     // An empty connected scene isolates ambient scheduling from working heartbeats.
     await page.evaluate(() => window.overviewTest.empty());
@@ -218,13 +254,13 @@ function checkRepresentation(nodes) {
     const renderedMovement = await page.evaluate(() => window.overviewTest.ambientEvidence('moving'));
     assert.ok(renderedMovement.changedPixels > 100, `Actual grid pixels move, independently of the time uniform: ${renderedMovement.changedPixels}`);
     await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.theme(false); });
-    await page.waitForTimeout(100);
+    await settle(page);
     const lightGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
     await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 0));
     const wrappedGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('phase-wrap', 256));
     assert.equal(wrappedGrid.changedPixels, 0, 'Common phase wrap preserves actual rendered trace positions');
     await page.evaluate(() => window.overviewTest.theme(true));
-    await page.waitForTimeout(100);
+    await settle(page);
     const darkGrid = await page.evaluate(() => window.overviewTest.ambientEvidence('theme', 3));
     assert.ok(lightGrid.visiblePixels > 800 && darkGrid.visiblePixels > 800, 'Both themes render visible grid structure');
     assert.ok(darkGrid.changedPixels > 800 && Math.abs(lightGrid.meanColour - darkGrid.meanColour) > 1, 'Effective theme changes rendered grid colours');
@@ -234,7 +270,7 @@ function checkRepresentation(nodes) {
       if (mode === 'reduce') { await page.evaluate(() => window.overviewTest.motion(true)); await page.emulateMedia({ reducedMotion: 'reduce' }); }
       if (mode === 'hidden') { await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.evaluate(() => window.overviewTest.visibility(false)); }
       if (mode === 'disconnected') await page.evaluate(() => { window.overviewTest.visibility(true); window.overviewTest.connection('disconnected'); });
-      await page.waitForTimeout(100);
+      await settle(page);
       await page.evaluate(() => window.overviewTest.resetTelemetry());
       await page.waitForTimeout(250);
       assert.equal((await page.evaluate(() => window.overviewTest.telemetry())).frames, 0, `${mode} stops the ambient render loop`);
@@ -253,7 +289,7 @@ function checkRepresentation(nodes) {
     await page.waitForTimeout(150);
     assert.ok((await page.evaluate(() => window.overviewTest.telemetry())).frames > 0, 'Reconnect restarts the shared scheduler');
     await page.evaluate(() => window.overviewTest.loadNative());
-    await page.waitForTimeout(100);
+    await settle(page);
     await page.evaluate(() => window.overviewTest.installShaderObserver());
     assert.equal(await page.evaluate(() => window.overviewTest.injectAmbientShaderFailure()), true, 'Acceptance can inject an ambient-only shader failure');
     await page.waitForTimeout(150);

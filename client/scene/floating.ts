@@ -81,7 +81,8 @@ export function createFloatingCardPositioner(
         y: Math.max(minY, Math.min(maxY, result.y)),
       }));
       const nodes = Array.from(parent.querySelectorAll<HTMLElement>("[data-overview-id]"))
-        .filter(node => Number(node.style.opacity || 1) > 0.25)
+        // Surface fading no longer hides readable labels or status badges.
+        .filter(node => node.dataset.overviewVisible !== "false" && node.getClientRects().length > 0)
         .map(node => ({ bounds: node.getBoundingClientRect(), weight: node.dataset.overviewHighlighted === "true" ? 4 : 1 }));
       const obstruction = (result: typeof results[number]) => {
         const left = metrics.originX + result.x * metrics.sx, top = metrics.originY + result.y * metrics.sy;

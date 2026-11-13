@@ -65,13 +65,22 @@ Light-mode travelling strokes use stronger dark-blue contrast independently of
 the quiet base grid. Their phase stays bounded during long-running sessions,
 with continuous movement across the repeating clock boundary.
 
+In the full view, quiet graphs recede slightly and sustained owned activity raises
+graphs within the free space around them. Growth is capped at ten percent and
+constrained by viewport edges, neighbours and delegation corridors; dense graphs
+may have less room. Packed centres remain fixed. Hover, keyboard focus and
+inspection hold automatic movement. A quiet working graph retains a neutral
+prominence floor; stale information cannot establish new work.
+
 Every displayed project, including an empty project, contributes a bounded local
-field after its current depth and focus transforms are applied. Recent unique
-owned work brightens and gently bends nearby pattern coordinates; quiet working
-agents retain only a small baseline. Project and workspace focus strengthen the
-displayed branch while calming surrounding interiors. Existing graph depth,
-ownership links and fibre pulses remain the primary activity presentation. The
-field does not repack graphs, alter routes, hit targets or camera controls.
+field after its current depth and focus transforms are applied. One displayed
+elevation drives graph scale, broad surface shading and grid deformation. Light
+themes use slate shading; dark themes use a cool rim. Recent unique owned work
+brightens the grid independently. Combined distortion is limited in both distance
+and local stretch, and fades at viewport edges. Project and workspace focus
+strengthen the displayed branch while distant roots retain readable names,
+icons and status badges. The background does not repack graphs, alter routes,
+hit targets or camera controls, and focusing does not create activity.
 
 **Pause motion** freezes the grid phase and field presentation while live status
 and readable previews continue. Reduced motion uses a static restrained grid;

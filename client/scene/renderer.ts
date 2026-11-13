@@ -8,14 +8,15 @@ import { StableLayout, type PositionedNode, type ProjectLayout, type SceneLayout
 import { pointAlongRoute, routeDelegation, type RoutedEdge, type RouteNode } from "../routing";
 import { unionRects, type Rect, type Point } from "../geometry";
 import { statusColour } from "../status";
-import { GraphOverlay, createCollapseTextMeasure } from "./overlay";
+import { GraphOverlay, createCollapseTextMeasure, type NodePresentation } from "./overlay";
 import { selectionColour } from "../appearance";
 import type { GroupPreferences } from "../../shared/presentation";
 import { canRetainSelection } from "../presentation";
 import { createGraphLine, FibreLight } from "./lines";
 import { advancePulseJourney, createPulseJourney, type PulseJourney } from "./pulses";
 import type { Line2 } from "three/addons/lines/Line2.js";
-import { activityDepth, advanceDepth, depthTransform, transformRouteNode, type DepthRange } from "./depth";
+import { depthTransform, transformRouteNode, type DepthRange } from "./depth";
+import { advanceElevation, elevationTarget, scaleForElevation, type ElevationInput } from "./elevation";
 import { planDepthDelegations, updateMovingDelegation, type CachedDelegation } from "./delegation";
 import { ProceduralAmbientGrid } from "./ambient";
 import type { ProjectGridInfluence } from "./ambient-field";
@@ -26,6 +27,7 @@ interface Cluster {
   nodes: Map<string, VisualNode>; lines: Map<string, Line2>;
   signature: string; opacity: number; routedAt: number;
   depth: number; depthHeld: boolean; depthRange: DepthRange;
+  elevation: number; fullViewElevation: number; relation: ElevationInput["relation"];
 }
 interface Pulse {
   nodeId: string; projectId: string; journey: PulseJourney; light: FibreLight;
@@ -206,7 +208,8 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         const group = new THREE.Group(); group.position.set(project.position.x, project.position.y, 0); group.scale.setScalar(project.scale);
         scene.add(group);
         cluster = { layout: project, group, nodes: new Map(), lines: new Map(), signature: "", opacity: 1, routedAt: 0,
-          depth: 1, depthHeld: false, depthRange: { min: 1, max: 1 } }; clusters.set(project.id, cluster);
+          depth: 1, depthHeld: false, depthRange: { min: 1, max: 1 },
+          elevation: 0.25, fullViewElevation: 0.25, relation: "full-view" }; clusters.set(project.id, cluster);
       }
       cluster.layout = project;
       if (focused && !focusAnchors.has(project.id)) focusAnchors.set(project.id, { ...project.position, scale: project.scale });
@@ -356,18 +359,35 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       .map(id => layout.nodes.get(layout.memberToDisplay.get(id) ?? id)?.projectId));
     let continuous = false, transitioning = false;
     const opacityByNode = new Map<string, number>();
+    const presentationByNode = new Map<string, NodePresentation>();
+    const bubbleNodes = new Set<string>();
     const influences: ProjectGridInfluence[] = [];
     for (const [id, cluster] of clusters) {
       const summary = summaries.get(id), intensity = live ? normaliseActivity(summary?.score ?? 0) : 0;
       if (animate && intensity > 0.001) nextActivityUpdate = now + 250;
       const foreground = focusProject === id, background = !!focused && !foreground;
       const heldDepth = inspectedProjects.has(id);
-      const targetDepth = activityDepth(summary?.score ?? 0, summary?.working ?? 0, live, cluster.depthRange);
+      const relation = foreground ? "foreground" : background ? "background" : "full-view";
+      const relationChanged = relation !== cluster.relation;
+      const targetElevation = elevationTarget({ activity: intensity, working: (summary?.working ?? 0) > 0,
+        fresh: live && authoritative(), relation });
+      // One displayed elevation drives scaling and grid deformation. Inspection
+      // holds automatic motion; an explicit scope change still takes effect.
+      if (relationChanged && relation === "full-view") cluster.elevation = cluster.fullViewElevation;
+      else if (relationChanged && !animate) cluster.elevation = targetElevation;
+      else if (animate && (live || relation !== "full-view") && (!heldDepth || relation !== "full-view") &&
+        (!structuralTransition || relation !== "full-view")) {
+        cluster.elevation = advanceElevation(cluster.elevation, targetElevation, elapsedSeconds);
+        if (Math.abs(cluster.elevation - targetElevation) > 0.00001) continuous = true;
+      }
+      cluster.relation = relation;
       if (!focused) {
+        // Focus has its own elevation. Restore the retained full-view value
+        // before the return transform, avoiding a second scale jump afterwards.
+        cluster.fullViewElevation = cluster.elevation;
         if (heldDepth && !cluster.depthHeld && !structuralTransition) cluster.depth = cluster.group.scale.x / cluster.layout.scale;
         cluster.depthHeld = heldDepth;
-        if (animate && !heldDepth && !structuralTransition) cluster.depth = advanceDepth(cluster.depth, targetDepth, dt);
-        if (animate && !heldDepth && Math.abs(cluster.depth - targetDepth) > 0.00001) continuous = true;
+        if (animate && live && !heldDepth && !structuralTransition) cluster.depth = scaleForElevation(cluster.elevation, cluster.depthRange);
       }
       let bounds = cluster.layout.bounds;
       if (foreground && focused?.kind === "workspace") {
@@ -384,8 +404,8 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       const scale = foreground ? Math.max(cluster.layout.scale, fit) : baseline?.scale ?? full.scale;
       const targetX = foreground ? width / 2 - (bounds.x + bounds.width / 2) * scale : baseline?.x ?? full.x;
       const targetY = foreground ? height / 2 - (bounds.y + bounds.height / 2) * scale : baseline?.y ?? full.y;
-      const z = foreground ? 140 : background ? -180 : intensity * 32;
-      const alpha = background ? 0.13 : 1;
+      const z = foreground ? 140 : background ? -180 : cluster.elevation * 42;
+      const alpha = background ? 0.3 : 1;
       const moving = animate && (Math.abs(cluster.group.position.x - targetX) + Math.abs(cluster.group.position.y - targetY) > 0.25 || Math.abs(cluster.group.scale.x - scale) > 0.001 || Math.abs(cluster.opacity - alpha) > 0.005);
       transitioning ||= structuralTransition && moving;
       continuous ||= moving;
@@ -402,8 +422,21 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
           ? node.memberIds.reduce((sum, member) => sum + activity.score(member, now), 0)
           : count?.score ?? 0) : 0;
         const dimmedBranch = foreground && focused?.kind === "workspace" && node.id !== id && node.id !== focused.id && node.workspaceId !== focused.id;
-        const nodeAlpha = cluster.opacity * (dimmedBranch ? 0.2 : 1);
-        opacityByNode.set(node.id, nodeAlpha);
+        const nodeAlpha = cluster.opacity * (dimmedBranch ? 0.38 : 1);
+        const emphasized = ancestry.has(node.id);
+        opacityByNode.set(node.id, emphasized ? Math.max(0.85, nodeAlpha) : nodeAlpha);
+        const distant = background || dimmedBranch;
+        const root = node.kind === "project";
+        const important = !!agent?.attention || (count?.errors ?? 0) > 0 || (count?.waiting ?? 0) > 0;
+        presentationByNode.set(node.id, {
+          surfaceOpacity: emphasized ? 1 : distant ? Math.max(root ? 0.46 : 0.24, nodeAlpha) : 1,
+          textOpacity: emphasized ? 1 : distant ? root ? 0.8 : 0.55 : 1,
+          badgeOpacity: emphasized ? 1 : distant ? important ? 0.95 : 0.7 : 1,
+          edgeOpacity: emphasized ? Math.max(0.85, nodeAlpha) : nodeAlpha,
+          interactive: true,
+          elevation: distant ? 0.06 : cluster.elevation,
+        });
+        if (!distant || selected === node.id || hovered === node.id || held.has(node.id)) bubbleNodes.add(node.id);
         if (animate) visual.phase = (visual.phase + dt * heartbeatBpm(working, score) / 60) % 1;
         const age = time - (arrivals.get(node.id) ?? -Infinity), arrival = age < 800 ? Math.exp(-age / 240) : 0;
         const wave = animate ? Math.max(working ? beat(visual.phase) * 0.35 : 0, arrival) : 0;
@@ -438,6 +471,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         activity: Math.max(workingFloor, live ? intensity : 0),
         visibility: cluster.opacity,
         focus: foreground ? (focused?.kind === "workspace" ? 0.62 : 0.48) : 0,
+        elevation: cluster.elevation,
       });
     }
     scene.updateMatrixWorld(true);
@@ -485,12 +519,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     overlay.beginPositions();
     for (const cluster of clusters.values()) for (const node of cluster.layout.nodes) {
       point.set(node.position.x, node.position.y, 0); cluster.group.localToWorld(point);
-      overlay.positionNode(node.id, point.x, point.y, cluster.group.scale.x, opacityByNode.get(node.id) ?? 1, selected === node.id, focused?.id === node.id, ancestry.has(node.id), focusProject === cluster.layout.id);
+      overlay.positionNode(node.id, point.x, point.y, cluster.group.scale.x, presentationByNode.get(node.id)!, selected === node.id, focused?.id === node.id, ancestry.has(node.id), focusProject === cluster.layout.id);
     }
     reportAnchor(selected ? overlay.anchor(selected) : null);
     const screenRoutes: Point[][] = [];
     for (const cluster of clusters.values()) {
-      if (cluster.opacity < 0.25) continue;
       for (const edge of cluster.layout.edges) screenRoutes.push(edge.points.map(location => ({ x: cluster.group.position.x + location.x * cluster.group.scale.x, y: cluster.group.position.y + location.y * cluster.group.scale.x })));
     }
     for (const item of delegations.values()) if (item.line.visible) screenRoutes.push([...item.route.points]);
@@ -498,7 +531,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const displayedBubbles = new Map<string, ActivityBubble>();
     for (const bubble of bubbles.current(now)) {
       const nodeId = layout.memberToDisplay.get(bubble.nodeId) ?? bubble.nodeId;
-      if ((opacityByNode.get(nodeId) ?? 0) <= 0.25) continue;
+      if (!bubbleNodes.has(nodeId)) continue;
       const previous = displayedBubbles.get(nodeId);
       if (!previous || bubble.priority > previous.priority || bubble.priority === previous.priority && bubble.timestamp > previous.timestamp) {
         displayedBubbles.set(nodeId, { ...bubble, nodeId });

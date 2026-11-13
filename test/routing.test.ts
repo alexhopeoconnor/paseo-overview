@@ -1,7 +1,8 @@
 import { full } from "../acceptance/fixture";
+import { rectsOverlap, type Rect } from "../client/geometry";
 import { StableLayout, type PositionedNode, type ProjectLayout } from "../client/layout";
 import { planDepthDelegations, sweptStubIntersectsRect, updateMovingDelegation } from "../client/scene/delegation";
-import { depthTransform, transformRouteNode } from "../client/scene/depth";
+import { depthTransform, projectDepthRanges, transformRouteNode } from "../client/scene/depth";
 import { describe, expect, it } from "vitest";
 import { findOwnershipCrossings, findUnrelatedNodeIntersections, pointAlongRoute, routeDelegation, routeOwnership, routedEdge } from "../client/routing";
 
@@ -94,19 +95,24 @@ function project(id: string, x: number, nodes = [node(id, 40, 70)]): ProjectLayo
   return { id, name: id, background: false, position: { x, y: 40 }, scale: 1, bounds: { x: 0, y: 0, width: 120, height: 140 },
     radius: 150, nodes: nodes.map(node => ({ ...node, projectId: id })), parents: new Map(), edges: [], agentIds: [], workspaceIds: [] };
 }
+function displayedBounds(project: ProjectLayout, multiplier: number): Rect {
+  const transform = depthTransform(project, multiplier);
+  return { x: transform.x + project.bounds.x * transform.scale, y: transform.y + project.bounds.y * transform.scale,
+    width: project.bounds.width * transform.scale, height: project.bounds.height * transform.scale };
+}
 
 describe("delegation depth envelopes", () => {
   it("retains a cached spine while independent endpoint projects and an obstacle move", () => {
     const projects = [project("a", 30), project("obstacle", 220), project("b", 420)];
     const plan = planDepthDelegations(projects, [{ id: "ab", source: "a", target: "b", kind: "delegation" }], new Map(), { x: 8, y: 8, width: 600, height: 300 });
-    expect(plan.fraction).toBe(1);
+    expect(plan.routes.size).toBe(1);
     const cached = plan.routes.get("ab")!;
     const spine = cached.route.points.slice(1, -1).map(point => ({ ...point }));
     for (let a = 0; a <= 4; a++) for (let b = 0; b <= 4; b++) for (let obstacle = 0; obstacle <= 4; obstacle++) {
       const progress = [a, obstacle, b];
-      const nodes = projects.map((project, index) => {
-        const range = plan.ranges.get(project.id)!;
-        return transformRouteNode(project.nodes[0]!, depthTransform(project, range.min + (range.max - range.min) * progress[index]! / 4));
+      const nodes = projects.map((item, index) => {
+        const range = plan.ranges.get(item.id)!;
+        return transformRouteNode(item.nodes[0]!, depthTransform(item, range.min + (range.max - range.min) * progress[index]! / 4));
       });
       updateMovingDelegation(cached, nodes[0]!, nodes[2]!);
       expect(cached.route.points.slice(1, -1)).toEqual(spine);
@@ -121,19 +127,70 @@ describe("delegation depth envelopes", () => {
     expect(sweptStubIntersectsRect({ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 0 }, { x: 70, y: 10, width: 4, height: 4 })).toBe(false);
   });
 
-  it("falls back to static depth when only a narrow diagonal endpoint escape exists", () => {
+  it("locally neutralises a crowded corridor while a distant project keeps its ideal range", () => {
     const nodes = [node("a", 50, 50, 20), node("b", 160, 160, 20),
       node("left", 25, 50, 10), node("right", 75, 50, 10), node("top", 50, 25, 10), node("bottom", 50, 75, 10)];
-    const p = { ...project("p", 0, nodes), position: { x: 0, y: 0 }, bounds: { x: 0, y: 0, width: 200, height: 200 } };
-    const plan = planDepthDelegations([p], [{ id: "ab", source: "a", target: "b", kind: "delegation" }], new Map(), { x: 8, y: 8, width: 220, height: 220 });
-    expect(plan.fraction).toBe(0); expect(plan.ranges.get("p")).toEqual({ min: 1, max: 1 });
-    expect(plan.routes.get("ab")?.route.points.length).toBeGreaterThan(1);
+    const crowded = { ...project("crowded", 0, nodes), position: { x: 0, y: 0 }, bounds: { x: 0, y: 0, width: 200, height: 200 } };
+    const distant = project("distant", 600);
+    const viewport = { x: 8, y: 8, width: 800, height: 400 };
+    const plan = planDepthDelegations([crowded, distant],
+      [{ id: "ab", source: "a", target: "b", kind: "delegation" }], new Map(), viewport);
+    const ideal = projectDepthRanges([crowded, distant], viewport);
+    expect(plan.ranges.get("crowded")).toEqual({ min: 1, max: 1 });
+    expect(plan.ranges.get("distant")).toEqual(ideal.get("distant"));
+    expect(plan.fraction).toBe(0);
+    const route = plan.routes.get("ab")?.route;
+    expect(route?.points.length).toBeGreaterThan(1);
+    expect(plan.routes.get("ab")?.sourceSide).toBeUndefined();
+    expect(plan.routes.get("ab")?.targetSide).toBeUndefined();
   });
 
-  it("keeps activity depth available in the seven-project acceptance fixture", () => {
+  it("plans only delegation relationships and never duplicates ownership routes", () => {
+    const projects = [project("a", 30), project("b", 420)];
+    const viewport = { x: 8, y: 8, width: 600, height: 300 };
+    const plan = planDepthDelegations(projects, [
+      { id: "member", source: "a", target: "b", kind: "membership" as const },
+      { id: "delegate", source: "a", target: "b", kind: "delegation" as const },
+    ], new Map(), viewport);
+    expect([...plan.routes.keys()]).toEqual(["delegate"]);
+    expect([...plan.ranges.keys()]).toEqual(["a", "b"]);
+    expect(plan.routes.get("delegate")!.route.kind).toBe("delegation");
+  });
+
+  it("keeps every routable relationship inside the viewport in the seven-project fixture", () => {
     const layout = new StableLayout().update(full, 1516, 1164);
-    const plan = planDepthDelegations(layout.projects, full.edges, layout.memberToDisplay, { x: 8, y: 8, width: 1500, height: 1148 });
-    expect(plan.fraction).toBeGreaterThan(0);
+    const viewport = { x: 8, y: 8, width: 1500, height: 1148 };
+    const plan = planDepthDelegations(layout.projects, full.edges, layout.memberToDisplay, viewport);
     expect(plan.routes.size).toBe(layout.delegationEdges.filter(edge => edge.points.length > 0).length);
+    expect(plan.fraction).toBeGreaterThanOrEqual(0);
+    expect(plan.fraction).toBeLessThanOrEqual(1);
+    for (const item of layout.projects) {
+      const range = plan.ranges.get(item.id)!;
+      expect(range.min).toBeLessThanOrEqual(1);
+      expect(range.max).toBeGreaterThanOrEqual(1);
+      for (const multiplier of [range.min, 1, range.max]) {
+        const transform = depthTransform(item, multiplier);
+        expect(transform.x + item.bounds.x * transform.scale).toBeGreaterThanOrEqual(viewport.x - 1e-6);
+        expect(transform.y + item.bounds.y * transform.scale).toBeGreaterThanOrEqual(viewport.y - 1e-6);
+        expect(transform.x + (item.bounds.x + item.bounds.width) * transform.scale)
+          .toBeLessThanOrEqual(viewport.x + viewport.width + 1e-6);
+        expect(transform.y + (item.bounds.y + item.bounds.height) * transform.scale)
+          .toBeLessThanOrEqual(viewport.y + viewport.height + 1e-6);
+      }
+    }
+    for (let first = 0; first < layout.projects.length; first++) for (let second = first + 1; second < layout.projects.length; second++) {
+      const a = layout.projects[first]!, b = layout.projects[second]!;
+      const aRange = plan.ranges.get(a.id)!, bRange = plan.ranges.get(b.id)!;
+      expect(rectsOverlap(displayedBounds(a, aRange.max), displayedBounds(b, bRange.max), 8)).toBe(false);
+      expect(rectsOverlap(displayedBounds(a, aRange.min), displayedBounds(b, bRange.min), 8)).toBe(false);
+    }
+    for (const [id, cached] of plan.routes) {
+      expect(plan.routes.has(id)).toBe(true);
+      expect(cached.route.points.length).toBeGreaterThan(1);
+    }
+    const repeat = planDepthDelegations([...layout.projects].reverse(), [...full.edges].reverse(), layout.memberToDisplay, viewport);
+    expect([...plan.ranges.entries()]).toEqual([...repeat.ranges.entries()]);
+    expect([...plan.routes.keys()].sort()).toEqual([...repeat.routes.keys()].sort());
+    for (const [id, cached] of plan.routes) expect(repeat.routes.get(id)!.route.points).toEqual(cached.route.points);
   });
 });
