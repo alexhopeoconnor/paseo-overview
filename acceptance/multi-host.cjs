@@ -11,7 +11,8 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
   const listen = `127.0.0.1:${await freePort()}`;
   const providerLog = path.join(output, "remote-provider-operations.jsonl");
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
-    version: 1, daemon: { listen, relay: { enabled: false }, mcp: { enabled: false, injectIntoAgents: false } },
+    version: 1, daemon: { listen, cors: { allowedOrigins: [new URL(overviewUrl).origin] },
+      relay: { enabled: false }, mcp: { enabled: false, injectIntoAgents: false } },
     features: { webUi: { enabled: true }, dictation: { enabled: false }, voiceMode: { enabled: false } }, pluginsEnabled: true,
     agents: { providers: { "overview-test": { extends: "acp", label: "Overview acceptance provider", command: [process.execPath, path.join(__dirname, "provider.mjs")], env: { OVERVIEW_TEST_PROVIDER_LOG: providerLog } } } },
   }));

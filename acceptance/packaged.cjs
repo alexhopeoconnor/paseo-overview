@@ -190,7 +190,7 @@ async function run() {
       });
       socket.on("framereceived", frame => {
         const raw = String(frame.payload);
-        if (!raw.includes("project.update") && !raw.includes("plugin.rpc.invoke.response") && !raw.includes("project.list.response")) return;
+        if (!raw.includes("project.update") && !raw.includes("plugin.rpc.invoke.response") && !raw.includes("project.list.response") && !raw.includes("agent.provider_subagents.snapshot.response")) return;
         try { received.push(JSON.parse(JSON.stringify(JSON.parse(raw), (_, value) => typeof value === "string" && value.length > 220 ? `<${value.length} characters>` : value))); } catch {}
       });
     });
@@ -224,7 +224,8 @@ async function run() {
             id: `fixture-native-${String(index).padStart(3, "0")}`, parentAgentId: snapshot.parentAgentId,
             parentSubagentId: null,
             provider: "overview-test", title: `Inspect subsystem ${index + 1}`, description: `Sanitised native child ${index + 1}`,
-            status: nativeActivity.get(`${snapshot.parentAgentId}:${index}`) ?? "completed", subtitle: null, updatedAt: new Date().toISOString(), toolCallId: `fixture-tool-${index}`,
+            status: nativeActivity.get(`${snapshot.parentAgentId}:${index}`) ?? "completed", subtitle: null,
+            createdAt: "2026-01-01T00:00:00.000Z", updatedAt: new Date().toISOString(), toolCallId: `fixture-tool-${index}`,
           }));
           await delay(1400);
         }
