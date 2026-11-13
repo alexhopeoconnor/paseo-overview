@@ -239,6 +239,9 @@ async function run() {
     await page.getByRole("button", { name: "Overview", exact: true }).click();
     await page.getByTestId("overview-screen").waitFor({ state: "visible" });
     await page.getByTestId("overview-canvas-host").locator("canvas").waitFor({ state: "visible" });
+    for (const control of ["overview-host-filter", "overview-project-filter", "overview-motion", "overview-appearance", "overview-fullscreen"]) {
+      assert.ok(await page.getByTestId(control).locator("svg").count() > 0, `${control} renders its public host icon`);
+    }
     const overviewUrl = page.url();
     await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 0, "empty initial project graph");
     await page.screenshot({ path: path.join(output, "empty.png") });
@@ -274,16 +277,20 @@ async function run() {
       return value === "rgb(11, 17, 24)";
     }, "Overview-only dark override");
     await page.getByTestId("overview-background-off").click();
+    await page.getByTestId("overview-appearance").click();
     await delay(150);
     const off = await packagedGridPixels(page, "off");
     assert.ok(off.structurePixels < 50, "Background Off removes the room without removing the canvas");
+    await page.getByTestId("overview-appearance").click();
     await page.getByTestId("overview-theme-light").click();
     await waitFor(async () => (await page.getByTestId("overview-screen").evaluate(element => getComputedStyle(element).backgroundColor)) === "rgb(245, 248, 251)", "Overview-only light override");
     await page.getByTestId("overview-background-static").click();
+    await page.getByTestId("overview-appearance").click();
     await delay(150);
     await packagedGridPixels(page, "static");
     await delay(300);
     assert.ok((await packagedGridPixels(page, "static")).changedPixels <= 20, "Static preference freezes the background with graph motion enabled");
+    await page.getByTestId("overview-appearance").click();
     await page.getByTestId("overview-theme-paseo").click();
     await page.getByTestId("overview-background-animated").click();
     await page.getByTestId("overview-appearance").click();

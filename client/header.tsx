@@ -123,7 +123,7 @@ function MenuChoice({ theme, compact, testID, label, detail, selected, checked, 
       <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.foreground, fontSize: 13 }}>{label}</Text>
       {detail ? <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.muted, fontSize: 11 }}>{detail}</Text> : null}
     </View>
-    {selected || checked ? <Icon name="check" size={16} color={emphasis} /> : null}
+    {selected || checked ? <Icon name="Check" size={16} color={emphasis} /> : null}
   </Pressable>;
 }
 
@@ -310,10 +310,10 @@ export function OverviewHeader({
 
   return <View testID="overview-header" style={[styles.header, { borderBottomColor: theme.border, paddingHorizontal: compact ? 10 : 16 }]}>
     <View style={[styles.toolbar, { minHeight: compact ? 44 : 40 }]}>
-      {scope ? <ToolbarButton theme={theme} compact={compact} testID="overview-back" label={scope.kind === "workspace" ? "Back to project" : "All projects"} icon="chevron-left" onPress={onBack} /> : null}
+      {scope ? <ToolbarButton theme={theme} compact={compact} testID="overview-back" label={scope.kind === "workspace" ? "Back to project" : "All projects"} icon="ChevronLeft" onPress={onBack} /> : null}
       <View style={styles.dropdownAnchor}>
         <ToolbarButton ref={hostTrigger} theme={theme} compact={compact} testID="overview-host-filter" label={`Host: ${hostTriggerLabel}${hostIssues.length ? `. ${hostIssues.map(issue => `${issue.label} ${issue.status}`).join(", ")}` : ""}`}
-          icon="server" text={hostTriggerLabel} trailingIcon="chevron-down" maxWidth={compact ? 96 : 220}
+          icon="Server" text={hostTriggerLabel} trailingIcon="ChevronDown" maxWidth={compact ? 96 : 220}
           active={openMenu === "host"} onPress={() => setOpenMenu(open => open === "host" ? null : "host")} />
         {!compact && openMenu === "host" ? <View ref={menu} testID="overview-host-menu"
           style={[styles.menuPanel, { borderColor: theme.border, backgroundColor: theme.surface }]}>
@@ -322,7 +322,7 @@ export function OverviewHeader({
       </View>
       <View style={[styles.dropdownAnchor, styles.projectAnchor]}>
         <ToolbarButton ref={projectTrigger} theme={theme} compact={compact} testID="overview-project-filter" label={`Project: ${projectLabel}`}
-          icon="folder" text={projectLabel} textTestID="overview-scope-title" trailingIcon="chevron-down"
+          icon="Folder" text={projectLabel} textTestID="overview-scope-title" trailingIcon="ChevronDown"
           maxWidth={compact ? 160 : 280} active={openMenu === "project"} onPress={() => setOpenMenu(open => open === "project" ? null : "project")} />
         {!compact && openMenu === "project" ? <View ref={menu} testID="overview-project-menu"
           style={[styles.menuPanel, { borderColor: theme.border, backgroundColor: theme.surface }]}>
@@ -331,15 +331,15 @@ export function OverviewHeader({
       </View>
       <View style={styles.spacer} />
       <ToolbarButton theme={theme} compact={compact} testID="overview-motion" label={motion ? "Pause animation" : "Resume animation"}
-        icon={motion ? "pause" : "play"} text={compact ? undefined : motion ? "Pause" : "Resume"} active={!motion} onPress={onMotion} />
+        icon={motion ? "Pause" : "Play"} text={compact ? undefined : motion ? "Pause" : "Resume"} active={!motion} onPress={onMotion} />
       {appearance ? <View style={styles.dropdownAnchor}>
         <ToolbarButton ref={appearanceTrigger} theme={theme} compact={compact} testID="overview-appearance" label="Quick appearance"
-          icon="palette" text={compact ? undefined : "Appearance"} active={openMenu === "appearance"}
+          icon="Palette" text={compact ? undefined : "Appearance"} active={openMenu === "appearance"}
           onPress={() => setOpenMenu(open => open === "appearance" ? null : "appearance")} />
         {!compact && openMenu === "appearance" ? <View ref={menu} style={styles.appearanceAnchor}>{appearancePanel}</View> : null}
       </View> : null}
       {fullscreen ? <ToolbarButton theme={theme} compact={compact} testID="overview-fullscreen"
-        label={fullscreen.active ? "Exit fullscreen" : "Fullscreen graph"} icon={fullscreen.active ? "minimize" : "maximize"}
+        label={fullscreen.active ? "Exit fullscreen" : "Fullscreen graph"} icon={fullscreen.active ? "Minimize" : "Maximize"}
         text={compact ? undefined : fullscreen.active ? "Exit" : "Fullscreen"} active={fullscreen.active} onPress={fullscreen.toggle} /> : null}
     </View>
     <View testID="overview-status" style={styles.metaRow}>

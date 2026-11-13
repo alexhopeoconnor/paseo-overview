@@ -433,7 +433,18 @@ export function createOverviewStore(options: Options) {
       ]);
       if (alive()) publish();
     };
-    starting = observeTask().catch(error => { failed(error); if (alive()) { halt(); publish(); } throw error; });
+    starting = observeTask().catch(error => {
+      failed(error);
+      if (alive()) {
+        halt();
+        // A later host-directory reconciliation must perform a real reconnect,
+        // including after a second failed attempt. Do not claim a live observer
+        // after its subscriptions and queues have been released.
+        connection = "disconnected";
+        publish();
+      }
+      throw error;
+    });
     return starting;
   }
 

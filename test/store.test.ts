@@ -635,6 +635,27 @@ describe("multi-host coordinator", () => {
       directory, workspace, events, timelineHandlers, timelineReleases };
   }
 
+  it("retries failed startup on a later online reconciliation without disturbing other hosts", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    vi.mocked(one.api.agents.list).mockRejectedValueOnce(new Error("Temporary initial directory failure"));
+    const hosts = createOverviewHosts({
+      acquire: id => id === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    const summaries = [{ id: "one", label: "One", status: "online" as const }, { id: "two", label: "Two", status: "online" as const }];
+    hosts.setHosts(summaries); await flush();
+    expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("disconnected");
+    expect(hosts.model.hosts.find(host => host.id === "two")?.connection).toBe("connected");
+    const otherReads = vi.mocked(two.api.agents.list).mock.calls.length;
+    vi.mocked(one.api.agents.list).mockRejectedValueOnce(new Error("Second transient failure"));
+    hosts.setHosts(summaries); await flush();
+    expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("disconnected");
+    hosts.setHosts(summaries); await flush();
+    expect(hosts.model.hosts.find(host => host.id === "one")?.connection).toBe("connected");
+    expect(hosts.model.nodes.some(node => node.hostId === "one")).toBe(true);
+    expect(vi.mocked(two.api.agents.list).mock.calls.length).toBe(otherReads);
+    hosts.dispose();
+  });
+
   it("isolates duplicate raw IDs and event sequences across two hosts", async () => {
     const one = coordinatorHost("one"), two = coordinatorHost("two");
     const changed = vi.fn(), failed = vi.fn();
