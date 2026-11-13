@@ -71,8 +71,11 @@ function readPluginIdentity(pluginDir) {
 // dependency and any private product debug interface. The initial empty graph
 // isolates grid pixels from foreground heartbeat/pulse animation.
 async function packagedGridPixels(page, key) {
-  const screenshot = await page.getByTestId("overview-canvas-host").locator("canvas").screenshot();
-  return page.evaluate(async ({ encoded, key }) => {
+  const target = page.getByTestId("overview-canvas-host").locator("canvas");
+  const bounds = await target.boundingBox();
+  const emptyLabel = await page.getByText("Your projects will appear here", { exact: true }).boundingBox();
+  const screenshot = await target.screenshot();
+  return page.evaluate(async ({ encoded, key, bounds, emptyLabel }) => {
     const image = new Image();
     image.src = `data:image/png;base64,${encoded}`;
     await image.decode();
@@ -91,6 +94,12 @@ async function packagedGridPixels(page, key) {
     const base = [...frequencies].sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number);
     let structurePixels = 0, changedPixels = 0, strongChangedPixels = 0, maximumDelta = 0;
     for (let index = 0; index < pixels.length; index += 4) {
+      // A compositor screenshot includes the foreground empty-state label over
+      // the canvas. Its readable text must remain when Background is Off.
+      const x = (index / 4 % canvas.width) * bounds.width / canvas.width + bounds.x;
+      const y = Math.floor(index / 4 / canvas.width) * bounds.height / canvas.height + bounds.y;
+      if (emptyLabel && x >= emptyLabel.x - 2 && x <= emptyLabel.x + emptyLabel.width + 2 &&
+          y >= emptyLabel.y - 2 && y <= emptyLabel.y + emptyLabel.height + 2) continue;
       if (Math.max(Math.abs(pixels[index] - base[0]), Math.abs(pixels[index + 1] - base[1]), Math.abs(pixels[index + 2] - base[2])) > 4) structurePixels++;
       if (previous?.length === pixels.length) {
         const delta = Math.max(Math.abs(pixels[index] - previous[index]), Math.abs(pixels[index + 1] - previous[index + 1]), Math.abs(pixels[index + 2] - previous[index + 2]));
@@ -101,7 +110,7 @@ async function packagedGridPixels(page, key) {
     }
     captures.set(key, pixels);
     return { width: canvas.width, height: canvas.height, base, structurePixels, changedPixels, strongChangedPixels, maximumDelta };
-  }, { encoded: screenshot.toString("base64"), key });
+  }, { encoded: screenshot.toString("base64"), key, bounds, emptyLabel });
 }
 
 async function run() {

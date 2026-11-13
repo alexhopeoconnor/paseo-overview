@@ -167,8 +167,8 @@ report must identify the exact plugin manifest identity, package hash and daemon
 version under test; software-rendered frame timings do not establish real-GPU
 performance. The fixture's `?performance=1` mode retains frame timestamps while
 skipping expensive diagnostic scene traversal. Its background toggle compares the
-incremental grid draw cost under the same animation load, rather than pretending
-to remove scheduler cost.
+background on/off cost under the same foreground load. Off also removes
+background scheduling and field updates.
 
 For hardware measurements, start an isolated browser with local remote debugging
 and its normal GPU enabled. Use its endpoint in the prepared acceptance environment:
@@ -182,8 +182,7 @@ The browser must reach the fixture HTTP server started by this runner; a contain
 on the same workstation therefore needs host networking for this check instead of
 `--network none`. Keep the normal read-only source/dependency mounts and `/out`
 output mount. Never attach this runner to a user's existing browsing profile.
-The on/off/on comparison retains the same foreground and scheduler: it measures
-incremental background drawing overhead, not the cost of removing background
-scheduling altogether. Pointer measurements include Playwright and event-loop
+The on/off/on comparison retains the same foreground. Quiet-cloud and empty-room
+samples distinguish background animation from an idle scene. Pointer measurements include Playwright and event-loop
 latency. Inspect the hardware screenshots as well as `performance-results.json`;
 keep live deployed acceptance separate from this sanitised fixture.
