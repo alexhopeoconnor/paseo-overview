@@ -5,10 +5,11 @@ const { spawn } = require("node:child_process");
 const { setTimeout: delay } = require("node:timers/promises");
 
 /** Exercise borrowed host APIs with the plugin installed only on the first host. */
-async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directory, freePort, waitFor, DaemonClient, WebSocket, runtimeVersion }) {
+async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directory, freePort, waitFor, DaemonClient, WebSocket, runtimeVersion, expectedOfflineErrors, onRemoteShutdown }) {
   const home = path.join(output, "remote-state");
   fs.mkdirSync(home, { mode: 0o700 });
   const listen = `127.0.0.1:${await freePort()}`;
+  const remotePort = new URL(`http://${listen}`).port;
   const providerLog = path.join(output, "remote-provider-operations.jsonl");
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
     version: 1, daemon: { listen, cors: { allowedOrigins: [new URL(overviewUrl).origin] },
@@ -97,11 +98,12 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
     await page.getByTestId("overview-host-filter").click();
     await page.getByTestId("overview-host-option-all").click();
     await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 8, "All hosts restored");
+    onRemoteShutdown(remotePort);
     await stop();
     await waitFor(async () => (await page.getByTestId("overview-host-filter").getAttribute("aria-label"))?.includes("offline") || (await page.locator("body").innerText()).toLowerCase().includes("offline"), "remote offline indicator");
     assert.equal(await page.locator('[data-overview-kind="project"]').count(), 8, "Disconnected host retains its known graph");
     await page.screenshot({ path: path.join(output, "two-hosts-offline.png") });
-    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true, hostFilterRefit: true };
+    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true, hostFilterRefit: true, expectedOfflineErrors };
   } finally { await stop(); }
 }
 

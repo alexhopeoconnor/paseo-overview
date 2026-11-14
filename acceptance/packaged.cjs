@@ -160,6 +160,11 @@ async function run() {
   let page;
   const pageErrors = [];
   const consoleErrors = [];
+  const expectedOfflineErrors = [];
+  let expectedOfflineError = null;
+  const onRemoteShutdown = remotePort => {
+    expectedOfflineError = `WebSocket connection to 'ws://localhost:${remotePort}/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED`;
+  };
   const browserRequests = [];
   const received = [];
   const liveRows = [];
@@ -182,7 +187,12 @@ async function run() {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"] });
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     page.on("pageerror", error => pageErrors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+    page.on("console", message => {
+      if (message.type() !== "error") return;
+      const text = message.text();
+      if (expectedOfflineError !== null && text === expectedOfflineError) expectedOfflineErrors.push(text);
+      else consoleErrors.push(text);
+    });
     page.on("websocket", socket => {
       console.log(`Browser WebSocket: ${socket.url()}`);
       socket.on("framesent", frame => {
@@ -591,11 +601,11 @@ async function run() {
       await waitFor(async () => (await page.locator("body").innerText()).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
       assert.equal(await page.getByText("Show less",{exact:true}).count(),0);
     }
-    const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version });
+    const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version, expectedOfflineErrors, onRemoteShutdown });
     fs.writeFileSync(path.join(output, "multi-host.json"), JSON.stringify(multipleHosts, null, 2));
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "project checkbox draft Apply/Cancel/Escape and selected-set framing", "explicit empty selection and Show all", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,expectedOfflineErrors,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "project checkbox draft Apply/Cancel/Escape and selected-set framing", "explicit empty selection and Show all", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {
@@ -603,7 +613,7 @@ async function run() {
       await page.screenshot({ path: path.join(output, "failure.png") }).catch(() => {});
       fs.writeFileSync(path.join(output, "page.txt"), await page.locator("body").innerText().catch(() => ""));
     }
-    fs.writeFileSync(path.join(output, "failure.json"), JSON.stringify({ message: error.message, pageErrors, consoleErrors, requestTypes: [...new Set(browserRequests)] }, null, 2));
+    fs.writeFileSync(path.join(output, "failure.json"), JSON.stringify({ message: error.message, pageErrors, consoleErrors, expectedOfflineErrors, requestTypes: [...new Set(browserRequests)] }, null, 2));
     fs.writeFileSync(path.join(output, "received.json"), JSON.stringify(received, null, 2));
     fs.writeFileSync(path.join(output, "live-rows.json"), JSON.stringify(liveRows, null, 2));
     console.error(`Acceptance failed. Artifacts: ${output}`);
