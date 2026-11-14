@@ -41,6 +41,14 @@ async function sha256(file) {
   return hash.digest("hex");
 }
 
+async function assistantMessageText(message) {
+  return message.evaluate(element => {
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll('[data-testid="assistant-message-footer"]').forEach(node => node.remove());
+    return clone.textContent || "";
+  });
+}
+
 function copySourceCheckout(destination) {
   fs.mkdirSync(destination, { recursive: true });
   for (const name of ["package.json", "package-lock.json", "paseo-plugin.json", "index.client.tsx", "index.server.ts", "client", "server", "shared", "OVERVIEW.md"])
@@ -301,7 +309,14 @@ async function run() {
     await packagedGridPixels(page, "static");
     await delay(300);
     assert.ok((await packagedGridPixels(page, "static")).changedPixels <= 20, "Static preference freezes the background with graph motion enabled");
+    // Reload while both quick appearance choices are non-default, then verify restoration before
+    // resetting them for the remaining fixture checks.
+    await page.reload();
+    await page.getByTestId("overview-screen").waitFor({state:"visible"});
     await page.getByTestId("overview-appearance").click();
+    await waitFor(async () => (await page.getByTestId("overview-theme-light").getAttribute("aria-checked")) === "true", "Quick theme restores after reload");
+    await waitFor(async () => (await page.getByTestId("overview-background-static").getAttribute("aria-checked")) === "true", "Quick background restores after reload");
+    await waitFor(async () => await page.getByTestId("overview-screen").evaluate(element => getComputedStyle(element).backgroundColor) === "rgb(245, 248, 251)", "Restored quick theme applies after reload");
     await page.getByTestId("overview-theme-paseo").click();
     await page.getByTestId("overview-background-animated").click();
     await page.getByTestId("overview-appearance").click();
@@ -570,6 +585,42 @@ async function run() {
     await page.getByRole("button",{name:"Overview",exact:true}).click();
     await waitFor(async()=>await page.locator('[data-overview-kind="project"]').count()===7,"remount after explicit chat navigation");
     if (expectation.chatPreviewSettings === "required") {
+      // Default preview: the preference must be absent at load. A >32k response must collapse
+      // behind Show full response, and expanding it is one-way.
+      await page.evaluate(() => {
+        const key = "@paseo:app-settings";
+        const settings = JSON.parse(localStorage.getItem(key) || "{}");
+        delete settings.assistantMessagePreview;
+        localStorage.setItem(key, JSON.stringify(settings));
+      });
+      await page.reload();
+      await page.getByTestId("overview-screen").waitFor({state:"visible"});
+      await waitFor(async () => await page.locator('[data-overview-kind="agent"]').count() === 18, "Overview after default preview reset");
+      assert.equal(await page.evaluate(() => {
+        const raw = localStorage.getItem("@paseo:app-settings");
+        return raw ? JSON.parse(raw).assistantMessagePreview : undefined;
+      }), undefined, "Default preview check requires assistantMessagePreview absent");
+      await client.sendAgentMessage(agents[1].id, "Run the default long preview check.");
+      await delay(2200);
+      await page.locator('[data-overview-kind="agent"][aria-label^="Acceptance agent 1.2"]').click();
+      await page.getByTestId("overview-open-chat").click();
+      await page.waitForURL(/\/workspace\//);
+      const defaultMessage = page.locator('[data-testid="assistant-message"]:visible').filter({hasText:"Bounded Overview"}).last();
+      await defaultMessage.getByTestId("assistant-message-expand-toggle").waitFor({state:"visible"});
+      const phrase = "Bounded Overview preview. ";
+      const defaultCollapsed = await assistantMessageText(defaultMessage);
+      const defaultNormalized = defaultCollapsed.replace(/\s+$/, "");
+      assert.equal(defaultNormalized.length, 32000, "Default preview stops at 32,000 characters");
+      assert.equal(defaultNormalized.split(phrase).length - 1, Math.floor(32000 / phrase.length), "Default preview contains every whole repeated phrase inside 32,000 characters");
+      assert.equal(defaultNormalized.slice(-(32000 % phrase.length)), phrase.slice(0, 32000 % phrase.length), "Default preview keeps the exact 32,000-character prefix");
+      assert.ok(!defaultNormalized.includes("ACCEPTANCE_RESPONSE_END"), "Default preview hides the >32k response tail");
+      await defaultMessage.getByTestId("assistant-message-expand-toggle").click();
+      await waitFor(async () => (await assistantMessageText(defaultMessage)).includes("ACCEPTANCE_RESPONSE_END"), "Default preview expands once");
+      assert.equal((await assistantMessageText(defaultMessage)).split(phrase).length - 1, 1800, "Default preview expansion exposes every response repeat");
+      assert.equal(await defaultMessage.getByText("Show less",{exact:true}).count(),0);
+      await page.getByRole("button",{name:"Overview",exact:true}).click();
+      await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 7, "Overview return after default preview check");
+
       // Isolated browser preferences only. Overview never imports the chat hook.
       const previewSetting = async enabled => {
         await page.evaluate(value => {
@@ -593,19 +644,24 @@ async function run() {
       await page.locator('[data-overview-kind="agent"][aria-label^="Acceptance agent 1.1"]').click();
       await page.getByTestId("overview-open-chat").click();
       await page.waitForURL(/\/workspace\//);
-      await waitFor(async () => (await page.locator("body").innerText()).includes("ACCEPTANCE_RESPONSE_END"), "disabled chat preview shows complete response");
-      assert.equal(await page.getByText("Show full response",{exact:true}).count(),0);
+      const customMessage = page.locator('[data-testid="assistant-message"]:visible').filter({hasText:"Bounded Overview"}).last();
+      await waitFor(async () => (await assistantMessageText(customMessage)).includes("ACCEPTANCE_RESPONSE_END"), "disabled chat preview shows complete response");
+      assert.equal(await customMessage.getByTestId("assistant-message-expand-toggle").count(),0);
       await previewSetting(true);
-      await page.getByText("Show full response",{exact:true}).waitFor({state:"visible"});
-      await page.getByText("Show full response",{exact:true}).click();
-      await waitFor(async () => (await page.locator("body").innerText()).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
-      assert.equal(await page.getByText("Show less",{exact:true}).count(),0);
+      await customMessage.getByTestId("assistant-message-expand-toggle").waitFor({state:"visible"});
+      const customPhrase = "Bounded Overview preview. ";
+      const customCollapsed = (await assistantMessageText(customMessage)).replace(/^\s+|\s+$/g,"");
+      assert.equal(customCollapsed, customPhrase.repeat(1800).slice(0,1200), "Custom 1200 preview uses the exact 1,200-character prefix");
+      assert.ok(!customCollapsed.includes("ACCEPTANCE_RESPONSE_END"), "Custom 1200 preview hides the response tail");
+      await customMessage.getByTestId("assistant-message-expand-toggle").click();
+      await waitFor(async () => (await assistantMessageText(customMessage)).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
+      assert.equal(await customMessage.getByText("Show less",{exact:true}).count(),0);
     }
     const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version, expectedOfflineErrors, onRemoteShutdown });
     fs.writeFileSync(path.join(output, "multi-host.json"), JSON.stringify(multipleHosts, null, 2));
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
-    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,expectedOfflineErrors,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "project checkbox draft Apply/Cancel/Escape and selected-set framing", "explicit empty selection and Show all", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,expectedOfflineErrors,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "project checkbox draft Apply/Cancel/Escape and selected-set framing", "explicit empty selection and Show all", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["default chat preview collapse and one-way expansion", "bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {
