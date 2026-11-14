@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { appearancePolicy, appearancePalettes, resolvedOverviewTheme } from "../client/appearance-policy";
 import { buildOwnershipIndex, displayId, normalise } from "../client/normalize";
-import { initialPresentation, reconcilePresentation, reducePresentation } from "../client/presentation";
+import { canRetainSelection, initialPresentation, reconcilePresentation, reducePresentation } from "../client/presentation";
+import { createProjectView, projectView } from "../client/project-filter";
 import { composeHostSnapshots, emptyOverviewModel, hostForDisplayId, isHostAuthoritative } from "../shared/hosts";
+import type { OverviewEvent } from "../shared/model";
 import type { AgentRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 import type { OverviewTheme } from "../shared/renderer";
 import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
+import { canonicalProjectFilter, unassignedScopeId } from "../shared/presentation";
 import { DEFAULT_APPEARANCE, overviewAppearance, overviewAppearanceSchema } from "../shared/settings";
 
 const hostId = "host";
@@ -256,11 +259,169 @@ describe("multi-host composition", () => {
     expect(reconcilePresentation(focused, authoritative)).toMatchObject({ scope: null, selectedId: null });
 
     const filtered = reducePresentation(focused, { type: "set-host-filter", hostId: "two" });
-    expect(filtered).toMatchObject({ hostFilter: "two", scope: null, selectedId: null });
+    expect(filtered).toMatchObject({ hostFilter: "two", projectFilter: null, scope: null, selectedId: null });
     expect(filtered.groups).toBe(focused.groups);
     const retained = reducePresentation(focused, { type: "set-host-filter", hostId: "one" });
-    expect(retained.scope).toBe(focused.scope);
+    // Every actual host change refits the graph; the renderer resets focus once.
+    expect(retained.scope).toBeNull();
     expect(retained.selectedId).toBe(focused.selectedId);
+    expect(retained.projectFilter).toBeNull();
+  });
+});
+
+describe("project filtering", () => {
+  const one = "one", two = "two";
+  const project = (hostId: string, id: string) => displayId(hostId, "project", id);
+  const workspaceId = (hostId: string, id: string) => displayId(hostId, "workspace", id);
+  const nodeId = (hostId: string, id: string) => displayId(hostId, "agent", id);
+  const event = (id: string, hostId: string, node: string, timestamp: number): OverviewEvent =>
+    ({ id, hostId, nodeId: node, kind: "activity", timestamp });
+
+  function catalogue() {
+    const first = normalise({
+      hostId: one,
+      projects: [
+        { projectId: "p1", projectDisplayName: "One" },
+        { projectId: "p2", projectDisplayName: "Two" },
+        { projectId: "empty", projectDisplayName: "Empty" },
+      ],
+      workspaces: [
+        { id: "w1", projectId: "p1", name: "W1", projectDisplayName: "One" },
+        { id: "w2", projectId: "p2", name: "W2", projectDisplayName: "Two" },
+        { id: "loose", projectId: "missing", name: "Loose", projectDisplayName: "Loose" },
+      ],
+      agents: [agent("a1", "w1"), agent("a2", "w2"), agent("loose", "loose")],
+      rosters: new Map(), icons: new Map(),
+      events: [event("e1", one, nodeId(one, "a1"), 1), event("e2", one, nodeId(one, "a2"), 2)],
+      connection: "connected", revision: 1,
+    });
+    const second = normalise({
+      hostId: two,
+      projects: [{ projectId: "p1", projectDisplayName: "Remote" }],
+      workspaces: [{ id: "w1", projectId: "p1", name: "Remote W", projectDisplayName: "Remote" }],
+      agents: [agent("a1", "w1", { labels: {
+        "paseo.parent-agent-id": "a1", "paseo.parent-server-id": one,
+      } })],
+      rosters: new Map(), icons: new Map(),
+      events: [event("e3", two, nodeId(two, "a1"), 3)],
+      connection: "connected", revision: 1,
+    });
+    return composeHostSnapshots([
+      { id: one, label: "One", status: "online" },
+      { id: two, label: "Two", status: "online" },
+    ], new Map([[one, first], [two, second]]), 4);
+  }
+
+  it("keeps the complete catalogue for the default All selection", () => {
+    const model = catalogue();
+    const view = projectView(model, null);
+    expect(view.model).toBe(model);
+    expect(view.visibleNodeIds.size).toBe(model.nodes.length);
+    expect(view.suppressedEvents).toEqual([]);
+    expect(view.unavailableProjectIds).toEqual([]);
+    expect(canonicalProjectFilter(["b", "a", "b", ""])).toEqual(["a", "b"]);
+    expect(canonicalProjectFilter(null)).toBeNull();
+  });
+
+  it("slices an explicit project by catalogue ownership, empty projects included", () => {
+    const model = catalogue(), p1 = project(one, "p1");
+    const view = projectView(model, [p1]);
+    expect(view.model.projects.map(item => item.id)).toEqual([p1]);
+    expect(view.model.workspaces.map(item => item.id)).toEqual([workspaceId(one, "w1")]);
+    expect(view.model.nodes.map(item => item.id)).toEqual([nodeId(one, "a1")]);
+    expect(view.model.hosts).toBe(model.hosts);
+    expect(view.model.edges.map(edge => edge.id)).toEqual([
+      `member:${workspaceId(one, "w1")}`, `member:${nodeId(one, "a1")}`,
+    ]);
+    expect([...view.visibleNodeIds]).toEqual([nodeId(one, "a1")]);
+    expect(view.model.events.map(item => item.id)).toEqual(["e1"]);
+    expect(view.suppressedEvents.map(item => item.id)).toEqual(["e2", "e3"]);
+
+    const empty = projectView(model, [project(one, "empty")]);
+    expect(empty.model.projects.map(item => item.id)).toEqual([project(one, "empty")]);
+    expect(empty.model.workspaces).toEqual([]);
+    expect(empty.model.nodes).toEqual([]);
+  });
+
+  it("keeps Unassigned separate and requires its catalogue root", () => {
+    const model = catalogue(), unassigned = unassignedScopeId(one);
+    const view = projectView(model, [unassigned]);
+    expect(view.model.projects).toEqual([]);
+    expect(view.model.workspaces.map(item => item.id)).toEqual([workspaceId(one, "loose")]);
+    expect(view.model.nodes.map(item => item.id)).toEqual([nodeId(one, "loose")]);
+    expect(view.model.hosts).toBe(model.hosts);
+    expect(view.unavailableProjectIds).toEqual([]);
+
+    const workspaceOnly = { ...model, nodes: model.nodes.filter(node => node.id !== nodeId(one, "loose")) };
+    const area = projectView(workspaceOnly, [unassigned]);
+    expect(area.model.workspaces.map(item => item.id)).toEqual([workspaceId(one, "loose")]);
+    expect(area.model.nodes).toEqual([]);
+
+    const absent = unassignedScopeId(two);
+    const missing = projectView(model, [absent]);
+    expect(missing.model.workspaces).toEqual([]);
+    expect(missing.unavailableProjectIds).toEqual([absent]);
+  });
+
+  it("keeps delegation only when both host-qualified endpoints are visible", () => {
+    const model = catalogue();
+    const both = projectView(model, [project(one, "p1"), project(two, "p1")]);
+    expect(both.model.edges.find(edge => edge.id === `delegate:${nodeId(two, "a1")}`)).toEqual({
+      id: `delegate:${nodeId(two, "a1")}`, source: nodeId(one, "a1"),
+      target: nodeId(two, "a1"), kind: "delegation",
+    });
+    const isolated = projectView(model, [project(two, "p1")]);
+    expect(isolated.model.edges.some(edge => edge.kind === "delegation")).toBe(false);
+    expect(isolated.model.nodes.map(item => item.id)).toEqual([nodeId(two, "a1")]);
+  });
+
+  it("retains unavailable IDs while a partial catalogue cannot resolve them", () => {
+    const model = catalogue(), missing = project(one, "gone");
+    const view = projectView(model, [missing, project(one, "p1")]);
+    expect(view.unavailableProjectIds).toEqual([missing]);
+    expect(view.model.projects.map(item => item.id)).toEqual([project(one, "p1")]);
+    const partial = { ...model, projects: [], workspaces: [], nodes: [], edges: [], events: [] };
+    expect(projectView(partial, [missing]).unavailableProjectIds).toEqual([missing]);
+    expect(projectView(partial, [missing]).model.hosts).toBe(partial.hosts);
+  });
+
+  it("clears a zero selection and reconciles scope and retained selection from the catalogue", () => {
+    const model = catalogue(), p1 = project(one, "p1"), p2 = project(one, "p2"), a1 = nodeId(one, "a1");
+    const focused = reducePresentation(reducePresentation(initialPresentation(),
+      { type: "focus", scope: { kind: "project", id: p1 } }), { type: "select", id: a1 });
+    const hidden = reducePresentation(focused, { type: "set-project-filter", projectIds: [p2] });
+    expect(hidden).toMatchObject({ scope: null, selectedId: a1, projectFilter: [p2] });
+    expect(reconcilePresentation(hidden, model, hidden.projectFilter).selectedId).toBeNull();
+    const retained = reducePresentation(focused, { type: "set-project-filter", projectIds: [p1] });
+    expect(retained).toMatchObject({ scope: null, selectedId: a1, projectFilter: [p1] });
+    expect(reconcilePresentation(retained, model, retained.projectFilter).selectedId).toBe(a1);
+    expect(reducePresentation(retained, { type: "set-project-filter", projectIds: [p1] })).toBe(retained);
+    const none = reducePresentation(retained, { type: "set-project-filter", projectIds: [] });
+    expect(none).toMatchObject({ scope: null, selectedId: null, projectFilter: [] });
+    expect(reconcilePresentation(none, model, none.projectFilter).selectedId).toBeNull();
+  });
+
+  it("reuses filtered graph arrays and the visible identity set for event-only snapshots", () => {
+    const model = catalogue(), p1 = project(one, "p1");
+    const factory = createProjectView();
+    const first = factory(model, [p1]);
+    const next: OverviewEvent = event("e4", one, nodeId(one, "a1"), 4);
+    const second = factory({ ...model, revision: 5, events: [...model.events, next] }, [p1]);
+    expect(second.model.projects).toBe(first.model.projects);
+    expect(second.model.workspaces).toBe(first.model.workspaces);
+    expect(second.model.nodes).toBe(first.model.nodes);
+    expect(second.model.edges).toBe(first.model.edges);
+    expect(second.visibleNodeIds).toBe(first.visibleNodeIds);
+    expect(second.model.events.map(item => item.id)).toEqual(["e1", "e4"]);
+    expect(second.suppressedEvents.map(item => item.id)).toEqual(["e2", "e3"]);
+
+    const allFactory = createProjectView();
+    const allFirst = allFactory(model, null);
+    const allSecond = allFactory({ ...model, revision: 6, events: model.events.slice(0, 1) }, null);
+    expect(allSecond.model.projects).toBe(allFirst.model.projects);
+    expect(allSecond.model.nodes).toBe(allFirst.model.nodes);
+    expect(allSecond.visibleNodeIds).toBe(allFirst.visibleNodeIds);
+    expect(allSecond.model.events.map(item => item.id)).toEqual(["e1"]);
   });
 });
 

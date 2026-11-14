@@ -1,22 +1,31 @@
 import { Icon, Modal } from "@getpaseo/plugin/client/ui";
 import { forwardRef, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { OverviewHostState, OverviewHostSummary, OverviewModel } from "../shared/model";
-import { unassignedScopeId, type OverviewPresentation, type OverviewScope } from "../shared/presentation";
+import {
+  canonicalProjectFilter, sameProjectFilter, unassignedScopeId,
+  type OverviewPresentation, type OverviewScope,
+} from "../shared/presentation";
+import type { ProjectView } from "../shared/project-view";
 import type { OverviewTheme } from "../shared/renderer";
 import type { OverviewAppearance } from "../shared/settings";
 import { hasError, needsInput } from "./status";
 import { scopedNodes } from "./presentation";
 import { buildOwnershipIndex } from "./normalize";
+import { projectView, unassignedProjectHost } from "./project-filter";
 
 export interface OverviewHeaderProps {
+  /** The complete catalogue for the current host filter. */
   model: OverviewModel;
+  /** Visible projection; omitted fixtures fall back to the whole catalogue. */
+  view?: ProjectView;
   presentation: OverviewPresentation;
   /** Complete configured-host list from useHosts; the model itself is filtered. */
   hostChoices: readonly OverviewHostSummary[];
   theme: OverviewTheme;
   compact: boolean;
   onHostFilter(hostId: string | null): void;
+  onProjectFilter?(projectIds: readonly string[] | null): void;
   onProject(scope: OverviewScope): void;
   onBack(): void;
   onMotion(): void;
@@ -43,7 +52,7 @@ const backgroundOptions: readonly { label: string; value: OverviewAppearance["ba
   { label: "Off", value: "off" },
 ];
 
-type OpenMenu = "host" | "project" | "appearance" | null;
+type OpenMenu = "host" | "filter" | "appearance" | null;
 type WebNode = {
   focus?(): void;
   contains?(node: unknown): boolean;
@@ -62,8 +71,13 @@ type WebEvent = {
   stopPropagation?(): void;
 };
 const asWebNode = (value: unknown): WebNode | null => value ? value as WebNode : null;
+const editableTarget = (value: unknown): boolean => {
+  const node = value ? value as { tagName?: string; isContentEditable?: boolean; closest?(selector: string): unknown } : null;
+  return !!node && (node.isContentEditable === true || node.tagName === "INPUT" || node.tagName === "TEXTAREA"
+    || node.tagName === "SELECT" || !!node.closest?.("[contenteditable='true']"));
+};
 const menuItems = (menu: WebNode | null): WebNode[] => {
-  const found = menu?.querySelectorAll?.('[role="menuitem"],[role="menuitemradio"],[role="radio"]');
+  const found = menu?.querySelectorAll?.('[role="menuitem"],[role="menuitemradio"],[role="radio"],[role="checkbox"]');
   const items: WebNode[] = [];
   if (found) for (let index = 0; index < found.length; index++) items.push(found[index]!);
   return items;
@@ -106,18 +120,20 @@ const ToolbarButton = forwardRef<View, ToolbarButtonProps>(function ToolbarButto
 
 interface MenuChoiceProps {
   theme: OverviewTheme; compact: boolean; testID: string; label: string; detail?: string;
-  selected?: boolean; checked?: boolean; role?: "menuitem" | "radio"; onPress(): void;
+  selected?: boolean; checked?: boolean; role?: "menuitem" | "radio" | "checkbox"; onPress(): void;
 }
 function MenuChoice({ theme, compact, testID, label, detail, selected, checked, role = "menuitem", onPress }: MenuChoiceProps) {
   const [hover, setHover] = useState(false), [pressed, setPressed] = useState(false);
   const emphasis = theme.selection ?? "#6264dc";
+  const checkedRole = role === "radio" || role === "checkbox";
   return <Pressable testID={testID} tabIndex={0} accessibilityRole={role} accessibilityLabel={detail ? `${label}. ${detail}` : label}
-    accessibilityState={role === "radio" ? { checked: !!checked } : { selected: !!selected }}
-    aria-checked={role === "radio" ? !!checked : undefined} onPress={onPress}
+    accessibilityState={checkedRole ? { checked: !!checked } : { selected: !!selected }}
+    aria-checked={checkedRole ? !!checked : undefined} onPress={onPress}
     onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
     onHoverIn={() => setHover(true)} onHoverOut={() => setHover(false)}
     style={[styles.menuChoice, {
-      minHeight: compact ? 44 : 36, backgroundColor: pressed || hover ? theme.background : "transparent",
+      minHeight: compact ? 44 : role === "checkbox" ? 44 : 36,
+      backgroundColor: pressed || hover ? theme.background : "transparent",
     }]}>
     <View style={styles.menuChoiceText}>
       <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.foreground, fontSize: 13 }}>{label}</Text>
@@ -128,14 +144,20 @@ function MenuChoice({ theme, compact, testID, label, detail, selected, checked, 
 }
 
 export function OverviewHeader({
-  model, presentation, hostChoices, theme, compact, onHostFilter, onProject, onBack, onMotion, fullscreen,
+  model, view: suppliedView, presentation, hostChoices, theme, compact, onHostFilter, onProjectFilter, onProject, onBack, onMotion, fullscreen,
   appearance, appearanceDisabled, appearanceError, onAppearanceTheme, onAppearanceBackground, onOpenAppearanceSettings, onReloadAppearance,
 }: OverviewHeaderProps) {
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
-  const hostTrigger = useRef<View | null>(null), projectTrigger = useRef<View | null>(null);
+  const [filterDraft, setFilterDraft] = useState<ReadonlySet<string>>(() => new Set());
+  const [filterAutomatic, setFilterAutomatic] = useState(false);
+  const [filterSearch, setFilterSearch] = useState("");
+  const hostTrigger = useRef<View | null>(null);
+  const filterTrigger = useRef<View | null>(null);
   const appearanceTrigger = useRef<View | null>(null), menu = useRef<View | null>(null);
+  const fallbackView = useMemo(() => projectView(model, null), [model]);
+  const view = suppliedView ?? fallbackView;
   const { scope, motion } = presentation;
-  const nodes = scopedNodes(model, scope);
+  const nodes = scopedNodes(view.model, scope);
   const current = nodes.filter(node => !node.freshness || node.freshness === "current");
   const working = current.filter(node => node.state === "working" && !hasError(node) && !needsInput(node)).length;
   const waiting = current.filter(node => !hasError(node) && needsInput(node)).length;
@@ -143,7 +165,7 @@ export function OverviewHeader({
   const unread = current.filter(node => node.attentionReason === "finished" && node.attention && node.state !== "working" && !hasError(node) && !needsInput(node)).length;
   const managed = nodes.filter(node => node.kind === "agent").length;
   const native = nodes.length - managed;
-  const ownership = useMemo(() => buildOwnershipIndex(model), [model]);
+  const ownership = useMemo(() => buildOwnershipIndex(view.model), [view.model]);
   const workspace = scope?.kind === "workspace" ? model.workspaces.find(item => item.id === scope.id) : undefined;
   const project = scope?.kind === "project" ? model.projects.find(item => item.id === scope.id)
     : scope?.kind === "workspace" ? model.projects.find(item => item.id === workspace?.projectDisplayId) : undefined;
@@ -153,8 +175,26 @@ export function OverviewHeader({
     : workspace ? `${project?.name ?? workspace.projectName} › ${workspace.name}`
       : project?.name ?? "All projects";
   const hostTriggerLabel = presentation.hostFilter ? labelForHost(presentation.hostFilter) : "All hosts";
-  const workspaceCount = scope?.kind === "project" ? model.projects.find(item => item.id === scope.id)?.workspaceIds.length ?? 0 : model.workspaces.length;
-  const counts = [!scope ? `${model.projects.length} projects` : "", scope?.kind !== "workspace" && scope?.kind !== "unassigned" ? `${workspaceCount} workspaces` : "", `${managed} agents`, native ? `${native} subagents` : ""].filter(Boolean).join(" · ");
+  const scopedProject = scope?.kind === "project" ? view.model.projects.find(item => item.id === scope.id) ?? model.projects.find(item => item.id === scope.id) : undefined;
+  const workspaceCount = scopedProject?.workspaceIds.length ?? (scope?.kind === "project" ? 0 : view.model.workspaces.length);
+  const unassignedHostIds = new Set<string>();
+  for (const item of view.model.workspaces) if (!ownership.projectByNode.has(item.id)) unassignedHostIds.add(item.hostId);
+  for (const item of view.model.nodes) if (!ownership.projectByNode.has(item.id)) unassignedHostIds.add(item.hostId);
+  const unassignedAreas = unassignedHostIds.size;
+  const unavailableCount = view.unavailableProjectIds.length;
+  const filterCount = presentation.projectFilter === null ? "All"
+    : presentation.projectFilter.length === 0 ? "None"
+      : `${view.model.projects.length}/${model.projects.length}`;
+  const filterLabel = `Projects: ${filterCount}`;
+  const projectCount = presentation.projectFilter === null
+    ? `${model.projects.length} projects`
+    : `${view.model.projects.length} of ${model.projects.length} projects`;
+  const counts = [
+    !scope ? projectCount : "",
+    scope?.kind !== "workspace" && scope?.kind !== "unassigned" ? `${workspaceCount} workspaces` : "",
+    `${managed} agents`, native ? `${native} subagents` : "",
+    unassignedAreas ? `${unassignedAreas} Unassigned ${unassignedAreas === 1 ? "area" : "areas"}` : "",
+  ].filter(Boolean).join(" · ");
   const selection = theme.selection ?? "#6264dc";
   const nodeStale = nodes.some(node => node.freshness === "stale");
   const nodeRefreshing = nodes.some(node => node.freshness === "refreshing");
@@ -163,26 +203,38 @@ export function OverviewHeader({
     if (!status || status === "online") return [];
     return [{ id: host.id, label: host.label, status, tone: status === "error" ? theme.error : theme.waiting }];
   });
+  const catalogueOwnership = useMemo(() => buildOwnershipIndex(model), [model]);
   const unassignedHosts = useMemo(() => model.hosts.filter(host =>
-    model.workspaces.some(item => item.hostId === host.id && !ownership.projectByNode.has(item.id))
-    || model.nodes.some(item => item.hostId === host.id && !ownership.projectByNode.has(item.id))).map(host => host.id), [model, ownership]);
-  const projectChoices = useMemo(() => {
+    model.workspaces.some(item => item.hostId === host.id && !catalogueOwnership.projectByNode.has(item.id))
+    || model.nodes.some(item => item.hostId === host.id && !catalogueOwnership.projectByNode.has(item.id))).map(host => host.id), [model, catalogueOwnership]);
+  const filterChoices = useMemo(() => {
     const names = new Map<string, number>();
     for (const item of model.projects) names.set(item.name, (names.get(item.name) ?? 0) + 1);
-    const choices: { key: string; label: string; scope: OverviewScope }[] = [{ key: "all", label: "All projects", scope: null }];
+    const choices: { key: string; label: string; detail?: string; unavailable?: boolean }[] = [];
     for (const item of [...model.projects].sort((left, right) =>
       labelForHost(left.hostId).localeCompare(labelForHost(right.hostId)) || left.name.localeCompare(right.name))) {
       choices.push({ key: item.id, label: (names.get(item.name) ?? 0) > 1 ? `${item.name} — ${labelForHost(item.hostId)}` : item.name,
-        scope: { kind: "project", id: item.id } });
+        detail: model.hosts.length > 1 ? labelForHost(item.hostId) : undefined });
     }
     for (const hostId of unassignedHosts) choices.push({
       key: unassignedScopeId(hostId), label: unassignedHosts.length > 1 ? `Unassigned — ${labelForHost(hostId)}` : "Unassigned",
-      scope: { kind: "unassigned", id: unassignedScopeId(hostId) },
+      detail: "Workspaces and agents outside a project",
     });
+    for (const id of view.unavailableProjectIds) {
+      if (choices.some(choice => choice.key === id)) continue;
+      const host = unassignedProjectHost(id);
+      choices.push({ key: id, label: host ? "Unavailable Unassigned" : "Unavailable project",
+        detail: host ? `${host} · outside the catalogue` : id, unavailable: true });
+    }
     return choices;
-  }, [model.projects, unassignedHosts, hostChoices, model.hosts]);
-
-  const triggerFor = (target: OpenMenu) => target === "host" ? hostTrigger : target === "project" ? projectTrigger : appearanceTrigger;
+  }, [model.projects, unassignedHosts, hostChoices, model.hosts, view.unavailableProjectIds]);
+  const filterRows = useMemo(() => {
+    const query = filterSearch.trim().toLocaleLowerCase();
+    return filterChoices.filter(choice => !query || [choice.label, choice.detail, choice.key]
+      .some(value => value?.toLocaleLowerCase().includes(query)));
+  }, [filterChoices, filterSearch]);
+  const triggerFor = (target: OpenMenu) => target === "host" ? hostTrigger
+    : target === "filter" ? filterTrigger : appearanceTrigger;
   const focusTrigger = (target: OpenMenu) => {
     const node = asWebNode(triggerFor(target).current);
     node?.focus?.();
@@ -197,14 +249,56 @@ export function OverviewHeader({
     setOpenMenu(null);
     if (!compact) focusTrigger("host");
   };
-  const chooseProject = (next: OverviewScope) => {
-    onProject(next);
+  const openFilter = () => {
+    if (openMenu === "filter") { setOpenMenu(null); return; }
+    const currentFilter = presentation.projectFilter;
+    setFilterDraft(new Set(currentFilter === null ? [] : currentFilter));
+    setFilterAutomatic(currentFilter === null);
+    setFilterSearch("");
+    setOpenMenu("filter");
+  };
+  const applyFilter = () => {
+    const next = filterAutomatic ? null : canonicalProjectFilter([...filterDraft]);
+    if (!sameProjectFilter(presentation.projectFilter, next)) onProjectFilter?.(next);
     setOpenMenu(null);
-    if (!compact) focusTrigger("project");
+    if (!compact) focusTrigger("filter");
+  };
+  const toggleFilterChoice = (key: string) => {
+    // Automatic All follows the current catalogue. The first toggle seeds from
+    // today's available choices, so newly discovered projects are retained and
+    // vanished IDs from the opening snapshot cannot leak into the draft.
+    const next = filterAutomatic
+      ? new Set(filterChoices.map(choice => choice.key))
+      : new Set(filterDraft);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    setFilterAutomatic(false);
+    setFilterDraft(next);
+  };
+  const showAll = () => {
+    if (presentation.projectFilter !== null) onProjectFilter?.(null);
+    else if (presentation.scope) onProject?.(null);
+    setOpenMenu(null);
+    if (!compact) focusTrigger("filter");
+  };
+  const removeUnavailable = () => {
+    const currentFilter = presentation.projectFilter;
+    if (!currentFilter) return;
+    const unavailable = new Set(view.unavailableProjectIds);
+    const next = currentFilter.filter(id => !unavailable.has(id));
+    if (!sameProjectFilter(currentFilter, next)) onProjectFilter?.(next);
+  };
+  const removeUnavailableFromDraft = () => {
+    const unavailable = new Set(view.unavailableProjectIds);
+    const next = filterAutomatic
+      ? new Set(filterChoices.map(choice => choice.key))
+      : new Set(filterDraft);
+    for (const id of unavailable) next.delete(id);
+    setFilterAutomatic(false);
+    setFilterDraft(next);
   };
 
   useLayoutEffect(() => {
-    if (!openMenu || compact || Platform.OS !== "web") return;
+    if (!openMenu || compact || Platform.OS !== "web" || openMenu === "filter") return;
     const items = menuItems(asWebNode(menu.current));
     items[0]?.focus?.();
   }, [openMenu, compact]);
@@ -220,7 +314,7 @@ export function OverviewHeader({
       // The first outside press only dismisses the menu; it must not also
       // reset graph focus or selection underneath.
       event.preventDefault?.(); event.stopPropagation?.();
-      setOpenMenu(null);
+      setOpenMenu(null); trigger?.focus?.();
     };
     const key = (event: WebEvent) => {
       const name = event.key;
@@ -229,6 +323,8 @@ export function OverviewHeader({
         setOpenMenu(null); trigger?.focus?.();
         return;
       }
+      // Search fields keep their native Home/End/arrow/space editing keys.
+      if (editableTarget(event.target)) return;
       const items = menuItems(panel);
       if (!items.length) return;
       const active = doc.activeElement;
@@ -302,11 +398,47 @@ export function OverviewHeader({
         selected={presentation.hostFilter === choice.id} onPress={() => chooseHost(choice.id)} />;
     }),
   ];
-  const projectRows = projectChoices.map(choice => <MenuChoice key={choice.key} theme={theme} compact={compact}
-    testID={`overview-project-option-${choice.key}`}
-    label={choice.label} selected={choice.key === "all" ? !scope : choice.scope?.kind === "unassigned"
-      ? scope?.kind === "unassigned" && scope.id === choice.scope.id : choice.key === project?.id}
-    onPress={() => chooseProject(choice.scope)} />);
+  const filterRowElements = filterRows.map(choice => <MenuChoice key={choice.key} theme={theme} compact={compact}
+    testID={`overview-project-filter-option-${choice.key}`}
+    label={choice.label} detail={choice.detail} role="checkbox"
+    checked={filterAutomatic || filterDraft.has(choice.key)}
+    onPress={() => toggleFilterChoice(choice.key)} />);
+  const filterPanel = <View ref={menu} testID="overview-project-filter-menu"
+    style={[compact ? styles.modalFilter : [styles.menuPanel, styles.filterPanel], { borderColor: theme.border, backgroundColor: theme.surface }]}>
+    <TextInput testID="overview-project-filter-search" value={filterSearch} onChangeText={setFilterSearch}
+      placeholder="Search projects" placeholderTextColor={theme.muted} accessibilityLabel="Search projects"
+      autoFocus={!compact} style={[styles.filterSearch, { color: theme.foreground, borderColor: theme.border, backgroundColor: theme.background }]} />
+    <Text testID="overview-project-filter-draft-count" accessibilityLiveRegion="polite"
+      style={{ color: theme.muted, fontSize: 11, paddingHorizontal: 8, paddingBottom: 6 }}>
+      {filterAutomatic ? `All ${filterChoices.length} selected` : `${filterDraft.size} selected`}
+    </Text>
+    <ScrollView style={styles.filterScroll} keyboardShouldPersistTaps="handled">
+      {filterRowElements.length ? filterRowElements
+        : <Text style={{ color: theme.muted, fontSize: 12, padding: 8 }}>No matching projects</Text>}
+    </ScrollView>
+    {unavailableCount ? <View style={styles.filterStatus}>
+      <Text testID="overview-project-filter-unavailable" style={{ color: theme.waiting, fontSize: 11 }}>
+        {unavailableCount} unavailable {unavailableCount === 1 ? "project" : "projects"}
+      </Text>
+      <Pressable testID="overview-project-filter-remove-unavailable" accessibilityRole="button" accessibilityLabel="Remove unavailable projects from this filter"
+        onPress={removeUnavailableFromDraft} style={styles.filterAction}>
+        <Text style={{ color: selection, fontSize: 11, fontWeight: "600" }}>Remove</Text>
+      </Pressable>
+    </View> : null}
+    <View style={[styles.filterFooter, { borderTopColor: theme.border }]}>
+      <Pressable testID="overview-project-filter-show-all" accessibilityRole="button" onPress={showAll} style={styles.filterButton}>
+        <Text style={{ color: selection, fontSize: 12, fontWeight: "600" }}>Show all</Text>
+      </Pressable>
+      <View style={styles.spacer} />
+      <Pressable testID="overview-project-filter-cancel" accessibilityRole="button" onPress={() => closeMenu(true)} style={styles.filterButton}>
+        <Text style={{ color: theme.muted, fontSize: 12 }}>Cancel</Text>
+      </Pressable>
+      <Pressable testID="overview-project-filter-apply" accessibilityRole="button" onPress={applyFilter}
+        style={[styles.filterButton, styles.filterApply, { backgroundColor: selection }]}>
+        <Text style={{ color: theme.background, fontSize: 12, fontWeight: "600" }}>Apply</Text>
+      </Pressable>
+    </View>
+  </View>;
 
   return <View testID="overview-header" style={[styles.header, { borderBottomColor: theme.border, paddingHorizontal: compact ? 10 : 16 }]}>
     <View style={[styles.toolbar, { minHeight: compact ? 44 : 40 }]}>
@@ -320,15 +452,15 @@ export function OverviewHeader({
           <ScrollView style={styles.menuScroll} keyboardShouldPersistTaps="handled">{hostRows}</ScrollView>
         </View> : null}
       </View>
-      <View style={[styles.dropdownAnchor, styles.projectAnchor]}>
-        <ToolbarButton ref={projectTrigger} theme={theme} compact={compact} testID="overview-project-filter" label={`Project: ${projectLabel}`}
-          icon="Folder" text={projectLabel} textTestID="overview-scope-title" trailingIcon="ChevronDown"
-          maxWidth={compact ? 160 : 280} active={openMenu === "project"} onPress={() => setOpenMenu(open => open === "project" ? null : "project")} />
-        {!compact && openMenu === "project" ? <View ref={menu} testID="overview-project-menu"
-          style={[styles.menuPanel, { borderColor: theme.border, backgroundColor: theme.surface }]}>
-          <ScrollView style={styles.menuScroll} keyboardShouldPersistTaps="handled">{projectRows}</ScrollView>
-        </View> : null}
+      <View style={styles.dropdownAnchor}>
+        <ToolbarButton ref={filterTrigger} theme={theme} compact={compact} testID="overview-project-filter" label={filterLabel}
+          icon="ListFilter" text={compact ? filterCount : filterLabel} textTestID="overview-project-filter-title" trailingIcon="ChevronDown"
+          maxWidth={compact ? 96 : 190} active={openMenu === "filter"} onPress={openFilter} />
+        {!compact && openMenu === "filter" ? filterPanel : null}
       </View>
+      {scope ? <View testID="overview-scope-breadcrumb" style={styles.scopeBreadcrumb}>
+        <Text testID="overview-scope-title" numberOfLines={1} ellipsizeMode="tail" style={[styles.breadcrumb, { color: theme.foreground }]}>{projectLabel}</Text>
+      </View> : null}
       <View style={styles.spacer} />
       <ToolbarButton theme={theme} compact={compact} testID="overview-motion" label={motion ? "Pause animation" : "Resume animation"}
         icon={motion ? "Pause" : "Play"} text={compact ? undefined : motion ? "Pause" : "Resume"} active={!motion} onPress={onMotion} />
@@ -350,14 +482,19 @@ export function OverviewHeader({
       {unread ? <Text style={[styles.status, { color: theme.accent }]}>○ {unread} unread</Text> : null}
       {nodeStale ? <Text style={[styles.status, { color: theme.muted }]}>Some status unavailable · last known state</Text>
         : nodeRefreshing ? <Text style={[styles.status, { color: theme.muted }]}>Updating…</Text> : null}
+      {unavailableCount ? <Pressable testID="overview-project-unavailable" accessibilityRole="button"
+        accessibilityLabel={`${unavailableCount} unavailable ${unavailableCount === 1 ? "project" : "projects"}. Remove`}
+        onPress={removeUnavailable} style={[styles.unavailable, compact ? styles.touchTarget : null]}>
+        <Text style={[styles.status, { color: theme.waiting }]}>{unavailableCount} unavailable · Remove</Text>
+      </Pressable> : null}
       {hostIssues.map(issue => <Text key={issue.id} testID={`overview-host-status:${issue.id}`}
         style={[styles.status, { color: issue.tone }]}>{issue.label}: {issue.status}</Text>)}
     </View>
     {compact && openMenu === "host" ? <Modal title="Choose host" open onOpenChange={open => { if (!open) setOpenMenu(null); }}>
       <Modal.Content scrollable contentContainerStyle={styles.modalContent}>{hostRows}</Modal.Content>
     </Modal> : null}
-    {compact && openMenu === "project" ? <Modal title="Choose project" open onOpenChange={open => { if (!open) setOpenMenu(null); }}>
-      <Modal.Content scrollable contentContainerStyle={styles.modalContent}>{projectRows}</Modal.Content>
+    {compact && openMenu === "filter" ? <Modal title="Filter projects" open onOpenChange={open => { if (!open) setOpenMenu(null); }}>
+      <Modal.Content scrollable={false} contentContainerStyle={styles.modalContent}>{filterPanel}</Modal.Content>
     </Modal> : null}
     {compact && openMenu === "appearance" && appearance ? <Modal title="Appearance" open onOpenChange={open => { if (!open) setOpenMenu(null); }}>
       <Modal.Content scrollable={false} contentContainerStyle={styles.modalContent}>{appearancePanel}</Modal.Content>
@@ -373,17 +510,28 @@ const styles = StyleSheet.create({
   toolbarText: { fontSize: 12, fontWeight: "600", flexShrink: 1 },
   controlPressed: { transform: [{ scale: 0.97 }] },
   dropdownAnchor: { position: "relative" },
-  projectAnchor: { flexShrink: 1, minWidth: 0 },
+  scopeBreadcrumb: { flexShrink: 1, minWidth: 0, maxWidth: 220, paddingHorizontal: 2 },
   spacer: { flex: 1, minWidth: 4 },
   metaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 10, rowGap: 1, paddingHorizontal: 2 },
   breadcrumb: { fontSize: 11, lineHeight: 15, flexShrink: 1, maxWidth: "100%" },
   counts: { fontSize: 11, lineHeight: 15 },
   status: { fontSize: 11, lineHeight: 15 },
+  unavailable: { minHeight: 28, justifyContent: "center" },
+  touchTarget: { minHeight: 44, minWidth: 44, alignItems: "center" },
   menuPanel: { position: "absolute", top: 40, left: 0, width: 264, maxWidth: 320, borderWidth: 1, borderRadius: 12,
     paddingVertical: 4, zIndex: 60, elevation: 12, boxShadow: "0 12px 32px #00000022" },
   menuScroll: { maxHeight: 320 },
   menuChoice: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 4, paddingHorizontal: 9, borderRadius: 8 },
   menuChoiceText: { flex: 1, minWidth: 0, gap: 1 },
+  filterPanel: { width: 330, padding: 8, paddingVertical: 8, gap: 6 },
+  filterSearch: { minHeight: 44, borderWidth: 1, borderRadius: 9, paddingHorizontal: 10, fontSize: 13 },
+  filterScroll: { maxHeight: 300 },
+  filterStatus: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 4, minHeight: 32 },
+  filterAction: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center", paddingHorizontal: 4 },
+  filterFooter: { flexDirection: "row", alignItems: "center", gap: 6, borderTopWidth: 1, paddingTop: 6 },
+  filterButton: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center", paddingHorizontal: 10, borderRadius: 9 },
+  filterApply: { paddingHorizontal: 14 },
+  modalFilter: { padding: 2, gap: 6 },
   appearanceAnchor: { position: "absolute", top: 40, right: 0, zIndex: 60 },
   appearancePanel: { position: "relative", top: 0, left: 0, width: 300, padding: 10, gap: 9, borderWidth: 1, borderRadius: 12,
     elevation: 12, boxShadow: "0 12px 32px #00000022" },

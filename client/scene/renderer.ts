@@ -11,7 +11,7 @@ import { unionRects, type Rect, type Point } from "../geometry";
 import { statusColour } from "../status";
 import { GraphOverlay, createCollapseTextMeasure, type NodePresentation } from "./overlay";
 import { selectionColour } from "../appearance";
-import type { GroupPreferences } from "../../shared/presentation";
+import { unassignedScopeId, type GroupPreferences } from "../../shared/presentation";
 import { canRetainSelection } from "../presentation";
 import { createGraphLine, FibreLight } from "./lines";
 import { advancePulseJourney, createPulseJourney, type PulseJourney } from "./pulses";
@@ -102,10 +102,13 @@ function updateLinePoints(line: Line2, points: readonly Point[]): void {
 export function createOverviewRenderer(parentValue: unknown, options: OverviewMountOptions): OverviewRenderer {
   const parent = parentValue as HTMLElement;
   if (!parent || typeof parent.appendChild !== "function" || typeof parent.getBoundingClientRect !== "function") throw new Error("The browser graph could not attach to its screen.");
-  let model = options.model, theme = options.theme;
+  let catalog = options.input.catalog, view = options.input.view;
+  let model = view.model, theme = options.theme;
+  let fitRequested = options.input.refit;
   let appearance = options.appearance ?? DEFAULT_APPEARANCE;
   let policy = appearancePolicy(appearance);
   let ownership = buildOwnershipIndex(model);
+  let ownershipModel = model;
   let focused: OverviewFocus = options.presentation?.scope ?? null;
   let selected: string | null = options.presentation?.selectedId ?? null, hovered: string | null = null;
   let groupPreferences: GroupPreferences = options.presentation?.groups ?? new Map();
@@ -114,10 +117,10 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   let requestedMotion = options.motion !== false, frame = 0, lastTime = 0;
   let wakeTimer: ReturnType<typeof setTimeout> | undefined;
   let delegationDirty = true, delegationPlanDirty = true, structuralTransition = true;
-  let graphDirty = true, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity;
+  let graphDirty = true, eventsDirty = false, graphAnimating = false, nextBubbleExpiry = Infinity, nextActivityUpdate = Infinity;
   let summaries = new Map<string, import("../activity").OwnedActivity>();
   let agentById = new Map(model.nodes.map(node => [node.id, node]));
-  let owningHosts = new Map([...model.projects, ...model.workspaces, ...model.nodes].map(node => [node.id, node.hostId]));
+  let owningHosts = new Map([...catalog.projects, ...catalog.workspaces, ...catalog.nodes].map(node => [node.id, node.hostId]));
   const nodeScores = new Map<string, number>();
   const opacityByNode = new Map<string, number>();
   const presentationByNode = new Map<string, NodePresentation>();
@@ -136,6 +139,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   const clusters = new Map<string, Cluster>(), delegations = new Map<string, Delegation>();
   const focusAnchors = new Map<string, ProjectAnchor>();
   const geometryDirty = new Set<string>();
+  const contentDirty = new Set<string>();
   let screenRoutesDirty = true;
   const pulses: Pulse[] = [], pool: FibreLight[] = [];
   const arrivals = new Map<string, number>(), held = new Map<string, readonly string[]>();
@@ -187,7 +191,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
 
   const anyHostLive = () => model.hosts.some(host => host.connection === "connected");
   const ownerHost = (id: string) => owningHosts.get(id) ?? hostForDisplayId(id) ?? "";
-  const authoritative = (id: string) => isHostAuthoritative(model, ownerHost(id));
+  const authoritative = (id: string) => isHostAuthoritative(catalog, ownerHost(id));
   const projectLive = (id: string) => isHostLive(model, ownerHost(id));
   function setLineColour(line: Line2, colour: string): void {
     if (lineColours.get(line) === colour) return;
@@ -199,8 +203,12 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     lastAnchor = anchor ? { ...anchor } : null;
     options.onSelectionAnchor?.(lastAnchor);
   }
+  function selectionAllowed(id: string): boolean {
+    return canRetainSelection(catalog, id) &&
+      (view.visibleNodeIds.has(id) || !catalog.nodes.some(node => node.id === id));
+  }
   function setSelection(id: string | null): void {
-    const next = id && canRetainSelection(model, id) ? id : null;
+    const next = id && selectionAllowed(id) ? id : null;
     if (next === selected) return;
     if (selected && !held.has(selected)) bubbles.hold(selected, false);
     selected = next;
@@ -269,7 +277,8 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const protectedIds = new Set<string>([...held.keys(), ...[selected, hovered].filter((id): id is string => !!id)]);
     const now = Date.now();
     for (const event of model.events) if (event.timestamp >= now - 6500) protectedIds.add(event.nodeId);
-    const next = layoutEngine.update(model, width, height, focused, { groups: groupPreferences, protectedIds });
+    const next = layoutEngine.update(model, width, height, focused, { groups: groupPreferences, protectedIds, framing: fitRequested ? "fit" : "preserve" });
+    fitRequested = false;
     const routeChanged = next.delegationEdges !== layout.delegationEdges ||
       next.projects.length !== layout.projects.length || next.projects.some(project => {
         const old = layout.projects.find(item => item.id === project.id);
@@ -313,7 +322,11 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         cluster.routedAt = performance.now();
       }
     }
-    layout = next; ownership = buildOwnershipIndex(model); delegationDirty ||= routeChanged;
+    layout = next;
+    if (ownershipModel.projects !== model.projects || ownershipModel.workspaces !== model.workspaces || ownershipModel.nodes !== model.nodes) {
+      ownership = buildOwnershipIndex(model); ownershipModel = model;
+    }
+    delegationDirty ||= routeChanged;
     delegationPlanDirty ||= routeChanged; structuralTransition ||= routeChanged;
     if (!focused && delegationPlanDirty) {
       const plan = planDepthDelegations(layout.projects, model.edges, layout.memberToDisplay, { x: 8, y: 8, width: width - 16, height: height - 16 });
@@ -324,13 +337,14 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       }
       delegationPlanDirty = false;
     }
+    for (const id of bubbleNodes) if (!layout.nodes.has(id)) bubbleNodes.delete(id);
     overlay.sync(layout, model);
     for (const [id, members] of held) if (!layout.nodes.has(id)) {
       for (const member of members) bubbles.hold(member, member === selected);
       held.delete(id);
     }
     if (focused && authoritative(focused.id) && !layout.nodes.has(focused.id)) setFocus(null);
-    if (selected && !canRetainSelection(model, selected)) setSelection(null);
+    if (selected && !selectionAllowed(selected)) setSelection(null);
   }
 
   function transformNode(node: PositionedNode): RouteNode {
@@ -396,6 +410,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   }
   function acceptEvents(): void {
     const now = Date.now();
+    activity.discard(view.suppressedEvents, now); bubbles.discard(view.suppressedEvents, now);
     const events = model.events.filter(event => isHostLive(model, event.hostId));
     const discarded = model.events.filter(event => !isHostLive(model, event.hostId));
     activity.discard(discarded, now); bubbles.discard(discarded, now);
@@ -447,17 +462,17 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     lastTime = time;
     const animate = motion(), smooth = animate ? 1 - Math.exp(-dt * 12) : 1;
     const live = anyHostLive();
-    if (!graphDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
+    if (!graphDirty && !eventsDirty && !graphAnimating && now < Math.min(nextBubbleExpiry, nextActivityUpdate)) {
       ambient.advanceTime(elapsedSeconds, animate && live);
       renderComposite(); scheduleFrame(now); return;
     }
     const dirty = graphDirty;
-    const activityChanged = dirty || now >= nextActivityUpdate;
+    const activityChanged = dirty || eventsDirty || now >= nextActivityUpdate;
     const movedProjects = new Set(geometryDirty);
-    const paintProjects = new Set<string>(dirty ? clusters.keys() : geometryDirty);
+    const paintProjects = new Set<string>(dirty ? clusters.keys() : [...geometryDirty, ...contentDirty]);
     let spatialChanged = dirty;
-    const bubblesChanged = dirty || now >= nextBubbleExpiry;
-    graphDirty = false;
+    const bubblesChanged = dirty || eventsDirty || now >= nextBubbleExpiry;
+    graphDirty = false; eventsDirty = false;
     if (activityChanged) {
       summaries = aggregateOwnedActivity(model, ownership, activity, now);
       nodeScores.clear();
@@ -472,7 +487,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
     const totalProjectActivity = [...clusters.keys()].reduce((sum, id) => sum + normaliseActivity(summaries.get(id)?.score ?? 0), 0);
     const focusNode = focused ? layout.nodes.get(focused.id) : undefined;
     const focusProject = focusNode?.projectId;
-    if (dirty) {
+    if (dirty || geometryDirty.size) {
       ancestry.clear(); inspectedProjects.clear();
       let ancestor: string | undefined = hovered ?? selected ?? undefined;
       while (ancestor && !ancestry.has(ancestor)) { ancestry.add(ancestor); ancestor = layout.nodes.get(ancestor)?.parentId; }
@@ -553,7 +568,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
         movedProjects.add(id); paintProjects.add(id);
       }
       if (previousOpacity !== cluster.opacity) paintProjects.add(id);
-      const presentationChanged = dirty || previousOpacity !== cluster.opacity;
+      const presentationChanged = dirty || paintProjects.has(id) || previousOpacity !== cluster.opacity;
       for (const node of cluster.layout.nodes) {
         const visual = cluster.nodes.get(node.id)!, count = summaries.get(node.id), agent = agentById.get(node.id);
         const working = clusterLive && (count?.working ?? 0) > 0;
@@ -573,7 +588,10 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
           interactive: true,
           elevation: distant ? 0.06 : cluster.elevation,
         });
-        if (dirty && (!distant || selected === node.id || hovered === node.id || held.has(node.id))) bubbleNodes.add(node.id);
+        if (presentationChanged) {
+          if (!distant || selected === node.id || hovered === node.id || held.has(node.id)) bubbleNodes.add(node.id);
+          else bubbleNodes.delete(node.id);
+        }
         if (animate && clusterLive) visual.phase = (visual.phase + dt * heartbeatBpm(working, score) / 60) % 1;
         const age = time - (arrivals.get(node.id) ?? -Infinity), arrival = age < 800 ? Math.exp(-age / 240) : 0;
         const wave = animate ? Math.max(working ? beat(visual.phase) * 0.35 : 0, arrival) : 0;
@@ -682,7 +700,7 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
       overlay.setRoutes(screenRoutes);
       screenRoutesDirty = false;
     }
-    geometryDirty.clear();
+    geometryDirty.clear(); contentDirty.clear();
     if (paintProjects.size || routesChanged || bubblesChanged) {
       const displayedBubbles = new Map<string, ActivityBubble>();
       for (const bubble of bubbles.current(now)) {
@@ -776,32 +794,79 @@ export function createOverviewRenderer(parentValue: unknown, options: OverviewMo
   };
   try { resize(); acceptEvents(); } catch (error) { dispose(); throw error; }
   return {
-    update(next) {
+    update(input) {
       if (disposed || failed) return;
+      const next = input.view.model;
       const graphChanged = !sameGraph(model, next);
+      if (graphChanged) {
+        const previous = new Map([...model.projects, ...model.workspaces, ...model.nodes].map(node => [node.id, node]));
+        const nextOwnership = buildOwnershipIndex(next);
+        for (const node of [...next.projects, ...next.workspaces, ...next.nodes]) {
+          const old = previous.get(node.id);
+          if (!old || !sameRecords([old], [node])) {
+            contentDirty.add(nextOwnership.projectByNode.get(node.id) ?? unassignedScopeId(node.hostId));
+            const oldProject = ownership.projectByNode.get(node.id);
+            if (oldProject) contentDirty.add(oldProject);
+          }
+        }
+        ownership = nextOwnership; ownershipModel = next;
+      }
+      const catalogChanged = catalog.nodes !== input.catalog.nodes || catalog.projects !== input.catalog.projects ||
+        catalog.workspaces !== input.catalog.workspaces;
       const protectedGroupChanged = next.events.some(event => event.timestamp >= Date.now() - 6500 &&
         layout.memberToDisplay.has(event.nodeId) && layout.memberToDisplay.get(event.nodeId) !== event.nodeId);
-      // Offline time is not visible animation time. Reconnection must resume
-      // the retained grid phase without catching up the unscheduled interval.
-      const changedHosts = new Set(model.hosts.filter(host => next.hosts.find(candidate => candidate.id === host.id)?.connection !== host.connection).map(host => host.id));
+      const changedHosts = new Set(catalog.hosts.filter(host => input.catalog.hosts.find(candidate => candidate.id === host.id)?.connection !== host.connection).map(host => host.id));
       if (changedHosts.size) {
         clearHostTransients(changedHosts);
-        const staleEvents = next.events.filter(event => changedHosts.has(event.hostId));
+        const staleEvents = input.catalog.events.filter(event => changedHosts.has(event.hostId));
         bubbles.discard(staleEvents, Date.now()); activity.discard(staleEvents, Date.now());
       }
-      if (anyHostLive() !== next.hosts.some(host => host.connection === "connected")) lastTime = 0;
-      model = next;
-      agentById = new Map(model.nodes.map(node => [node.id, node]));
-      owningHosts = new Map([...model.projects, ...model.workspaces, ...model.nodes].map(node => [node.id, node.hostId]));
-      const nodeIds = new Set(model.nodes.map(node => node.id));
-      activity.prune(nodeIds); bubbles.prune(nodeIds);
-      try {
-        if (graphChanged || protectedGroupChanged) rebuildLayout();
-        else {
-          if (selected && !canRetainSelection(model, selected)) setSelection(null);
-          if (focused && authoritative(focused.id) && !layout.nodes.has(focused.id)) setFocus(null);
+      // A view change removes presentation only. Seen event IDs and authoritative
+      // catalogue state survive, including observations for excluded projects.
+      const hiddenNodes = new Set(view.visibleNodeIds === input.view.visibleNodeIds ? [] :
+        [...view.visibleNodeIds].filter(id => !input.view.visibleNodeIds.has(id)));
+      if (hiddenNodes.size) {
+        bubbles.clearNodes(hiddenNodes); limiter.clearNodes(hiddenNodes);
+        for (const [id, members] of held) if (hiddenNodes.has(id) || members.some(member => hiddenNodes.has(member))) held.delete(id);
+        if (hovered && (hiddenNodes.has(hovered) || layout.nodes.get(hovered)?.memberIds?.some(id => hiddenNodes.has(id)))) hovered = null;
+      }
+      const nextEntities = graphChanged ? new Set([...next.projects, ...next.workspaces, ...next.nodes].map(node => node.id)) : undefined;
+      const hiddenProjects = new Set(nextEntities ? [...clusters.values()].filter(cluster =>
+        !cluster.layout.nodes.some(node => nextEntities.has(node.id) || node.memberIds?.some(id => nextEntities.has(id))))
+        .map(cluster => cluster.layout.id) : []);
+      if (hiddenProjects.size) {
+        ambient.clearProjects(hiddenProjects);
+        for (let index = pulses.length - 1; index >= 0; index--) {
+          const pulse = pulses[index]!;
+          if (!hiddenProjects.has(pulse.projectId)) continue;
+          pulse.light.object.removeFromParent(); pulse.light.object.visible = false;
+          pool.push(pulse.light); pulses.splice(index, 1);
         }
-        acceptEvents(); requestFrame();
+        for (const id of arrivals.keys()) if (hiddenNodes.has(id) || hiddenProjects.has(layout.nodes.get(id)?.projectId ?? "")) arrivals.delete(id);
+      }
+      if (input.refit) {
+        // The retained event ring is a consumed baseline on Apply/reveal, never
+        // a queue to replay. Later observations are admitted normally.
+        activity.discard(input.catalog.events, Date.now()); bubbles.discard(input.catalog.events, Date.now());
+        focused = null; focusAnchors.clear();
+        for (const cluster of clusters.values()) cluster.simulation = { ...cluster.displayed };
+        fitRequested = true; structuralTransition = true; delegationPlanDirty = true; delegationDirty = true;
+      }
+      if (anyHostLive() !== next.hosts.some(host => host.connection === "connected")) lastTime = 0;
+      const agentsChanged = model.nodes !== next.nodes;
+      catalog = input.catalog; view = input.view; model = next;
+      if (agentsChanged) agentById = new Map(model.nodes.map(node => [node.id, node]));
+      if (catalogChanged) {
+        owningHosts = new Map([...catalog.projects, ...catalog.workspaces, ...catalog.nodes].map(node => [node.id, node.hostId]));
+        const nodeIds = new Set(catalog.nodes.map(node => node.id));
+        activity.prune(nodeIds); bubbles.prune(nodeIds);
+      }
+      try {
+        if (selected && !selectionAllowed(selected)) setSelection(null);
+        if (graphChanged || protectedGroupChanged || input.refit) rebuildLayout();
+        else if (focused && authoritative(focused.id) && !layout.nodes.has(focused.id)) setFocus(null);
+        acceptEvents(); eventsDirty = true;
+        requestFrame(input.refit || changedHosts.size > 0);
       }
       catch (error) { failed = true; options.onError?.(error instanceof Error ? error.message : "The graph layout is unavailable."); }
     },

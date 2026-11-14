@@ -1,6 +1,15 @@
 import type { OverviewModel } from "./model";
 import type { GroupPreferences, OverviewPresentation, OverviewScope } from "./presentation";
 import type { OverviewAppearance } from "./settings";
+import type { ProjectView } from "./project-view";
+
+/** Deliver visibility and its authoritative catalogue in one update. */
+export interface OverviewRenderInput {
+  catalog: OverviewModel;
+  view: ProjectView;
+  /** Explicit filter/host changes fit the visible set once. */
+  refit: boolean;
+}
 
 export type OverviewFocus = OverviewScope;
 export interface AgentTarget { hostId: string; agentId: string }
@@ -33,7 +42,7 @@ export interface OverviewTheme {
 }
 
 export interface OverviewMountOptions {
-  model: OverviewModel;
+  input: OverviewRenderInput;
   theme: OverviewTheme;
   motion?: boolean;
   presentation?: OverviewPresentation;
@@ -47,7 +56,7 @@ export interface OverviewMountOptions {
 }
 
 export interface OverviewRenderer {
-  update(model: OverviewModel): void;
+  update(input: OverviewRenderInput): void;
   updateTheme(theme: OverviewTheme): void;
   setAppearance(appearance: OverviewAppearance): void;
   setFocus(target: OverviewFocus): void;

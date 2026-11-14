@@ -1,4 +1,4 @@
-import { AccessibilityInfo, AppState, ScrollView, Text, View } from "react-native";
+import { AccessibilityInfo, AppState, Pressable, ScrollView, Text, View } from "react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OverviewModel } from "../shared/model";
 import type { OverviewPresentation, PresentationAction } from "../shared/presentation";
@@ -10,15 +10,19 @@ import { nativeGraphLayout, nativeInitialScrollX, nativeSummary, type NativeGrap
 import { NativeNode } from "./native-node";
 
 interface NativeOverviewProps {
+  /** Visible projection, not the complete catalogue. */
   model: OverviewModel;
   theme: OverviewTheme;
   presentation: OverviewPresentation;
   onAction(action: PresentationAction): void;
   visible?: boolean;
+  /** Replaces the ordinary empty text when a project selection is empty. */
+  emptyMessage?: string;
+  onShowAll?(): void;
 }
 
 /** The screen owns navigation; native owns only its viewport and app visibility. */
-export function NativeOverview({ model, theme, presentation, onAction, visible = true }: NativeOverviewProps) {
+export function NativeOverview({ model, theme, presentation, onAction, visible = true, emptyMessage, onShowAll }: NativeOverviewProps) {
   const [width, setWidth] = useState(360);
   const [active, setActive] = useState(AppState.currentState == null || AppState.currentState === "active");
   const [reduced, setReduced] = useState(true);
@@ -93,7 +97,13 @@ export function NativeOverview({ model, theme, presentation, onAction, visible =
           {layout.nodes.map(node => <NativeNode key={node.id} node={node} summary={nativeSummary(node, agents)} agent={agents.get(node.id)} theme={theme}
             animated={animate && liveHosts.has(node.hostId)} delegated={delegated.has(node.id)} selected={presentation.selectedId === node.id} highlighted={highlighted.has(node.id)}
             onPress={() => activate(node)} onCollapse={id => onAction({ type: "collapse-group", id })} />)}
-          {!layout.nodes.length ? <Text style={{ position: "absolute", top: 60, left: 24, right: 24, color: theme.muted, textAlign: "center" }}>{offline ? "No connected hosts" : loading ? "Loading host activity…" : "No projects to show."}</Text> : null}
+          {!layout.nodes.length ? <View style={{ position: "absolute", top: 60, left: 24, right: 24, alignItems: "center", gap: 4 }}>
+            <Text style={{ color: theme.muted, textAlign: "center" }}>{emptyMessage ?? (offline ? "No connected hosts" : loading ? "Loading host activity…" : "No projects to show.")}</Text>
+            {emptyMessage && onShowAll ? <Pressable testID="overview-native-show-all" accessibilityRole="button" onPress={onShowAll}
+              style={{ minHeight: 44, minWidth: 44, justifyContent: "center", paddingHorizontal: 10 }}>
+              <Text style={{ color: selection, fontSize: 13, fontWeight: "600" }}>Show all</Text>
+            </Pressable> : null}
+          </View> : null}
           {layout.focus && layout.nodes.length === 1 ? <Text style={{ position: "absolute", top: 200, left: 24, right: 24, color: theme.muted, textAlign: "center" }}>{offline ? "Host offline · last known project" : loading ? "Loading workspaces…" : "No workspaces in this project"}</Text> : null}
           {layout.focus?.kind === "workspace" && layout.nodes.length === 2 ? <Text style={{ position: "absolute", top: 302, left: 24, right: 24, color: theme.muted, textAlign: "center" }}>{offline ? "Host offline · last known workspace" : loading ? "Loading agents…" : "No agents in this workspace"}</Text> : null}
         </View>

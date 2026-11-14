@@ -3,8 +3,8 @@ import { Modal } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import type { OverviewHostSummary } from "../shared/model";
-import type { OverviewPresentation, PresentationAction } from "../shared/presentation";
-import type { AgentTarget, FloatingCardPositioner, OverviewAnchor, OverviewFullscreen, OverviewMountOptions, OverviewRenderer, OverviewTheme } from "../shared/renderer";
+import { canonicalProjectFilter, type OverviewPresentation, type PresentationAction } from "../shared/presentation";
+import type { AgentTarget, FloatingCardPositioner, OverviewAnchor, OverviewFullscreen, OverviewMountOptions, OverviewRenderInput, OverviewRenderer, OverviewTheme } from "../shared/renderer";
 import { DEFAULT_APPEARANCE, overviewAppearance, type OverviewAppearance } from "../shared/settings";
 import { emptyOverviewModel, isHostAuthoritative } from "../shared/hosts";
 import { AgentDetails } from "./agent-details";
@@ -14,6 +14,7 @@ import { OverviewHeader } from "./header";
 import { createOverviewHosts } from "./hosts";
 import { NativeOverview } from "./native";
 import { parentScope, recallPresentation, reconcilePresentation, reducePresentation, rememberPresentation } from "./presentation";
+import { createProjectView } from "./project-filter";
 import { mountFloatingCard, mountGraphFullscreen, mountOverview } from "./web";
 
 function sameAppearance(left: OverviewAppearance, right: OverviewAppearance): boolean {
@@ -73,9 +74,6 @@ export function OverviewScreen(props: OverviewScreenProps) {
     appearanceSettings.status === "ready" ? appearanceSettings.values.depth : undefined,
     appearanceSettings.status === "ready" ? appearanceSettings.values.response : undefined,
     appearanceSettings.status === "ready" ? appearanceSettings.values.backgroundSpeed : undefined]);
-  const [observed, setObserved] = useState(() => ({ installation: props.host.id, model: emptyOverviewModel() }));
-  // A reused screen can render once with the preceding installation's model.
-  const model = useMemo(() => observed.installation === props.host.id ? observed.model : emptyOverviewModel(), [observed, props.host.id]);
   const hostChoicesSignature = hosts.map(host => `${host.serverId}\u0000${host.label}\u0000${host.status}`).join("\u0001");
   const hostChoices = useMemo<OverviewHostSummary[]>(() => hosts.map(host => ({
     id: host.serverId, label: host.label, status: host.status,
@@ -90,6 +88,29 @@ export function OverviewScreen(props: OverviewScreenProps) {
   const [owned, setOwned] = useState(() => ({ hostId: props.host.id, value: recallPresentation(props.host.id) }));
   const presentation: OverviewPresentation = owned.hostId === props.host.id ? owned.value : recallPresentation(props.host.id);
   if (owned.hostId !== props.host.id) setOwned({ hostId: props.host.id, value: presentation });
+  // The catalogue is usable only when it was composed by the requested host
+  // filter. This stamp, not a host count, makes filter/refit delivery atomic.
+  const [observed, setObserved] = useState(() => ({
+    installation: props.host.id, model: emptyOverviewModel(),
+    appliedHostFilter: undefined as string | null | undefined,
+  }));
+  const observationReady = observed.installation === props.host.id
+    && observed.appliedHostFilter !== undefined
+    && observed.appliedHostFilter === presentation.hostFilter;
+  // A reused screen can render once with the preceding installation's model.
+  const model = useMemo(() => observed.installation === props.host.id && observationReady
+    ? observed.model : emptyOverviewModel(), [observed, props.host.id, observationReady]);
+  // One memoized projection per render; the catalogue stays authoritative for
+  // reconciliation, picker candidates and host state.
+  const projectViewFactory = useMemo(() => createProjectView(), [props.host.id]);
+  const view = useMemo(() => projectViewFactory(model, presentation.projectFilter), [projectViewFactory, model, presentation.projectFilter]);
+  const refitKey = `${props.host.id}\u0000${presentation.hostFilter ?? ""}\u0000${JSON.stringify(canonicalProjectFilter(presentation.projectFilter))}`;
+  const lastRefitKey = useRef<string | null>(null);
+  // Pending refit survives until a catalogue carrying the requested filter is
+  // actually delivered to the renderer.
+  const refit = observationReady && lastRefitKey.current !== refitKey;
+  const renderInput = useMemo<OverviewRenderInput>(() => ({ catalog: model, view, refit }), [model, view, refit]);
+  const appliedInput = useRef<OverviewRenderInput | null>(null);
   const dispatch = useCallback((action: PresentationAction) => {
     setOwned(previous => {
       const value = reducePresentation(previous.hostId === props.host.id ? previous.value : recallPresentation(props.host.id), action);
@@ -149,10 +170,10 @@ export function OverviewScreen(props: OverviewScreenProps) {
     void fullscreen.current?.exit().catch(() => {});
     navigation?.openAgent({ agentId: target.agentId, serverId: target.hostId });
   }, [navigation]);
-  const current = useRef({ model, theme, appearance, presentation, openAgent, dispatch });
-  current.current = { model, theme, appearance, presentation, openAgent, dispatch };
+  const current = useRef({ model, view, input: renderInput, refitKey, observationReady, theme, appearance, presentation, openAgent, dispatch });
+  current.current = { model, view, input: renderInput, refitKey, observationReady, theme, appearance, presentation, openAgent, dispatch };
   const browser = Platform.OS === "web" && !renderError;
-  const selected = model.nodes.find(node => node.id === presentation.selectedId);
+  const selected = view.model.nodes.find(node => node.id === presentation.selectedId);
   const closeDetails = useCallback(() => {
     const id = current.current.presentation.selectedId;
     current.current.dispatch({ type: "select", id: null });
@@ -164,11 +185,13 @@ export function OverviewScreen(props: OverviewScreenProps) {
   useEffect(() => {
     let mounted = true;
     const installation = props.host.id;
-    setObserved({ installation, model: emptyOverviewModel() });
+    setObserved({ installation, model: emptyOverviewModel(), appliedHostFilter: undefined });
     const observation = createOverviewHosts({
       acquire: hostId => getPaseoClient(hostId),
       observeActivity: Platform.OS === "web",
-      onChange: next => { if (mounted) setObserved({ installation, model: next }); },
+      onChange: (next, appliedHostFilter) => {
+        if (mounted) setObserved({ installation, model: next, appliedHostFilter });
+      },
     });
     coordinator.current = observation;
     // Apply visibility and the saved filter before any host entry can start a
@@ -220,7 +243,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
     try {
       const initial = current.current;
       const options: OverviewMountOptions = {
-        model: initial.model, theme: initial.theme, appearance: initial.appearance,
+        input: initial.input, theme: initial.theme, appearance: initial.appearance,
         presentation: initial.presentation, motion: initial.presentation.motion,
         onSelect: id => current.current.dispatch({ type: "select", id }),
         onFocus: scope => current.current.dispatch({ type: "focus", scope }),
@@ -231,12 +254,25 @@ export function OverviewScreen(props: OverviewScreenProps) {
       const mounted = mountOverview(panel.current, options);
       if (!mounted) { setRenderError("Graph rendering is unavailable on this client."); return; }
       renderer.current = mounted;
+      appliedInput.current = initial.input;
+      if (initial.observationReady) lastRefitKey.current = initial.refitKey;
       mounted.setAppearance(initial.appearance);
-      return () => { mounted.dispose(); if (renderer.current === mounted) renderer.current = null; };
+      return () => {
+        mounted.dispose();
+        if (appliedInput.current === initial.input) appliedInput.current = null;
+        lastRefitKey.current = null;
+        if (renderer.current === mounted) renderer.current = null;
+      };
     } catch (cause) { setRenderError(cause instanceof Error ? cause.message : "Graph rendering is unavailable."); }
   }, [browser, props.host.id]);
 
-  useEffect(() => { renderer.current?.update(model); }, [model]);
+  useEffect(() => {
+    const mounted = renderer.current;
+    if (!mounted || !observationReady || appliedInput.current === renderInput) return;
+    mounted.update(renderInput);
+    appliedInput.current = renderInput;
+    lastRefitKey.current = refitKey;
+  }, [renderInput, refitKey, observationReady]);
   useEffect(() => { renderer.current?.updateTheme(theme); }, [theme]);
   useEffect(() => { renderer.current?.setAppearance(appearance); }, [appearance]);
   useEffect(() => { renderer.current?.setMotion(presentation.motion); }, [presentation.motion]);
@@ -244,14 +280,15 @@ export function OverviewScreen(props: OverviewScreenProps) {
   useEffect(() => { renderer.current?.setFocus(presentation.scope); }, [presentation.scope]);
   useEffect(() => { renderer.current?.setSelection(presentation.selectedId); }, [presentation.selectedId]);
   useEffect(() => {
+    if (!observationReady) return;
     setOwned(previous => {
       if (previous.hostId !== props.host.id || !model.hosts.length) return previous;
-      const value = reconcilePresentation(previous.value, model);
+      const value = reconcilePresentation(previous.value, model, presentation.projectFilter);
       if (value === previous.value) return previous;
       rememberPresentation(previous.hostId, value);
       return { ...previous, value };
     });
-  }, [model, props.host.id]);
+  }, [model, presentation.projectFilter, props.host.id, observationReady]);
   useEffect(() => {
     if (!browser || !selected) return;
     const positioned = mountFloatingCard(panel.current, card.current, closeDetails);
@@ -262,16 +299,25 @@ export function OverviewScreen(props: OverviewScreenProps) {
 
   const anyAuthoritative = model.hosts.some(host => isHostAuthoritative(model, host.id));
   const allOffline = model.hosts.length > 0 && model.hosts.every(host => host.connection === "disconnected");
-  const hasGraph = model.projects.length > 0 || model.nodes.length > 0;
-  const loading = !hasGraph && !anyAuthoritative && !allOffline;
-  const empty = !loading && !hasGraph;
+  const catalogueHasGraph = model.projects.length > 0 || model.workspaces.length > 0 || model.nodes.length > 0;
+  const viewHasGraph = view.model.projects.length > 0 || view.model.workspaces.length > 0 || view.model.nodes.length > 0;
+  const noProjectsSelected = presentation.projectFilter !== null && !viewHasGraph;
+  const loading = !noProjectsSelected && !catalogueHasGraph && !anyAuthoritative && !allOffline;
+  const empty = !noProjectsSelected && !loading && !catalogueHasGraph;
+  const showAllProjects = () => {
+    dispatch({ type: "set-project-filter", projectIds: null });
+    // Show all is also the explicit return from a focused graph. It never runs
+    // for an ordinary equivalent Apply, so that path keeps focus.
+    dispatch({ type: "focus", scope: null });
+  };
   const appearanceProblem = appearanceNotice || appearanceSettings.saveError
     || (appearanceSettings.status === "invalid" ? "Stored appearance settings are invalid. Overview is keeping its current appearance; open appearance settings to reload or restore them."
       : appearanceSettings.status === "error" ? "Appearance settings could not be loaded. Overview is keeping its current appearance." : "");
-  const detailsFor = (detailsTheme: OverviewTheme) => selected ? <AgentDetails model={model} node={selected} theme={detailsTheme} onClose={closeDetails} onOpenAgent={navigation ? openAgent : undefined} /> : null;
+  const detailsFor = (detailsTheme: OverviewTheme) => selected ? <AgentDetails model={view.model} node={selected} theme={detailsTheme} onClose={closeDetails} onOpenAgent={navigation ? openAgent : undefined} /> : null;
   return <View ref={screen} testID="overview-screen" style={[styles.screen, { backgroundColor: theme.background }]}>
-    <OverviewHeader model={model} presentation={presentation} hostChoices={hostChoices} theme={theme} compact={props.layout.compact}
+    <OverviewHeader model={model} view={view} presentation={presentation} hostChoices={hostChoices} theme={theme} compact={props.layout.compact}
       onHostFilter={hostId => dispatch({ type: "set-host-filter", hostId })}
+      onProjectFilter={projectIds => dispatch({ type: "set-project-filter", projectIds })}
       onProject={scope => dispatch({ type: "focus", scope })}
       onBack={() => dispatch({ type: "focus", scope: parentScope(presentation.scope, model) })}
       onMotion={() => dispatch({ type: "set-motion", enabled: !presentation.motion })}
@@ -297,10 +343,18 @@ export function OverviewScreen(props: OverviewScreenProps) {
     <View style={styles.canvasArea}>
       {browser ? <>
         <View ref={panel} testID="overview-canvas-host" style={styles.canvas} />
+        {noProjectsSelected ? <View style={styles.empty}>
+          <Text style={{ color: theme.foreground, fontSize: 17 }}>No projects selected</Text>
+          <Pressable testID="overview-no-projects-show-all" accessibilityRole="button" onPress={showAllProjects} style={styles.emptyAction}>
+            <Text style={{ color: theme.selection, fontSize: 13, fontWeight: "600" }}>Show all</Text>
+          </Pressable>
+        </View> : null}
         {loading ? <View pointerEvents="none" style={styles.loading}><Text accessibilityLiveRegion="polite" style={{ color: theme.muted, fontSize: 12 }}>Loading host activity…</Text></View> : null}
         {empty ? <View pointerEvents="none" style={styles.empty}><Text style={{ color: theme.foreground, fontSize: 17 }}>{allOffline ? "No connected hosts" : "Your projects will appear here"}</Text></View> : null}
         {selected ? <View ref={card} testID="overview-details-popover" style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>{detailsFor(theme)}</View> : null}
-      </> : <NativeOverview model={model} theme={theme} presentation={presentation} onAction={dispatch} />}
+      </> : <NativeOverview model={view.model} theme={theme} presentation={presentation} onAction={dispatch}
+        emptyMessage={noProjectsSelected ? "No projects selected" : undefined}
+        onShowAll={noProjectsSelected ? showAllProjects : undefined} />}
     </View>
     {!browser ? <Modal title="Agent details" open={!!selected} onOpenChange={open => { if (!open) closeDetails(); }}>
       <Modal.Content scrollable={false} contentContainerStyle={{ padding: 0, gap: 0 }}>{detailsFor(hostTheme)}</Modal.Content>
@@ -316,5 +370,6 @@ const styles = StyleSheet.create({
   canvas: { flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" },
   loading: { position: "absolute", top: 12, left: 20 },
   empty: { position: "absolute", top: "40%", left: 20, right: 20, alignItems: "center" },
+  emptyAction: { minHeight: 44, minWidth: 44, justifyContent: "center", paddingHorizontal: 10 },
   card: { position: "absolute", top: 8, left: 8, width: 304, maxWidth: "94%", maxHeight: "85%", borderWidth: 1, borderRadius: 16, overflow: "hidden", zIndex: 20, boxShadow: "0 12px 36px #0000001c" },
 });

@@ -341,6 +341,10 @@ export function canvasNode(node: PositionedNode, project: ProjectLayout): Positi
 }
 
 /** Cached topology has no activity/status/icon inputs; initial loading can never freeze packing. */
+export interface LayoutUpdateOptions extends CollapseOptions {
+  framing?: "preserve" | "fit";
+}
+
 export class StableLayout {
   private readonly geometry = new Map<string, { signature: string; value: LocalGeometry }>();
   private readonly fits = new Map<string, { scale: number; positions: Map<string, Point> }>();
@@ -395,7 +399,7 @@ export class StableLayout {
     return result;
   }
 
-  update(model: OverviewModel, width: number, height: number, _focus: OverviewFocus = null, options: CollapseOptions = {}): SceneLayout {
+  update(model: OverviewModel, width: number, height: number, _focus: OverviewFocus = null, options: LayoutUpdateOptions = {}): SceneLayout {
     width = Math.max(1, width); height = Math.max(1, height);
     const definitions = projectDefinitions(model);
     const padding = Math.min(graphMetrics.viewportPadding, width / 12, height / 12);
@@ -408,7 +412,7 @@ export class StableLayout {
     // collapsed branch must not inherit the reduced scale of its expanded tree.
     const previousFit = this.fits.get(this.fitKey(baseProjects, viewport));
     if (previousFit) { positions = previousFit.positions; scale = previousFit.scale; }
-    if (!positions && this.previousReservation === this.reservation && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
+    if (!positions && options.framing !== "fit" && this.previousReservation === this.reservation && this.previous?.width === width && this.previous.height === height && baseProjects.every(project => this.previous!.projects.some(old => old.id === project.id))) {
       const candidate = baseProjects.map(project => {
         const old = this.previous!.projects.find(item => item.id === project.id)!;
         return { project, old, bounds: { x: old.position.x + project.bounds.x * old.scale - (project.bounds.width * old.scale * this.reservation + graphMetrics.projectGap) / 2,

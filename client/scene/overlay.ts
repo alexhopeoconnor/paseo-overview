@@ -58,7 +58,26 @@ interface CollapseControl {
   stack?: number; display?: "none" | "block"; themeKey?: string;
 }
 interface Callbacks { activate(id: string): void; hover(id: string | null): void; hold(id: string, held: boolean): void; collapse(id: string): void }
-const css = (element: HTMLElement, values: Partial<CSSStyleDeclaration>) => Object.assign(element.style, values);
+const styleValues = new WeakMap<HTMLElement, Map<string, { input: string; applied: string }>>();
+const css = (element: HTMLElement, values: Partial<CSSStyleDeclaration>): void => {
+  let cached = styleValues.get(element);
+  if (!cached) { cached = new Map(); styleValues.set(element, cached); }
+  const style = element.style as unknown as Record<string, string>;
+  for (const [key, value] of Object.entries(values)) {
+    const input = String(value), previous = cached.get(key);
+    if (previous?.input === input && style[key] === previous.applied) continue;
+    if (style[key] !== input) style[key] = input;
+    cached.set(key, { input, applied: style[key]! });
+  }
+};
+const text = (element: HTMLElement, value: string): void => { if (element.textContent !== value) element.textContent = value; };
+const attribute = (element: HTMLElement, name: string, value: string | null): void => {
+  if (element.getAttribute(name) === value) return;
+  if (value === null) element.removeAttribute(name); else element.setAttribute(name, value);
+};
+const dataset = (element: HTMLElement, values: Record<string, string>): void => {
+  for (const [key, value] of Object.entries(values)) if (element.dataset[key] !== value) element.dataset[key] = value;
+};
 const opacityInRange = (value: number) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 1));
 const sameRect = (a: Rect | undefined, b: Rect | undefined): boolean => a === b || (!!a && !!b &&
   a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height);
@@ -296,44 +315,44 @@ export class GraphOverlay {
       css(item.glyph, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: glyphRadius, fontSize: node.kind === "project" ? "20px" : "9px", fontWeight: "650", transform: subordinate ? "rotate(45deg)" : "none" });
       css(item.ring, { width: `${glyphWidth}px`, height: `${glyphHeight}px`, borderRadius: glyphRadius, transform: subordinate ? "rotate(45deg)" : "none" });
       css(item.avatar, { fontSize: `${subordinate ? nodeAppearance.subagent.emojiSize : nodeAppearance.agent.emojiSize}px`, width: `${w}px`, height: `${h}px` });
-      item.avatar.textContent = agent ? agentIdentity(agent.id).emoji : "";
-      item.button.dataset.overviewRole = node.role ?? "";
-      item.button.dataset.overviewAvatar = item.avatar.textContent;
-      Object.assign(item.button.dataset, { overviewKind: node.kind, overviewId: node.id, overviewProject: node.projectId, overviewWorkspace: node.workspaceId ?? "", overviewStatus: agent?.state ?? (completedGroup && members.length && members.every(member => member.state === "finished") ? "finished" : ""), overviewAttention: agent?.attentionReason ?? "" });
+      text(item.avatar, agent ? agentIdentity(agent.id).emoji : "");
+      dataset(item.button, { overviewRole: node.role ?? "", overviewAvatar: item.avatar.textContent ?? "" });
+      dataset(item.button, { overviewKind: node.kind, overviewId: node.id, overviewProject: node.projectId, overviewWorkspace: node.workspaceId ?? "", overviewStatus: agent?.state ?? (completedGroup && members.length && members.every(member => member.state === "finished") ? "finished" : ""), overviewAttention: agent?.attentionReason ?? "" });
       if (completedGroup) {
-        item.button.dataset.overviewMembers = JSON.stringify(members.map(member => member.id));
-        item.button.setAttribute("aria-expanded", "false");
-      } else { delete item.button.dataset.overviewMembers; item.button.removeAttribute("aria-expanded"); }
-      item.label.textContent = completedGroup ? `${members.length} inactive` : node.label;
-      item.label.style.fontSize = `${node.kind === "project" ? graphMetrics.project.fontSize : node.kind === "workspace" ? graphMetrics.workspace.fontSize : completedGroup ? graphMetrics.completedGroup.fontSize : graphMetrics.agent.fontSize}px`;
-      item.label.style.lineHeight = node.kind === "project" ? "22px" : node.kind === "workspace" ? "20px" : completedGroup ? "18px" : "1.3";
-      item.label.style.webkitLineClamp = completedGroup ? "1" : "2";
+        dataset(item.button, { overviewMembers: JSON.stringify(members.map(member => member.id)) });
+        attribute(item.button, "aria-expanded", "false");
+      } else { attribute(item.button, "data-overview-members", null); attribute(item.button, "aria-expanded", null); }
+      text(item.label, completedGroup ? `${members.length} inactive` : node.label);
+      css(item.label, { fontSize: `${node.kind === "project" ? graphMetrics.project.fontSize : node.kind === "workspace" ? graphMetrics.workspace.fontSize : completedGroup ? graphMetrics.completedGroup.fontSize : graphMetrics.agent.fontSize}px` });
+      css(item.label, { lineHeight: node.kind === "project" ? "22px" : node.kind === "workspace" ? "20px" : completedGroup ? "18px" : "1.3" });
+      css(item.label, { webkitLineClamp: completedGroup ? "1" : "2" });
       if (node.labelBounds) css(item.label, { left: `${node.labelBounds.x - node.position.x + hitW / 2}px`, top: `${node.labelBounds.y - node.position.y + hitH / 2}px`, width: `${node.labelBounds.width}px`, height: `${node.labelBounds.height}px`, display: "-webkit-box" });
       else if (node.kind === "workspace") css(item.label, { left: `${(hitW - w) / 2 + 10}px`, top: `${(hitH - h) / 2 + 3}px`, width: `${w - 20}px`, height: "40px", display: "-webkit-box" });
       else if (completedGroup) css(item.label, { left: `${(hitW - w) / 2 + 6}px`, top: `${hitH / 2 - 9}px`, width: `${w - 12}px`, height: "18px", display: "-webkit-box" });
-      else item.label.style.display = "none";
-      item.glyph.textContent = node.kind === "project" ? node.label.slice(0, 1).toUpperCase() : "";
+      else css(item.label, { display: "none" });
+      const iconAvailable = node.kind === "project" && !!node.iconUrl && item.failedIcon !== node.iconUrl;
+      text(item.glyph, node.kind === "project" && !iconAvailable ? node.label.slice(0, 1).toUpperCase() : "");
       if (node.kind === "project" && node.iconUrl) {
         if (item.image.getAttribute("src") !== node.iconUrl) { item.failedIcon = undefined; item.image.src = node.iconUrl; }
         const available = item.failedIcon !== node.iconUrl;
         css(item.image, { width: `${w * 0.64}px`, height: `${h * 0.64}px`, display: available ? "block" : "none" });
-        if (available) item.glyph.textContent = "";
-      } else { item.failedIcon = undefined; item.image.removeAttribute("src"); item.image.style.display = "none"; }
+        if (available) text(item.glyph, "");
+      } else { item.failedIcon = undefined; attribute(item.image, "src", null); css(item.image, { display: "none" }); }
       const descendants = node.kind === "project" ? projectMembers.get(node.id) ?? []
         : node.kind === "workspace" ? workspaceMembers.get(node.id) ?? [] : completedGroup ? members : agent ? [agent] : [];
       const waiting = descendants.filter(child => !hasError(child) && needsInput(child)).length, errors = descendants.filter(hasError).length;
       const active = descendants.filter(child => (!child.freshness || child.freshness === "current") && child.state === "working" && !hasError(child) && !needsInput(child)).length;
       const unread = descendants.filter(child => child.attention && child.attentionReason === "finished" && child.state !== "working" && !hasError(child) && !needsInput(child)).length;
       const stale = agent?.freshness && agent.freshness !== "current";
-      item.badge.textContent = stale ? "◌" : errors ? "!" : waiting ? "◆" : node.kind === "project" && active ? String(active) : unread ? "•" : subordinate ? "↳" : active ? "•" : "";
-      item.badge.style.display = item.badge.textContent ? "block" : "none";
+      text(item.badge, stale ? "◌" : errors ? "!" : waiting ? "◆" : node.kind === "project" && active ? String(active) : unread ? "•" : subordinate ? "↳" : active ? "•" : "");
+      css(item.badge, { display: item.badge.textContent ? "block" : "none" });
       item.badgeTone = stale ? "muted" : errors ? "error" : waiting ? "waiting" : active ? "working" : "accent";
       const summary = agent ? statusLabel(agent) : completedGroup
         ? inactiveGroupSummary(inactiveStatusCounts(members))
         : `${active} working · ${waiting} waiting · ${errors} errors · ${unread} unread`;
       item.summary = summary;
       const delegations = this.delegationDescriptions.get(node.id)?.join(". ");
-      item.button.setAttribute("aria-label", completedGroup ? `${members.length} inactive subagents; ${summary}. Expand this group.` : `${node.label}, ${node.role ?? node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
+      attribute(item.button, "aria-label", completedGroup ? `${members.length} inactive subagents; ${summary}. Expand this group.` : `${node.label}, ${node.role ?? node.kind.replace("provider-", "")}, ${summary}. ${agent ? "Show details" : "Focus graph"}.${delegations ? ` ${delegations}.` : ""}`);
     }
     this.updateTheme(this.theme);
   }

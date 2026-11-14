@@ -7,14 +7,33 @@ A read-only view of project, workspace and agent activity, contributed as a sepa
 **Overview** page in Paseo. The existing workspace, chat and editor surfaces keep
 their normal behaviour.
 
-Every project on the included hosts has its own graph, including empty
-projects. **All hosts** and **All projects** are the defaults; use the toolbar
-selectors to narrow the view. Hosts with unavailable data remain listed with
-their connection state, and duplicate project names include their host. The project uses its current icon and name; its actual workspaces,
-managed agents and known provider-native subagents branch beneath it. Project
-membership is automatic and follows Paseo IDs, not directory nesting or a fixed
-selection. Ownership routes avoid unrelated nodes and labels. Cross-workspace
-delegation has a separate dashed route. Activity produces bounded heartbeats,
+**All hosts** and **All projects** are the defaults. The host selector chooses
+all configured hosts or one host. The project selector is a separate multi-select
+filter: search the complete catalogue, check projects, then **Apply** once to fit
+that set into the graph. **Cancel**, Escape and outside dismissal discard the
+draft. **Show all** includes every project, including ones discovered later;
+unchecking every project and applying shows **No projects selected**.
+
+Excluded projects remain available in the picker. Empty projects and each host's
+Unassigned area can be selected, and duplicate names include their host. Visible
+counts describe the selected set; Unassigned areas are counted separately.
+Offline projects retain their known state. An explicit selection that is no
+longer available stays identified in the picker until removed or Show all is
+chosen; it never silently becomes All projects.
+
+Applying a changed filter returns to the overview of that selected set. An agent
+selection is retained if still visible, and group expansion preferences survive.
+Focus is independent: clicking a displayed graph still brings it forward, and
+Back returns through workspace/project focus to the filtered overview. Changing
+the host selection resets the project filter to All projects for those hosts.
+These choices belong to the current client session, not the host-shared appearance
+settings.
+
+Each visible project uses its current icon and name; its actual workspaces,
+managed agents and known provider-native subagents branch beneath it. Membership
+follows Paseo IDs, not directory nesting or project names. Ownership routes avoid
+unrelated nodes and labels. Delegation has a separate dashed route, shown only
+when both endpoints are included. Activity produces bounded heartbeats,
 travelling pulses and short-lived text bubbles.
 
 Click a project or workspace to bring its graph or branch forward. Each agent's
@@ -27,7 +46,7 @@ Selecting an agent opens a compact floating details card without resizing the
 graph. Its node, ancestors and ownership path receive a blue selection treatment,
 separate from green working activity. Hover or keyboard focus previews the path;
 arrow keys move between parents, children and siblings. Escape or a background
-click closes details first; another returns to the full view. The graph has no
+click closes details first; another returns to the filtered overview. The graph has no
 wheel zoom or orbit controls; browser zoom remains available.
 
 **Fullscreen graph** expands the Overview container, including its header,
@@ -64,7 +83,7 @@ surface, including the floor/wall seam. Fresh activity admits a bounded feed
 to a grid junction behind its cloud; arrival briefly brightens the cloud. A few
 decorative streams also cross the room without a cloud destination. These are
 visual summaries and decoration, not byte counters. They never add activity
-scores or replay missed events. Quiet and empty projects remain visible.
+scores or replay missed events. Selected quiet and empty projects remain visible.
 
 The graph and room share one resolved depth projection. Recent owned activity
 brings a graph forward while quieter neighbours recede modestly. Packing reserves
@@ -125,6 +144,11 @@ chat history. It does not prompt, stop, archive, answer permissions, change
 metadata or clear attention. **Open chat** deliberately navigates into the normal
 Paseo chat screen on the agent's owning host, where that screen's usual behaviour applies.
 
+Project filtering changes rendering, not host observation. Hidden projects keep
+current roster, status and icon information in the complete catalogue. Their
+bubbles, pulses, clouds and feeds are removed, and excluded event IDs are consumed.
+Showing a project again displays current state without replaying retained events.
+
 Native subagent coverage is the daemon's known resident roster. An unloaded
 parent is labelled unavailable, rather than shown as an empty known roster.
 Overview never creates, resumes or loads a provider session to fill that gap.
@@ -134,6 +158,23 @@ and expansion. Resumption reconciles fresh passive snapshots without briefly
 removing branches or replaying old activity. Pending reads say **Updating**;
 failed reads retain **Last known** information. Confirmed empty/nonresident
 snapshots and removals still replace the prior state truthfully.
+
+## Update boundaries
+
+Event-only publication reuses normalized graph collections and the composed
+multi-host graph. Directory, roster, icon and freshness signals invalidate those
+caches. The renderer uses the complete catalogue for lifecycle reconciliation and
+the filtered view for geometry, counts and visible effects. Changed content and
+geometry are handled separately; unchanged labels, badges and ARIA text avoid
+DOM writes. A filter Apply requests one explicit fit while ordinary updates
+preserve stable placement.
+
+Cloud state uses a compact power-of-two texture, starting at 16 project rows and
+growing only when needed, up to the existing 4,096-row limit. Filtering does not
+repeatedly allocate and dispose it. This changes storage and upload size, not
+particle density, cloud motion or visual quality. Field updates still flush at
+most once before each render, and graph, labels and clouds share the same
+committed transform.
 
 ## Host requirements
 

@@ -26,6 +26,9 @@ interface Options {
 type AgentEntry = { agent: AgentRecord; syncSeq?: number };
 type ProjectChange = { kind: "upsert"; project: ProjectRecord; seq?: number; generation?: string }
   | { kind: "remove"; projectId: string; seq?: number; generation?: string };
+type GraphCollections = Pick<OverviewHostSnapshot, "projects" | "workspaces" | "nodes" | "edges">;
+interface NormalisedGraph { revision: number; freshness: ObservationFreshness; graph: GraphCollections }
+interface RetainedGraph { source: OverviewHostSnapshot; freshness: ObservationFreshness; graph: GraphCollections }
 
 /** A short stable fingerprint coalesces identical streaming updates without storing transcripts. */
 function fingerprint(text: string): string {
@@ -51,6 +54,9 @@ export function createOverviewStore(options: Options) {
   let events: OverviewEvent[] = [];
   let current: OverviewHostSnapshot = { hostId: options.hostId, projects: [], workspaces: [], nodes: [], edges: [], events: [], readiness: { ...readiness }, connection, revision };
   let lastComplete: OverviewHostSnapshot | undefined;
+  let graphRevision = 0;
+  let graphCache: NormalisedGraph | undefined;
+  let retainedCache: RetainedGraph | undefined;
   let cleanups: Array<() => void> = [];
   let queue: ReadQueue | undefined, rosters: RosterTracker | undefined, icons: ProjectIcons | undefined;
   let publishTimer: ReturnType<typeof setTimeout> | undefined, expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -97,6 +103,37 @@ export function createOverviewStore(options: Options) {
     return preview && { ...preview, title };
   }
 
+  /**
+   * Graph inputs are mutable upstream records. Every change site bumps this
+   * revision explicitly instead of relying on an array or record identity.
+   */
+  function invalidateGraph() { graphRevision++; }
+  function normalisedGraph(freshness: ObservationFreshness): GraphCollections {
+    if (graphCache?.revision === graphRevision && graphCache.freshness === freshness) return graphCache.graph;
+    const snapshot = normalise({
+      hostId: options.hostId, agents, workspaces, projects,
+      rosters: rosters!.states, icons: icons!.urls,
+      events: [], readiness, connection, freshness, revision: 0,
+    });
+    const graph = {
+      projects: snapshot.projects, workspaces: snapshot.workspaces,
+      nodes: snapshot.nodes, edges: snapshot.edges,
+    };
+    graphCache = { revision: graphRevision, freshness, graph };
+    return graph;
+  }
+  function retainedGraph(source: OverviewHostSnapshot, freshness: ObservationFreshness): GraphCollections {
+    if (retainedCache?.source === source && retainedCache.freshness === freshness) return retainedCache.graph;
+    const nodes = source.nodes.map(node => ({
+      ...node, freshness, ...(node.kind === "agent" ? { rosterFreshness: freshness } : {}),
+    }));
+    const graph = {
+      projects: source.projects, workspaces: source.workspaces, nodes, edges: source.edges,
+    };
+    retainedCache = { source, freshness, graph };
+    return graph;
+  }
+
   function publish() {
     if (disposed) return;
     if (publishTimer !== undefined) { clearTimeout(publishTimer); publishTimer = undefined; }
@@ -107,16 +144,13 @@ export function createOverviewStore(options: Options) {
     const complete = readiness.projects && readiness.workspaces && readiness.agents;
     const freshness: ObservationFreshness = !active() || Object.values(directoryFreshness).includes("stale")
       ? "stale" : complete ? "current" : "refreshing";
-    current = !complete && lastComplete ? {
-      ...lastComplete,
-      nodes: lastComplete.nodes.map(node => ({ ...node, freshness, ...(node.kind === "agent" ? { rosterFreshness: freshness } : {}) })),
+    const graph = !complete && lastComplete ? retainedGraph(lastComplete, freshness)
+      : rosters && icons ? normalisedGraph(freshness) : undefined;
+    current = graph ? {
+      hostId: options.hostId, ...graph,
       readiness: { ...readiness }, events: publishedEvents, connection, freshness, revision: ++revision,
-    } : rosters && icons ? normalise({
-      hostId: options.hostId, agents, workspaces, projects,
-      rosters: rosters.states, icons: icons.urls,
-      events: publishedEvents, readiness, connection, freshness, revision: ++revision,
-    }) : { ...current, readiness: { ...readiness }, events: publishedEvents, connection, freshness, revision: ++revision };
-    if (complete) lastComplete = current;
+    } : { ...current, readiness: { ...readiness }, events: publishedEvents, connection, freshness, revision: ++revision };
+    if (complete) { lastComplete = current; retainedCache = undefined; }
     options.onChange(current);
     if (publishedEvents.length && expiryTimer === undefined) expiryTimer = setTimeout(() => {
       expiryTimer = undefined; publish();
@@ -127,6 +161,8 @@ export function createOverviewStore(options: Options) {
     publishTimer = setTimeout(publish, 40);
   }
   function setDirectoryFreshness(key: keyof OverviewReadiness, state: ObservationFreshness) {
+    const currentReadiness = readiness[key];
+    if (directoryFreshness[key] !== state || currentReadiness !== (state === "current")) invalidateGraph();
     directoryFreshness[key] = state;
     readiness[key] = state === "current";
     schedule();
@@ -240,7 +276,9 @@ export function createOverviewStore(options: Options) {
   }
   function reconcileAgents(alive: () => boolean) {
     if (!alive()) return;
+    const before = agents.length;
     agents = agents.filter(agent => !agent.archivedAt && !agent.internal);
+    if (agents.length !== before) invalidateGraph();
     const present = new Set(agents.map(agent => agent.id));
     for (const [id, cleanup] of timelines) if (!present.has(id)) { cleanup(); timelines.delete(id); }
     rosters?.setParents(agents);
@@ -280,6 +318,7 @@ export function createOverviewStore(options: Options) {
     generation++;
     readiness = { projects: false, workspaces: false, agents: false };
     directoryFreshness = { projects: "stale", workspaces: "stale", agents: "stale" };
+    invalidateGraph();
     for (const cleanup of cleanups.splice(0)) cleanup();
     for (const cleanup of timelines.values()) cleanup();
     timelines.clear();
@@ -297,12 +336,13 @@ export function createOverviewStore(options: Options) {
     const run = ++generation;
     readiness = { projects: false, workspaces: false, agents: false };
     directoryFreshness = { projects: "refreshing", workspaces: "refreshing", agents: "refreshing" };
+    invalidateGraph();
     const alive = () => !disposed && visible && connection === "connected" && generation === run;
     const ownedQueue = new ReadQueue(4, options.gate); queue = ownedQueue;
     const failed = (error: unknown) => { if (alive()) report(error, "host"); };
     rosters ??= new RosterTracker({
       queue: ownedQueue, read: readRoster,
-      changed: () => { if (active()) { pruneAssistant(); schedule(); } }, failed: report,
+      changed: () => { invalidateGraph(); if (active()) { pruneAssistant(); schedule(); } }, failed: report,
       activity: (parentId: string, child: NativeRecord) => {
         if (!active()) return;
         const kind = child.status === "failed" ? "error" : child.status === "running" ? "activity" : "finished";
@@ -314,9 +354,10 @@ export function createOverviewStore(options: Options) {
         addEvent(nodeId, kind, title, `${parentId}:${child.id}:${child.updatedAt}:${child.status}`, preview);
       },
     });
-    icons ??= new ProjectIcons({ queue: ownedQueue, read: readIcon, changed: () => { if (active()) schedule(); }, failed: report });
+    icons ??= new ProjectIcons({ queue: ownedQueue, read: readIcon, changed: () => { invalidateGraph(); if (active()) schedule(); }, failed: report });
     rosters.suspend();
     icons.suspend();
+    invalidateGraph();
     const observeTask = async () => {
       const eventObservation = options.paseo.observeEvents(["project.update", "agent.provider_subagents.update"]);
       cleanups.push(() => { void eventObservation.release().catch(() => {}); });
@@ -334,6 +375,7 @@ export function createOverviewStore(options: Options) {
         projects = projects.filter(project => project.projectId !== id);
         if (change.kind === "upsert") projects.push(change.project);
         if (change.seq !== undefined) projectVersions.set(id, change.seq);
+        invalidateGraph();
         syncIcons();
         if (change.kind === "upsert" && change.project.projectIconRevision === undefined) icons?.invalidate(id);
       }
@@ -349,6 +391,7 @@ export function createOverviewStore(options: Options) {
           }
           projects = response.projects;
           projectGeneration = response.sync?.generation; projectHead = response.sync?.headSeq ?? 0;
+          invalidateGraph();
           projectVersions.clear();
           for (const project of response.projects) if (project.syncSeq !== undefined) projectVersions.set(project.projectId, project.syncSeq);
           for (const change of projectBuffer) applyProject(change);
@@ -412,6 +455,7 @@ export function createOverviewStore(options: Options) {
           changed: values => {
             agents = values.map(entry => entry.agent);
             readiness.agents = true;
+            invalidateGraph();
             reconcileAgents(alive);
           }, freshness: state => setDirectoryFreshness("agents", state), failed, alive,
         })),
@@ -431,7 +475,7 @@ export function createOverviewStore(options: Options) {
               generation: data.generation, seq: data.seq,
             } as DirectoryChange<WorkspaceRecord>;
           },
-          changed: values => { workspaces = [...values]; readiness.workspaces = true; syncIcons(); },
+          changed: values => { workspaces = [...values]; readiness.workspaces = true; invalidateGraph(); syncIcons(); },
           freshness: state => setDirectoryFreshness("workspaces", state), failed, alive,
         })),
       ]);

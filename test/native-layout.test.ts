@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { nativeGraphLayout, nativeInitialScrollX, nativeSummary, nativeUnassignedScope, type NativeGraphLayout } from "../client/native-layout";
+import { projectView } from "../client/project-filter";
+import { unassignedScopeId } from "../shared/presentation";
 import { StableLayout } from "../client/layout";
 import { rectsOverlap, segmentIntersectsRect, segmentsCross } from "../client/geometry";
 import type { OverviewHostState, OverviewModel, OverviewNode } from "../shared/model";
@@ -162,5 +164,24 @@ describe("native spatial ownership graph", () => {
     expect(summary.working).toBe(1);
     expect(summary.native).toBe(3);
     expect(summary.managed).toBe(4);
+  });
+  it("renders only filtered project roots, empty projects and per-host Unassigned", () => {
+    const model = fixture();
+    const onlyP = nativeGraphLayout(projectView(model, ["p"]).model, null, 360);
+    expect(onlyP.nodes.map(node => node.id)).toEqual(["p"]); valid(onlyP);
+    const onlyEmpty = nativeGraphLayout(projectView(model, ["empty"]).model, null, 360);
+    expect(onlyEmpty.nodes.map(node => node.id)).toEqual(["empty"]); valid(onlyEmpty);
+    const none = nativeGraphLayout(projectView(model, []).model, null, 360);
+    expect(none.nodes).toEqual([]);
+
+    model.workspaces = [...model.workspaces, { hostId, id: "loose", projectId: null, projectDisplayId: null,
+      name: "Loose", projectName: "Loose", agentIds: ["loose"] }];
+    model.nodes = [...model.nodes, agent("loose", "loose")];
+    const unassigned = projectView(model, [unassignedScopeId(hostId)]);
+    const roots = nativeGraphLayout(unassigned.model, null, 360);
+    expect(roots.nodes.map(node => node.id)).toEqual([unassignedScopeId(hostId)]);
+    const focused = nativeGraphLayout(unassigned.model, nativeUnassignedScope(hostId), 360);
+    expect(focused.nodes.map(node => node.id)).toEqual([unassignedScopeId(hostId), "loose"]);
+    valid(roots); valid(focused);
   });
 });

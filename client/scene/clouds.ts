@@ -13,6 +13,8 @@ const CLOUD_BIN_ROWS = CLOUD_GLOBAL_POINT_BUDGET / CLOUD_BIN_COLUMNS;
 const CLOUD_ACTIVITY_TIME_CONSTANT = 0.45;
 const CLOUD_ARRIVAL_TIME_CONSTANT = 0.8;
 const CLOUD_STATE_WIDTH = 4;
+const CLOUD_STATE_MIN_ROWS = 16;
+const CLOUD_STATE_MAX_ROWS = CLOUD_GLOBAL_POINT_BUDGET;
 
 export function cloudSeed(projectId: string): number {
   let hash = 2166136261;
@@ -136,8 +138,11 @@ export class ProjectParticleClouds {
   readonly points: THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
   readonly volume: THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
   readonly lines: THREE.LineSegments<THREE.BufferGeometry, THREE.ShaderMaterial>;
-  readonly stateData = new Float32Array(CLOUD_STATE_WIDTH * CLOUD_GLOBAL_POINT_BUDGET * 4);
-  readonly stateTexture: THREE.DataTexture;
+  private stateArray: Float32Array;
+  private stateTextureValue: THREE.DataTexture;
+  private stateRows = CLOUD_STATE_MIN_ROWS;
+  private stateReload = false;
+  private stateWriteDirty = false;
   private readonly states = new Map<string, CloudState>();
   private slots: CloudSlot[] = [];
   private aggregateBins: number[] = [];
@@ -156,17 +161,22 @@ export class ProjectParticleClouds {
   private readonly commonUniforms: Record<string, THREE.IUniform>;
   private disposed = false;
 
+  /** Current row storage; replaced only when the growth-only capacity increases. */
+  get stateData(): Float32Array {
+    return this.stateArray;
+  }
+
+  /** Current state texture; replaced together with stateData on capacity growth. */
+  get stateTexture(): THREE.DataTexture {
+    return this.stateTextureValue;
+  }
+
   constructor(scene: THREE.Scene, private readonly projection: OverviewProjection, private readonly surface: PerspectiveRoom, theme: OverviewTheme) {
-    this.stateTexture = new THREE.DataTexture(this.stateData, CLOUD_STATE_WIDTH, CLOUD_GLOBAL_POINT_BUDGET, THREE.RGBAFormat, THREE.FloatType);
-    this.stateTexture.name = "overview-cloud-project-state";
-    this.stateTexture.minFilter = this.stateTexture.magFilter = THREE.NearestFilter;
-    this.stateTexture.generateMipmaps = false;
-    this.stateTexture.flipY = false;
-    this.stateTexture.unpackAlignment = 1;
-    this.stateTexture.colorSpace = THREE.NoColorSpace;
+    this.stateArray = new Float32Array(CLOUD_STATE_WIDTH * CLOUD_STATE_MIN_ROWS * 4);
+    this.stateTextureValue = this.createStateTexture(this.stateArray, CLOUD_STATE_MIN_ROWS);
     this.commonUniforms = {
       uPhase: { value: 0 }, uPixelRatio: { value: 1 }, uViewportHeight: { value: 1 },
-      uCloudStates: { value: this.stateTexture }, uCloudStateSize: { value: new THREE.Vector2(CLOUD_STATE_WIDTH, CLOUD_GLOBAL_POINT_BUDGET) },
+      uCloudStates: { value: this.stateTextureValue }, uCloudStateSize: { value: new THREE.Vector2(CLOUD_STATE_WIDTH, CLOUD_STATE_MIN_ROWS) },
       uInk: { value: new THREE.Color() }, uEnergy: { value: new THREE.Color() },
       uShade: { value: new THREE.Color() }, uRim: { value: new THREE.Color() }, uOpacity: { value: 1 },
     };
@@ -186,6 +196,43 @@ export class ProjectParticleClouds {
     this.volume.renderOrder = -25; this.lines.renderOrder = -20; this.points.renderOrder = -10;
     scene.add(this.volume, this.lines, this.points);
     this.updateTheme(theme);
+  }
+
+  private createStateTexture(data: Float32Array, rows: number): THREE.DataTexture {
+    const texture = new THREE.DataTexture(data, CLOUD_STATE_WIDTH, rows, THREE.RGBAFormat, THREE.FloatType);
+    texture.name = "overview-cloud-project-state";
+    texture.minFilter = texture.magFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.flipY = false;
+    texture.unpackAlignment = 1;
+    texture.colorSpace = THREE.NoColorSpace;
+    return texture;
+  }
+
+  /**
+   * Grow-only power-of-two state rows for active project slots or aggregate
+   * bins. Filtering projects out keeps the allocation so toggles never thrash
+   * the texture; unused rows are never sampled.
+   */
+  private ensureStateCapacity(rows: number): void {
+    if (rows <= this.stateRows) return;
+    let capacity = this.stateRows;
+    while (capacity < rows && capacity < CLOUD_STATE_MAX_ROWS) capacity *= 2;
+    capacity = Math.min(CLOUD_STATE_MAX_ROWS, capacity);
+    if (capacity <= this.stateRows) return;
+    const previous = this.stateTextureValue;
+    this.stateRows = capacity;
+    this.stateArray = new Float32Array(CLOUD_STATE_WIDTH * capacity * 4);
+    const texture = this.createStateTexture(this.stateArray, capacity);
+    this.stateTextureValue = texture;
+    for (const material of [this.points.material, this.volume.material, this.lines.material]) {
+      material.uniforms.uCloudStates!.value = texture;
+      (material.uniforms.uCloudStateSize!.value as THREE.Vector2).set(CLOUD_STATE_WIDTH, capacity);
+    }
+    previous.dispose();
+    // The replacement array holds none of the active rows yet: refill them on
+    // the flush that follows even when the values themselves did not change.
+    this.stateReload = true;
   }
 
   private material(name: string, fragmentShader: string, volume: boolean): THREE.ShaderMaterial {
@@ -276,6 +323,7 @@ export class ProjectParticleClouds {
   private rebuildLayout(count: number): void {
     const ids = [...this.states.keys()].sort();
     this.slots = ids.map((id, index) => ({ state: this.states.get(id)!, start: index * count, count }));
+    this.ensureStateCapacity(this.slots.length);
     this.replaceGeometry(this.slots.length * count);
     const lineIndices: number[] = [];
     this.slots.forEach((slot, stateIndex) => {
@@ -296,6 +344,7 @@ export class ProjectParticleClouds {
     const bins = [...new Set([...this.states.values()].map(state => this.screenBin(state.project)))].sort((a, b) => a - b);
     const key = `bins:${bins.join(",")}`;
     this.aggregateBins = bins;
+    this.ensureStateCapacity(bins.length);
     if (key === this.layoutKey) return;
     this.layoutKey = key;
     this.replaceGeometry(bins.length);
@@ -395,9 +444,10 @@ export class ProjectParticleClouds {
       changed = this.surface.updateProjects(fieldProjects);
       this.fieldDirty = false;
     }
-    if (this.stateDirty) {
+    if (this.stateDirty || this.stateReload) {
       this.writeStateTexture();
       this.stateDirty = false;
+      this.stateReload = false;
     }
     return changed;
   }
@@ -440,8 +490,8 @@ export class ProjectParticleClouds {
     let dirty = false;
     const base = index * CLOUD_STATE_WIDTH * 4;
     const values = [centre.x, centre.y, centre.z, phase, radius.x, radius.y, radius.z, energy, alpha, worldPerPixel, 1, 0];
-    for (let offset = 0; offset < values.length; offset++) dirty = store(this.stateData, base + offset, values[offset]!) || dirty;
-    if (dirty) this.stateTexture.needsUpdate = true;
+    for (let offset = 0; offset < values.length; offset++) dirty = store(this.stateArray, base + offset, values[offset]!) || dirty;
+    if (dirty) this.stateWriteDirty = true;
   }
 
   private updateAggregateState(): void {
@@ -470,18 +520,24 @@ export class ProjectParticleClouds {
   private writeStateTexture(): void {
     // The grid follows displayed eased/focused energy, never a newly arriving
     // raw target. Pause and offline therefore freeze deformation naturally.
-    if (this.aggregated) { this.updateAggregateState(); return; }
-    this.slots.forEach((slot, index) => {
-      const { state } = slot, project = state.project;
-      const worldPerPixel = this.projection.worldUnitsPerPixel(project.viewDepth);
-      const energy = this.energyFor(state);
-      const energyScale = 0.94 + energy * 0.18;
-      const radiusX = Math.max(52, Math.abs(project.screenBounds.width) * 0.56) * worldPerPixel * energyScale;
-      const radiusY = Math.max(46, Math.abs(project.screenBounds.height) * 0.56) * worldPerPixel * energyScale;
-      const centre = this.surface.projectPoint(project.screenCentre, project.viewDepth);
-      const alpha = bounded(project.visibility) * 0.46 * (0.24 + energy * 0.76);
-      this.writeState(index, centre, state.phase, { x: radiusX, y: radiusY, z: (radiusX + radiusY) * 0.38 }, energy, alpha, worldPerPixel);
-    });
+    this.stateWriteDirty = false;
+    if (this.aggregated) {
+      this.updateAggregateState();
+    } else {
+      this.slots.forEach((slot, index) => {
+        const { state } = slot, project = state.project;
+        const worldPerPixel = this.projection.worldUnitsPerPixel(project.viewDepth);
+        const energy = this.energyFor(state);
+        const energyScale = 0.94 + energy * 0.18;
+        const radiusX = Math.max(52, Math.abs(project.screenBounds.width) * 0.56) * worldPerPixel * energyScale;
+        const radiusY = Math.max(46, Math.abs(project.screenBounds.height) * 0.56) * worldPerPixel * energyScale;
+        const centre = this.surface.projectPoint(project.screenCentre, project.viewDepth);
+        const alpha = bounded(project.visibility) * 0.46 * (0.24 + energy * 0.76);
+        this.writeState(index, centre, state.phase, { x: radiusX, y: radiusY, z: (radiusX + radiusY) * 0.38 }, energy, alpha, worldPerPixel);
+      });
+    }
+    // One version bump per flush keeps the upload atomic instead of per slot.
+    if (this.stateWriteDirty) this.stateTextureValue.needsUpdate = true;
   }
 
   resize(pixelRatio: number): void {
@@ -556,7 +612,7 @@ export class ProjectParticleClouds {
     this.points.removeFromParent(); this.volume.removeFromParent(); this.lines.removeFromParent();
     this.pointGeometry.dispose(); this.lineGeometry.dispose();
     this.points.material.dispose(); this.volume.material.dispose(); this.lines.material.dispose();
-    this.stateTexture.dispose();
+    this.stateTextureValue.dispose();
     this.states.clear(); this.slots = []; this.aggregateBins = [];
   }
 }

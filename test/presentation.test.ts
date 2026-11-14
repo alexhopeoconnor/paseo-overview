@@ -54,7 +54,7 @@ describe("shared Overview presentation", () => {
     const restored = recallPresentation("session-test");
     expect(restored).toEqual(state);
     expect(restored.groups).not.toBe(state.groups);
-    expect(Object.keys(restored).sort()).toEqual(["groups", "hostFilter", "motion", "scope", "selectedId"]);
+    expect(Object.keys(restored).sort()).toEqual(["groups", "hostFilter", "motion", "projectFilter", "scope", "selectedId"]);
     expect(recallPresentation("unrelated-test").groups.size).toBe(0);
   });
 
@@ -649,6 +649,129 @@ describe("project particle clouds", () => {
     expect(volume.geometry).toBe(points.geometry);
     clouds.dispose();
     expect(points.parent).toBeNull(); expect(volume.parent).toBeNull(); expect(lines.parent).toBeNull();
+  });
+
+  it("sizes state rows for active projects with a 16-row minimum", () => {
+    const { clouds } = setup([spatialProject("project")]);
+    expect(clouds.stateTexture.image.width).toBe(4);
+    expect(clouds.stateTexture.image.height).toBe(16);
+    expect(clouds.stateData.length).toBe(16 * 16);
+    expect(clouds.stateData.byteLength).toBe(16 * 16 * 4);
+    expect(clouds.stateTexture.image.data!.byteLength).toBe(clouds.stateData.byteLength);
+    for (const material of [clouds.points.material, clouds.volume.material, clouds.lines.material]) {
+      expect(material.uniforms.uCloudStates!.value).toBe(clouds.stateTexture);
+      expect((material.uniforms.uCloudStateSize!.value as THREE.Vector2).x).toBe(4);
+      expect((material.uniforms.uCloudStateSize!.value as THREE.Vector2).y).toBe(16);
+    }
+    clouds.dispose();
+  });
+
+  it("grows state capacity in powers of two while preserving rows, uniforms and disposal", () => {
+    const initial = Array.from({ length: 3 }, (_, index) =>
+      spatialProject(`project-${String(index).padStart(2, "0")}`, { energy: index === 2 ? 1 : 0.5 }));
+    const { clouds } = setup(initial);
+    clouds.advance(1, true, 1);
+    clouds.flushState();
+    const rowsBefore = [0, 1, 2].map(index => [...cloudState(clouds, index)]);
+    const previousTexture = clouds.stateTexture, previousData = clouds.stateData;
+    const dispose = vi.spyOn(previousTexture, "dispose");
+    const grown = [...initial, ...Array.from({ length: 14 }, (_, index) =>
+      spatialProject(`project-${String(index + 3).padStart(2, "0")}`))];
+    expect(grown.length).toBe(17);
+    clouds.updateProjects(grown);
+    clouds.flushState();
+    expect(previousTexture.dispose).toHaveBeenCalledOnce();
+    expect(clouds.stateTexture).not.toBe(previousTexture);
+    expect(clouds.stateData).not.toBe(previousData);
+    expect(clouds.stateTexture.image.height).toBe(32);
+    expect(clouds.stateData.length).toBe(32 * 16);
+    expect(clouds.stateData.byteLength).toBe(32 * 16 * 4);
+    expect(clouds.stateTexture.image.data!.byteLength).toBe(clouds.stateData.byteLength);
+    [0, 1, 2].forEach(index => expect([...cloudState(clouds, index)]).toEqual(rowsBefore[index]!));
+    for (const material of [clouds.points.material, clouds.volume.material, clouds.lines.material]) {
+      expect(material.uniforms.uCloudStates!.value).toBe(clouds.stateTexture);
+      expect((material.uniforms.uCloudStateSize!.value as THREE.Vector2).y).toBe(32);
+    }
+    clouds.dispose();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps grown state capacity when projects are filtered out", () => {
+    const projects = Array.from({ length: 40 }, (_, index) =>
+      spatialProject(`project-${String(index).padStart(2, "0")}`, { energy: index === 0 ? 1 : 0 }));
+    const { clouds } = setup(projects);
+    const texture = clouds.stateTexture, data = clouds.stateData, version = texture.version;
+    expect(texture.image.height).toBe(64);
+    clouds.updateProjects(projects.slice(0, 2));
+    clouds.flushState();
+    expect(clouds.stateTexture).toBe(texture);
+    expect(clouds.stateData).toBe(data);
+    expect(texture.image.height).toBe(64);
+    expect(texture.version).toBe(version);
+    clouds.updateProjects([]);
+    clouds.flushState();
+    expect(clouds.stateTexture).toBe(texture);
+    expect(clouds.stateData).toBe(data);
+    expect(texture.version).toBe(version);
+    clouds.updateProjects(projects);
+    clouds.flushState();
+    expect(clouds.stateTexture).toBe(texture);
+    expect(clouds.stateData).toBe(data);
+    clouds.dispose();
+  });
+
+  it("bumps the state texture version once per changed flush and never for an unchanged paused state", () => {
+    const projects = Array.from({ length: 4 }, (_, index) => spatialProject(`project-${index}`, { energy: 1 }));
+    const { clouds } = setup(projects);
+    const initialVersion = clouds.stateTexture.version, data = clouds.stateData;
+    clouds.advance(0.5, true, 1);
+    clouds.flushState();
+    expect(clouds.stateTexture.version).toBe(initialVersion + 1);
+    const changedVersion = clouds.stateTexture.version;
+    clouds.flushState();
+    expect(clouds.stateTexture.version).toBe(changedVersion);
+    clouds.updateProjects(projects.map(project => ({ ...project, energy: 0 })));
+    clouds.advance(10, false, 1);
+    clouds.flushState();
+    expect(clouds.stateTexture.version).toBe(changedVersion);
+    expect(clouds.stateData).toBe(data);
+    clouds.dispose();
+  });
+
+  it("aggregates more than 4096 projects into at most 4096 rows without dropping contributors", () => {
+    const count = CLOUD_GLOBAL_POINT_BUDGET + 1;
+    const columns = 64, rows = CLOUD_GLOBAL_POINT_BUDGET / columns;
+    const projects = Array.from({ length: count }, (_, index) => spatialProject(`overflow-${index}`, {
+      screenCentre: { x: (index % columns) * 10 + 5, y: (Math.floor(index / columns) % rows) * 6.875 + 3 },
+      energy: 1,
+    }));
+    const { clouds } = setup(projects);
+    clouds.advance(0.5, true, 1);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count).toBe(CLOUD_GLOBAL_POINT_BUDGET);
+    expect(clouds.stateTexture.image.height).toBe(CLOUD_GLOBAL_POINT_BUDGET);
+    expect(clouds.stateData.length).toBe(CLOUD_GLOBAL_POINT_BUDGET * 16);
+    const aggregateEnergy = cloudState(clouds, 0)[7]!;
+    expect(aggregateEnergy).toBeGreaterThan(0);
+    for (let index = 0; index < CLOUD_GLOBAL_POINT_BUDGET; index++) expect(cloudState(clouds, index)[7]).toBe(aggregateEnergy);
+    const texture = clouds.stateTexture, data = clouds.stateData;
+    const individual = projects.slice(0, 1000);
+    clouds.updateProjects(individual);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count)
+      .toBe(individual.length * cloudPointsPerProject(individual.length));
+    expect(clouds.stateTexture).toBe(texture);
+    expect(clouds.stateData).toBe(data);
+    clouds.updateProjects(projects);
+    clouds.flushState();
+    expect(clouds.points.geometry.getAttribute("position").count).toBe(CLOUD_GLOBAL_POINT_BUDGET);
+    expect(clouds.stateTexture).toBe(texture);
+    expect(cloudState(clouds, 0)[7]).toBeGreaterThan(0);
+    clouds.updateProjects(projects.slice(0, 10));
+    clouds.flushState();
+    expect(clouds.stateTexture).toBe(texture);
+    expect(texture.image.height).toBe(CLOUD_GLOBAL_POINT_BUDGET);
+    clouds.dispose();
   });
 });
 

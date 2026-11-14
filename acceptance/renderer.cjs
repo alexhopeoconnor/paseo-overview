@@ -352,8 +352,53 @@ function checkRepresentation(nodes) {
     await page.keyboard.press('Escape');
     await page.evaluate(() => window.overviewTest.loadNative());
     await settle(page);
+    // Filtering is independent of focus and the authoritative catalogue.
+    await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.focus(null); });
+    await settle(page);
+    await node(page, 'n0').click();
+    await page.evaluate(() => { window.overviewTest.resetTelemetry(); window.overviewTest.filter(['p0', 'p6']); });
+    await settle(page);
+    const filtered = await page.evaluate(() => window.overviewTest.filterEvidence());
+    assert.deepEqual(filtered.visible, ['p0', 'p6']);
+    assert.equal(filtered.catalog.length, 7, 'Excluded projects remain in the picker catalogue');
+    assert.deepEqual([...filtered.geometry].sort(), ['p0', 'p6']);
+    assert.deepEqual([...filtered.clouds].sort(), ['p0', 'p6']);
+    assert.equal(await page.locator('[data-overview-kind="project"]').count(), 2);
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'n0', 'Apply retains a still-visible selection');
+    assert.equal((await page.evaluate(() => window.overviewTest.telemetry())).layoutBuilds, 1, 'One Apply causes one refit');
+    await page.screenshot({ path: `${output}/desktop-filtered.png` });
+    await node(page, 'p0').click();
+    await settle(page);
+    await page.evaluate(() => window.overviewTest.filter(['p6']));
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.overviewTest.state.focused), null);
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), null);
+    assert.equal(await node(page, 'p0').count(), 0);
+    const feedsBeforeHidden = await page.evaluate(() => window.overviewTest.feedEvidence());
+    await page.evaluate(() => { window.overviewTest.motion(true); window.overviewTest.activity(); });
+    await settle(page);
+    assert.equal((await page.evaluate(() => window.overviewTest.feedEvidence())).admitted, feedsBeforeHidden.admitted, 'Hidden events admit no feeds');
+    assert.equal(await page.locator('[data-overview-bubble]').count(), 0);
+    await page.evaluate(() => window.overviewTest.filter(null));
+    await settle(page);
+    assert.equal((await page.evaluate(() => window.overviewTest.feedEvidence())).admitted, feedsBeforeHidden.admitted, 'Reveal does not replay the retained ring');
+    assert.equal(await page.locator('[data-overview-bubble]').count(), 0);
+    await page.waitForTimeout(1100);
+    await page.evaluate(() => window.overviewTest.activity());
+    await settle(page);
+    assert.ok((await page.evaluate(() => window.overviewTest.feedEvidence())).admitted > feedsBeforeHidden.admitted, 'New visible events still arrive');
+    await page.evaluate(() => window.overviewTest.filter([]));
+    await settle(page);
+    assert.equal(await page.locator('[data-overview-id]').count(), 0, 'Explicit none removes every node/hit target');
+    const emptyView = await page.evaluate(() => window.overviewTest.filterEvidence());
+    assert.equal(emptyView.geometry.length, 0); assert.equal(emptyView.clouds.length, 0);
+    assert.equal(emptyView.catalog.length, 7);
+    await page.evaluate(() => { window.overviewTest.filter(null); window.overviewTest.motion(false); });
+    await settle(page);
     await page.evaluate(() => window.overviewTest.installShaderObserver());
     assert.equal(await page.evaluate(() => window.overviewTest.injectAmbientShaderFailure()), true, 'Acceptance can inject an ambient-only shader failure');
+    await page.evaluate(() => window.overviewTest.refresh());
+    await settle(page);
     await page.waitForTimeout(150);
     assert.equal(await page.evaluate(() => window.overviewTest.gridPresent()), false, 'Failed grid material is removed independently');
     assert.ok(await page.locator('[data-overview-kind="project"]').count() > 0, 'Foreground graph remains usable after a grid shader failure');
@@ -373,8 +418,8 @@ function checkRepresentation(nodes) {
     }
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, feedArrival, illuminationGain, resources, reconnectClock, ambientFrames: ambientAfter.frames, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
+    await fs.writeFile(`${output}/renderer-results.json`, JSON.stringify({ ok: true, renderer: 'Actual Three.js renderer, Chromium SwiftShader; not hardware performance evidence', full, selected, bubbleText, depthBefore, depthAfter, ambientEvidence, renderedMovement, lightGrid, darkGrid, feedArrival, illuminationGain, resources, reconnectClock, filtered, ambientFrames: ambientAfter.frames, errors }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'cold load, ownership roles, stable avatars, grouping, selection, visibility, icons, no wheel zoom, bounded bubbles, activity depth, stable centres, preserved pulses, frozen inspection, project filtering and one refit, hidden effects removed without replay, explicit empty filter, visible grid structure and motion, idle/paused/hidden/disconnected scheduler, themes, shader fallback, cleanup' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/renderer-failure.png` }).catch(() => {});

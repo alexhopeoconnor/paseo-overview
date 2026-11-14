@@ -2,11 +2,20 @@
 
 See where agents are working across your hosts, projects and workspaces.
 
-Use the **All hosts** and **All projects** selectors to narrow the view. Offline
-hosts remain listed and retain their last known graph; other hosts keep updating.
-The toolbar menus open over the graph without reducing its available space.
+Choose **All hosts** or one host, then use **Projects** to filter the graph.
+Search and check multiple projects, then **Apply** to fit the selected set.
+**Cancel**, Escape or dismissing the menu leaves the graph unchanged. **Show all**
+includes projects discovered later. Apply with nothing checked to show no projects.
+The menus open over the graph without reducing its available space.
 
-Every live project is a root with its current icon, including empty projects.
+Hidden projects stay in the picker and keep receiving status updates; showing
+them again does not replay old bubbles or pulses. Empty projects and per-host
+Unassigned areas can be selected. Duplicate names include their host. Offline
+projects retain their last known state, and unavailable selections stay explicit
+until removed. Changing hosts resets the project filter to All projects.
+Filter and expansion choices stay in this client's plugin session.
+
+Every selected project is a root with its current icon, including empty projects.
 Actual workspaces, agents and available subagents branch beneath it. Dashed
 connections show delegation without changing ownership.
 
@@ -14,7 +23,7 @@ Click a project or workspace to focus its graph. Agents use stable animal emoji
 nodes: rounded tiles for workspace-level agents and smaller diamond backings for
 subagents. Select one for a floating details card and a highlighted ownership
 path. **Open chat** opens the normal Paseo chat on that agent's owning host. Escape or a
-background click closes details first, then returns to the full view. Arrow keys
+background click closes details first, then returns to the filtered overview. Arrow keys
 navigate relationships; browser zoom works and the graph has no wheel zoom.
 
 **Fullscreen graph** fills the display with Overview and its controls. Escape
@@ -55,7 +64,7 @@ readable previews continue. Reduced motion uses a static background. Hidden tabs
 and a view with no connected hosts stop background animation. If background rendering fails, it is
 removed independently and the graph remains usable.
 
-Phones start with collapsed project roots. Tap into projects and workspaces,
+Phones use the same checkbox filter and start with the selected project roots. Tap into projects and workspaces,
 use Back to return, and tap an agent for details. The header follows the current
 scope. Animal identities, parent highlighting and group controls match desktop;
 the phone graph omits speech bubbles.

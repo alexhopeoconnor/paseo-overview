@@ -54,12 +54,13 @@ const percentile = (values, fraction) => {
       const times = telemetry.frameTimes;
       const intervals = times.slice(1).map((time, index) => time - times[index]);
       return { name, seconds: elapsed, frames: telemetry.frames, framesPerSecond: telemetry.frames / elapsed,
-        frameIntervalMs: { median: percentile(intervals, 0.5), p95: percentile(intervals, 0.95), maximum: Math.max(0, ...intervals) },
+        frameIntervalMs: { median: percentile(intervals, 0.5), p95: percentile(intervals, 0.95), p99: percentile(intervals, 0.99), over33: intervals.filter(value => value > 33).length, over50: intervals.filter(value => value > 50).length, maximum: Math.max(0, ...intervals) },
         mainThreadMsPerSecond: (after.TaskDuration - before.TaskDuration) * 1000 / elapsed,
         scriptMsPerSecond: (after.ScriptDuration - before.ScriptDuration) * 1000 / elapsed,
         mainThreadMsPerFrame: (after.TaskDuration - before.TaskDuration) * 1000 / Math.max(1, telemetry.frames),
         styleMsPerSecond: (after.RecalcStyleDuration - before.RecalcStyleDuration) * 1000 / elapsed,
         layoutMsPerSecond: (after.LayoutDuration - before.LayoutDuration) * 1000 / elapsed,
+        cloudTextureUploads: telemetry.cloudTextureUploads, cloudTextureUploadBytes: telemetry.cloudTextureUploadBytes, overlayContentWrites: telemetry.overlayContentWrites,
         fieldBuilds: telemetry.fieldBuilds, fieldUploads: telemetry.fieldUploads,
         maximumFieldBuildsPerFrame: telemetry.maximumFieldBuildsPerFrame,
         transformCommits: telemetry.transformCommits, routeSyncs: telemetry.routeSyncs, domAttributes: telemetry.domAttributes,
@@ -105,6 +106,12 @@ const percentile = (values, fraction) => {
     await page.evaluate(() => window.overviewTest.dark());
     await page.waitForTimeout(1000);
     await page.screenshot({ path: `${output}/hardware-dark.png` });
+    // Report filtering savings separately from the matched unfiltered runs.
+    await page.evaluate(() => { window.overviewTest.filter(['p0', 'p6']); window.overviewTest.theme(false); });
+    await page.waitForTimeout(1500);
+    await page.evaluate(() => { window.overviewWorkload = setInterval(() => window.overviewTest.activity(), 1100); });
+    results.push(await sample('filtered-streaming', 4000));
+    await page.evaluate(() => { clearInterval(window.overviewWorkload); delete window.overviewWorkload; window.overviewTest.filter(null); });
     await page.evaluate(() => { window.overviewTest.depthFixture(); window.overviewTest.motion(true); });
     await page.waitForTimeout(1500);
     results.push(await sample('quiet-clouds'));
@@ -121,8 +128,10 @@ const percentile = (values, fraction) => {
       'Sparse transit in an empty online room stays on the ambient cadence');
     assert.equal(results.find(item => item.name === 'hidden').frames, 0);
     assert.ok(results.every(item => item.maximumFieldBuildsPerFrame <= 1), 'Background changes flush the field at most once per render');
-    assert.ok(results.filter(item => item.name !== 'active-streaming').every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
+    assert.ok(results.filter(item => !item.name.endsWith('streaming')).every(item => item.layoutBuilds === 0), 'Steady animation does not rebuild layout');
     assert.deepEqual(errors, []);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), [], 'Renderer reports no internal failure');
+    assert.ok(results.find(item => item.name === 'quiet-clouds').frames > 0, 'Online quiet clouds still animate');
     await fs.writeFile(`${output}/performance-results.json`, JSON.stringify({ gpu, viewport: { width: 1516, height: 1100 },
       comparison: 'Matched foreground with background on/off. Off also removes decorative scheduling; CPU metrics include browser work.',
       pointerSelectionMs: selections, results, errors }, null, 2));

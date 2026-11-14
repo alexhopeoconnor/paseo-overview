@@ -15,6 +15,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   streams have no cloud destination and never create observed activity.
   Two-host fixtures verify duplicate local IDs, isolated disconnect cleanup,
   retained selection and unchanged overlay geometry during heartbeat-only frames.
+  Project-filter checks distinguish the complete catalogue from the rendered
+  subset, verify one explicit refit, empty selection, retained eligible details,
+  hidden DOM/cloud removal and no event replay on reveal.
 - `performance.cjs` connects to an explicitly supplied isolated hardware-browser
   CDP endpoint. It records frame intervals, browser main-thread/script work,
   resource counts and automated pointer-selection timing. It rejects software
@@ -22,7 +25,13 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   performance guarantees. Matching no-event on/off runs remain comparable; a
   separate streaming scenario exercises event admission and bubbles. Counters
   distinguish layout, overlay positioning, transient placement, field rebuilds
-  and uploads, committed project transforms and route synchronization. Compare
+  and uploads, committed project transforms and route synchronization. Cloud
+  texture upload bytes and content mutations are counted separately. Frame
+  intervals include p95/p99, the longest interval, and counts above 33/50 ms;
+  the intentional 15 FPS background cadence is reported separately. The fixture
+  drives renderer publication directly, so store normalization/composition reuse
+  is established by focused store/protocol tests rather than invented renderer
+  counters. Filtered-subset measurements are separate from unfiltered comparisons. Compare
   both main-thread work per second and per rendered frame using the same fixture,
   viewport, pixel ratio, activity schedule and settings. Record a source baseline
   before edits; do not compare synthetic fixture totals directly with live-roster
@@ -36,7 +45,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
 - `native-preview.cjs` renders the actual native graph and shared header through
   React Native Web at a phone viewport, with touch and a device pixel ratio of 2.
   It checks scope/count agreement, avatars, groups, 44-pixel collapse controls and
-  initial primary-agent framing.
+  initial primary-agent framing. The draft project picker checks checkbox state,
+  Apply/Cancel, Show all, explicit empty selection and Back to the filtered root.
+  A paired-phone check covers those interactions plus expansion and Open chat.
   The native-only fixture includes a mixed finished/idle/closed/canceled group;
   both native runners check its accessibility summary and the expanded visible
   outcomes and member selection.
@@ -53,7 +64,7 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
 - `packaged.cjs` exercises the selected plugin directory on an exact host
   package, including screenshot-based room structure, theme and
   pause checks, host-persisted appearance controls, additive streaming previews, actual element fullscreen,
-  preserved selection/expansion, explicit exit and navigation cleanup. Fullscreen
+  preserved selection/expansion, project multi-selection and filtering, explicit exit and navigation cleanup. Fullscreen
   tests use a real user click and inspect `document.fullscreenElement`; controller
   mocks alone are not fullscreen acceptance.
   Its `multi-host.cjs` helper starts a second isolated daemon from that same
@@ -81,17 +92,17 @@ hardware frame-time, draw-call and pointer-response conclusions.
 Use the existing pinned build environment. Set `OVERVIEW_FORK_CHECKOUT` to its
 prepared Paseo source with installed build dependencies, `OVERVIEW_SOURCE` to this
 checkout, and `OVERVIEW_BROWSER_CACHE` to its Playwright cache. Evidence goes in
-`/tmp/overview-091` in this example:
+`/tmp/overview-010` in this example:
 
 ```bash
-mkdir -p /tmp/overview-091
+mkdir -p /tmp/overview-010
 overview_check_image=$(jq -r .checkBuilderImage "$OVERVIEW_FORK_CHECKOUT/fork-release.json")
 
 docker run --rm --init --user 1000:1000 --network none --shm-size 2g \
   --mount "type=bind,src=$OVERVIEW_FORK_CHECKOUT,dst=/fork,readonly" \
   --mount "type=bind,src=$OVERVIEW_BROWSER_CACHE,dst=/cache/playwright,readonly" \
   --mount "type=bind,src=$OVERVIEW_SOURCE,dst=/plugin,readonly" \
-  --mount type=bind,src=/tmp/overview-091,dst=/out \
+  --mount type=bind,src=/tmp/overview-010,dst=/out \
   --mount type=bind,src=/usr/share/fonts,dst=/usr/share/fonts,readonly \
   --env XDG_CACHE_HOME=/tmp/cache \
   "$overview_check_image" \

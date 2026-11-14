@@ -1,5 +1,5 @@
-import type { OverviewHostSnapshot, OverviewHostSummary, OverviewModel } from "../shared/model";
-import { composeHostSnapshots, emptyOverviewModel } from "../shared/hosts";
+import type { ObservationFreshness, OverviewHostSnapshot, OverviewHostSummary, OverviewModel } from "../shared/model";
+import { createHostSnapshotComposer, emptyOverviewModel } from "../shared/hosts";
 import { createOverviewStore } from "./store";
 import { ReadGate, errorText, type OverviewApi } from "./transport";
 
@@ -7,7 +7,11 @@ export interface OverviewHostsOptions {
   /** Borrow the configured host's existing client; this coordinator never opens a socket. */
   acquire(hostId: string): OverviewApi;
   observeActivity: boolean;
-  onChange(model: OverviewModel): void;
+  /**
+   * The second argument is the host filter that composed this exact model.
+   * Consumers must use it as an application stamp, not infer from host count.
+   */
+  onChange(model: OverviewModel, hostFilter: string | null): void;
   onError?(hostId: string, message: string): void;
   /** Optional shared read gate, mainly for tests that combine coordinators. */
   gate?: ReadGate;
@@ -25,6 +29,12 @@ interface HostEntry {
   error?: string;
   acquireError?: string;
   started: boolean;
+  /** Retained node records depend only on the coherent graph and its freshness. */
+  displayNodes?: {
+    source: OverviewHostSnapshot["nodes"];
+    freshness: ObservationFreshness;
+    value: OverviewHostSnapshot["nodes"];
+  };
 }
 
 function authoritative(snapshot: OverviewHostSnapshot): boolean {
@@ -40,15 +50,20 @@ function displaySnapshot(entry: HostEntry): OverviewHostSnapshot | undefined {
   if (!entry.latest) return entry.snapshot;
   if (!entry.snapshot || authoritative(entry.latest)) return entry.latest;
   const freshness = entry.latest.freshness ?? "stale";
+  const cached = entry.displayNodes;
+  const nodes = cached && cached.source === entry.snapshot.nodes && cached.freshness === freshness
+    ? cached.value
+    : entry.snapshot.nodes.map(node => ({
+      ...node, freshness, ...(node.kind === "agent" ? { rosterFreshness: freshness } : {}),
+    }));
+  entry.displayNodes = { source: entry.snapshot.nodes, freshness, value: nodes };
   return {
     ...entry.snapshot,
     connection: entry.latest.connection,
     readiness: entry.latest.readiness,
     freshness,
     revision: entry.latest.revision,
-    nodes: entry.snapshot.nodes.map(node => ({
-      ...node, freshness, ...(node.kind === "agent" ? { rosterFreshness: freshness } : {}),
-    })),
+    nodes,
     events: entry.latest.events,
   };
 }
@@ -67,6 +82,7 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
   let disposed = false;
   let revision = 0;
   let current: OverviewModel = emptyOverviewModel();
+  const compose = createHostSnapshotComposer();
 
   function emit(): void {
     if (disposed) return;
@@ -84,8 +100,8 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
       const snapshot = displaySnapshot(entry);
       if (snapshot) snapshots.set(entry.summary.id, snapshot);
     }
-    current = composeHostSnapshots(summaries, snapshots, ++revision);
-    options.onChange(current);
+    current = compose(summaries, snapshots, ++revision);
+    options.onChange(current, filter);
   }
 
   function acquireFailure(entry: HostEntry, error: unknown): void {
@@ -177,6 +193,8 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
 
   return {
     get model() { return current; },
+    /** The filter applied to the current model and every subsequent emission. */
+    get hostFilter(): string | null { return filter; },
     setHosts(hosts: readonly OverviewHostSummary[]): void {
       if (disposed) return;
       const next = new Map<string, OverviewHostSummary>();

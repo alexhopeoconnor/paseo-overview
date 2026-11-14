@@ -38,9 +38,9 @@ const roster: RosterSnapshot = { parentAgentId: "parent", availability: "residen
 const pageInfo = { nextCursor: null, hasMore: false };
 const disposals: Array<() => void> = [];
 
-function setup(options: { acknowledgement?: Promise<object>; observeActivity?: boolean } = {}) {
+function setup(options: { acknowledgement?: Promise<object>; observeActivity?: boolean; agent?: AgentRecord } = {}) {
   const observations: FakeObservation<unknown>[] = [];
-  const directory = new FakeObservation({ entries: [{ agent: parent }], pageInfo });
+  const directory = new FakeObservation({ entries: [{ agent: options.agent ?? parent }], pageInfo });
   const workspace = new FakeObservation({
     entries: [{ id: "workspace", projectId: "project", name: "Workspace", projectDisplayName: "Project" }], pageInfo,
   });
@@ -186,6 +186,106 @@ describe("Overview observations", () => {
     expect(test.store.model.readiness.projects).toBe(true);
     expect(new Set(test.store.model.projects.map(project => project.projectId))).toEqual(new Set(["project", "another"]));
     expect(test.store.model.events).toEqual([]);
+  });
+
+  it("reuses the normalised graph collections for event-only publications", async () => {
+    const test = setup(); await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    test.timelineHandlers.get("parent")?.({ timestamp: "event", event: { type: "turn_started", turnId: "event" } });
+    await vi.advanceTimersByTimeAsync(50);
+    const after = test.store.model;
+    expect(after).not.toBe(before);
+    expect(after.events).toHaveLength(1);
+    expect(after.projects).toBe(before.projects);
+    expect(after.workspaces).toBe(before.workspaces);
+    expect(after.nodes).toBe(before.nodes);
+    expect(after.edges).toBe(before.edges);
+    expect(after.revision).toBeGreaterThan(before.revision);
+
+    // Preview/event expiry re-publishes without treating the graph as changed.
+    await vi.advanceTimersByTimeAsync(9000);
+    const expired = test.store.model;
+    expect(expired.events).toEqual([]);
+    expect(expired.projects).toBe(before.projects);
+    expect(expired.workspaces).toBe(before.workspaces);
+    expect(expired.nodes).toBe(before.nodes);
+    expect(expired.edges).toBe(before.edges);
+  });
+
+  it("invalidates graph collections when a directory status changes", async () => {
+    const test = setup(); await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    test.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: {
+      ...parent, title: "Renamed", status: "idle",
+    } } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const after = test.store.model;
+    expect(after.projects).not.toBe(before.projects);
+    expect(after.workspaces).not.toBe(before.workspaces);
+    expect(after.nodes).not.toBe(before.nodes);
+    expect(after.edges).not.toBe(before.edges);
+    expect(after.nodes.find(node => node.id === "host:agent:parent")).toMatchObject({
+      label: "Renamed", state: "idle",
+    });
+  });
+
+  it("invalidates graph collections when a reused directory record is mutated in place", async () => {
+    const mutable: AgentRecord = { ...parent };
+    const test = setup({ agent: mutable });
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    mutable.title = "Mutated upstream";
+    test.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: mutable } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const after = test.store.model;
+    expect(after.nodes).not.toBe(before.nodes);
+    expect(after.nodes.find(node => node.id === "host:agent:parent")?.label).toBe("Mutated upstream");
+  });
+
+  it("invalidates graph collections when a roster callback changes a child", async () => {
+    const test = setup(); await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    expect(before.nodes.find(node => node.id === "host:native:parent:child")?.state).toBe("working");
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "upsert", subagent: { ...child, status: "completed" },
+      cursor: { generation: "one", revision: 2 },
+    } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const after = test.store.model;
+    expect(after.projects).not.toBe(before.projects);
+    expect(after.workspaces).not.toBe(before.workspaces);
+    expect(after.nodes).not.toBe(before.nodes);
+    expect(after.edges).not.toBe(before.edges);
+    expect(after.nodes.find(node => node.id === "host:native:parent:child")?.state).toBe("finished");
+  });
+
+  it("invalidates graph collections when an icon callback publishes a new URL", async () => {
+    const icon = deferred<ProjectIcon | null>();
+    const test = setup();
+    test.readIcon.mockReturnValue(icon.promise);
+    await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    expect(before.projects[0]?.iconUrl).toBeUndefined();
+    icon.resolve({ mimeType: "image/png", data: "aWNvbg==" });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const after = test.store.model;
+    expect(after.projects).not.toBe(before.projects);
+    expect(after.nodes).not.toBe(before.nodes);
+    expect(after.edges).not.toBe(before.edges);
+    expect(after.projects[0]?.iconUrl).toBe("data:image/png;base64,aWNvbg==");
+  });
+
+  it("overlays freshness on the retained graph without replacing retained collections", async () => {
+    const test = setup(); await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    test.store.setConnection("disconnected");
+    const stale = test.store.model;
+    expect(stale.nodes).not.toBe(before.nodes);
+    expect(stale.projects).toBe(before.projects);
+    expect(stale.workspaces).toBe(before.workspaces);
+    expect(stale.edges).toBe(before.edges);
+    expect(stale.freshness).toBe("stale");
+    expect(stale.nodes.every(node => node.freshness === "stale")).toBe(true);
   });
 
   it("does not animate metadata or replayed native history, and deduplicates mirrored native tools", async () => {
@@ -742,6 +842,50 @@ describe("multi-host coordinator", () => {
     expect(failed).not.toHaveBeenCalled();
   });
 
+  it("reuses composed graph collections for host events and rebuilds them for graph changes", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = hosts.model;
+
+    one.timelineHandlers.get("same")?.({ timestamp: "event-one", event: { type: "turn_started", turnId: "event-one" } });
+    await vi.advanceTimersByTimeAsync(50);
+    const afterEvent = hosts.model;
+    expect(afterEvent.events.some(event => event.hostId === "one")).toBe(true);
+    expect(afterEvent.projects).toBe(before.projects);
+    expect(afterEvent.workspaces).toBe(before.workspaces);
+    expect(afterEvent.nodes).toBe(before.nodes);
+    expect(afterEvent.edges).toBe(before.edges);
+
+    two.timelineHandlers.get("same")?.({ timestamp: "event-two", event: { type: "turn_started", turnId: "event-two" } });
+    await vi.advanceTimersByTimeAsync(50);
+    const afterSecondEvent = hosts.model;
+    expect(afterSecondEvent.events.some(event => event.hostId === "two")).toBe(true);
+    expect(afterSecondEvent.projects).toBe(before.projects);
+    expect(afterSecondEvent.workspaces).toBe(before.workspaces);
+    expect(afterSecondEvent.nodes).toBe(before.nodes);
+    expect(afterSecondEvent.edges).toBe(before.edges);
+
+    one.directory.emit({ type: "agent_update", payload: { kind: "upsert", agent: {
+      id: "same", workspaceId: "same", provider: "codex", title: "Changed one", status: "idle",
+    } } });
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const afterDirectory = hosts.model;
+    expect(afterDirectory.projects).not.toBe(before.projects);
+    expect(afterDirectory.workspaces).not.toBe(before.workspaces);
+    expect(afterDirectory.nodes).not.toBe(before.nodes);
+    expect(afterDirectory.edges).not.toBe(before.edges);
+    expect(afterDirectory.nodes.find(node => node.hostId === "one")?.label).toBe("Changed one");
+    expect(afterDirectory.nodes.find(node => node.hostId === "two")?.label).toBe("Agent two");
+  });
+
   it("filters hosts without replaying their retained events or entities", async () => {
     const one = coordinatorHost("one"), two = coordinatorHost("two");
     const hosts = createOverviewHosts({
@@ -769,6 +913,41 @@ describe("multi-host coordinator", () => {
     expect(hosts.model.hosts.map(host => host.id)).toEqual(["one", "two"]);
     expect(hosts.model.nodes.map(node => node.hostId)).toEqual(["one", "two"]);
     expect(hosts.model.events.filter(event => event.hostId === "two")).toEqual([]);
+  });
+
+  it("stamps each emitted catalogue with the filter that composed it, including an empty host set", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const changed = vi.fn();
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: false, onChange: changed,
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    changed.mockClear();
+
+    hosts.setFilter("one");
+    expect(hosts.hostFilter).toBe("one");
+    expect(changed).toHaveBeenCalled();
+    let [model, filter] = changed.mock.calls.at(-1)!;
+    expect(filter).toBe("one");
+    expect(model.hosts.map((host: { id: string }) => host.id)).toEqual(["one"]);
+
+    hosts.setFilter("missing");
+    [model, filter] = changed.mock.calls.at(-1)!;
+    expect(hosts.hostFilter).toBe("missing");
+    expect(filter).toBe("missing");
+    expect(model.hosts).toEqual([]);
+    expect(model.projects).toEqual([]);
+
+    hosts.setFilter(null);
+    [model, filter] = changed.mock.calls.at(-1)!;
+    expect(hosts.hostFilter).toBeNull();
+    expect(filter).toBeNull();
+    expect(model.hosts.map((host: { id: string }) => host.id)).toEqual(["one", "two"]);
   });
 
   it("retains a coherent snapshot while a replacement borrowed API starts reading", async () => {

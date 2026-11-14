@@ -63,13 +63,33 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
     const remoteAgent = page.locator(`[data-overview-id="${remoteAgentId}"]`);
     await remoteAgent.waitFor({ state: "visible" });
     assert.deepEqual(wakeups(), baselineWakeups, "Observing a remote host does not start its provider");
+    const wasMoving = await page.getByTestId("overview-motion").getAttribute("aria-label") === "Pause animation";
+    if (wasMoving) await page.getByTestId("overview-motion").click();
     const canvas = await page.getByTestId("overview-canvas-host").boundingBox();
     await page.getByTestId("overview-host-filter").click();
     assert.deepEqual(await page.getByTestId("overview-canvas-host").boundingBox(), canvas, "Host menu overlays the graph");
     await page.getByTestId(`overview-host-option-${serverId}`).click();
     await waitFor(async () => await page.locator('[data-overview-kind="project"]').count() === 1, "remote host filter");
+    const displayedGeometry = () => page.locator('[data-overview-kind]').evaluateAll(nodes => nodes.map(node => {
+      const box = node.getBoundingClientRect();
+      return { id: node.dataset.overviewId, x: box.x, y: box.y, width: box.width, height: box.height };
+    }).sort((a, b) => a.id.localeCompare(b.id)));
+    await delay(150);
+    const hostFit = await displayedGeometry();
     await page.getByTestId("overview-project-filter").click();
-    await page.getByTestId(`overview-project-option-${displayId}`).click();
+    assert.equal(await page.getByTestId(`overview-project-filter-option-${displayId}`).getAttribute("aria-checked"), "true");
+    // Switching automatic All to an explicit one-project set forces a fit
+    // without recreating the cluster or changing its paused depth state.
+    await page.getByTestId(`overview-project-filter-option-${displayId}`).click();
+    await page.getByTestId(`overview-project-filter-option-${displayId}`).click();
+    await page.getByTestId("overview-project-filter-apply").click();
+    await waitFor(async () => await page.locator('[data-overview-kind]').count() === hostFit.length, "explicit remote project fit");
+    await delay(150);
+    const explicitFit = await displayedGeometry();
+    assert.deepEqual(hostFit.map(node => node.id), explicitFit.map(node => node.id));
+    for (let index = 0; index < hostFit.length; index++) for (const key of ["x", "y", "width", "height"])
+      assert.ok(Math.abs(hostFit[index][key] - explicitFit[index][key]) < 0.5, "Host narrowing fits the settled catalogue, matching explicit project Apply");
+    if (wasMoving) await page.getByTestId("overview-motion").click();
     await remoteAgent.click();
     await page.getByTestId("overview-open-chat").click();
     await page.waitForURL(url => url.pathname.includes(`/h/${serverId}/`) && url.pathname.includes("/workspace/"));
@@ -81,7 +101,7 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
     await waitFor(async () => (await page.getByTestId("overview-host-filter").getAttribute("aria-label"))?.includes("offline") || (await page.locator("body").innerText()).toLowerCase().includes("offline"), "remote offline indicator");
     assert.equal(await page.locator('[data-overview-kind="project"]').count(), 8, "Disconnected host retains its known graph");
     await page.screenshot({ path: path.join(output, "two-hosts-offline.png") });
-    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true };
+    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true, hostFilterRefit: true };
   } finally { await stop(); }
 }
 

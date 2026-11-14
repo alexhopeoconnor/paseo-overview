@@ -44,6 +44,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   const host = type => props => React.createElement(type, props, props.children);
   const native = {
     Platform: { OS: 'android' }, View: host('View'), ScrollView: host('ScrollView'), Text: host('Text'),
+    TextInput: host('TextInput'),
     Pressable: host('Pressable'), Image: host('Image'), StyleSheet: { create: value => value },
     Animated: {
       Value, View: host('AnimatedView'),
@@ -145,9 +146,11 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   await act(async () => byId('overview-native-graph').props.onLayout({ nativeEvent: { layout: { width: 390, height: 800 } } }));
   assert.equal(prefixed('overview-native-project:').length, 7);
   assert.equal(prefixed('overview-native-workspace:').length, 0);
-  assert.equal(text(byId('overview-scope-title')), 'All projects');
+  assert.equal(byId('overview-scope-title'), undefined);
+  assert.match(text(byId('overview-scope-counts')), /^7 projects/);
   assert.equal(text(byId('overview-host-filter')), 'All hosts');
-  assert.equal(text(byId('overview-project-filter')), 'All projects');
+  assert.equal(text(byId('overview-project-filter-title')), 'All');
+  assert.equal(text(byId('overview-project-filter')), 'All');
   assert.ok(active.size > 0, 'Working roots animate');
   assert.ok(animationCalls.every(call => call.options.useNativeDriver === true));
   assert.ok(new Set(animationCalls.map(call => call.initial)).size > 1, 'Stable identities seed different phases');
@@ -171,9 +174,9 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.ok(appearanceState && appearancePolicy, 'Native harness reports appearance and policy');
   assert.equal(appearanceState.theme, 'paseo');
   assert.equal(appearancePolicy.depthStrength, 0.7);
-  const appearanceTitle = text(byId('overview-scope-title'));
-  const appearanceCounts = text(byId('overview-scope-counts'));
   const appearanceScope = state.scope;
+  const appearanceCounts = text(byId('overview-scope-counts'));
+  assert.equal(byId('overview-scope-title'), undefined);
   await press('overview-appearance');
   assert.ok(byId('overview-appearance-panel'));
   for (const id of ['overview-appearance', 'overview-theme-paseo', 'overview-theme-light', 'overview-theme-dark',
@@ -187,7 +190,7 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   assert.equal(byId('overview-native-screen').props.style.backgroundColor, module.exports.appearancePalettes.dark.background);
   assert.equal(byId('overview-theme-dark').props.accessibilityState.checked, true);
   assert.deepEqual(state.scope, appearanceScope);
-  assert.equal(text(byId('overview-scope-title')), appearanceTitle);
+  assert.equal(byId('overview-scope-title'), undefined);
   assert.equal(text(byId('overview-scope-counts')), appearanceCounts);
   await press('overview-background-off');
   assert.equal(appearanceState.background, 'off');
@@ -235,9 +238,163 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   await press('overview-native-agent:n0');
   assert.equal(state.selectedId, 'n0');
   assert.ok(!JSON.stringify(tree.toJSON()).includes('Command finished'), 'Phone remains free of speech bubbles');
+
+  // One Projects filter with a real draft: checkbox edits never change the
+  // graph until Apply, Cancel/modal dismissal preserve the applied filter,
+  // Show all is the only automatic reset, explicit all stays explicit, and an
+  // empty selection renders the native "No projects selected" recovery.
+  await press('overview-back');
+  await press('overview-back');
+  assert.equal(byId('overview-scope-title'), undefined);
+  assert.equal(prefixed('overview-native-project:').length, 7);
   await press('overview-project-filter');
-  assert.ok(byId('overview-project-option-all'));
-  await press('overview-project-option-all');
+  assert.ok(byId('overview-project-filter-menu'));
+  assert.equal(text(byId('overview-project-filter-menu')).includes('Filter'), false);
+  assert.equal(prefixed('overview-project-filter-option-').length, 7);
+  for (const option of prefixed('overview-project-filter-option-')) {
+    assert.equal(option.props.accessibilityRole, 'checkbox');
+    assert.equal(option.props.accessibilityState.checked, true);
+    assert.equal(option.props['aria-checked'], true);
+    assert.equal(styleValue(option, 'minHeight'), 44);
+  }
+  assert.equal(styleValue(byId('overview-project-filter-search'), 'minHeight'), 44);
+  for (const id of ['overview-project-filter-show-all', 'overview-project-filter-cancel', 'overview-project-filter-apply']) {
+    assert.equal(styleValue(byId(id), 'minHeight'), 44, `${id} keeps a 44px height`);
+    assert.equal(styleValue(byId(id), 'minWidth'), 44, `${id} keeps a 44px width`);
+  }
+  // An untouched automatic draft still means "all" without silently becoming
+  // an explicit list, and Cancel keeps the applied filter unchanged.
+  await press('overview-project-filter-cancel');
+  assert.equal(byId('overview-project-filter-menu'), undefined);
+  assert.equal(state.projectFilter, null);
+  assert.equal(text(byId('overview-project-filter-title')), 'All');
+
+  // A draft toggle changes only checkbox state and the draft, never the graph.
+  await press('overview-project-filter');
+  await press('overview-project-filter-option-p0');
+  assert.equal(byId('overview-project-filter-option-p0').props['aria-checked'], false);
+  assert.equal(prefixed('overview-native-project:').length, 7);
+  assert.equal(state.projectFilter, null);
+  assert.equal(text(byId('overview-project-filter-title')), 'All');
+  // Count-all after explicit interaction must be applied as the explicit list.
+  await press('overview-project-filter-option-p0');
+  await press('overview-project-filter-apply');
+  assert.ok(Array.isArray(state.projectFilter));
+  assert.equal(state.projectFilter.length, 7);
+  assert.equal(text(byId('overview-project-filter-title')), '7/7');
+  assert.match(text(byId('overview-scope-counts')), /7 of 7 projects/);
+  await press('overview-project-filter');
+  await press('overview-project-filter-show-all');
+  assert.equal(state.projectFilter, null);
+  assert.equal(prefixed('overview-native-project:').length, 7);
+
+  // Multi selection applies on Apply; the visible graph, counts and title agree.
+  await press('overview-project-filter');
+  for (const id of ['p2', 'p3', 'p4', 'p5', 'p6']) await press(`overview-project-filter-option-${id}`);
+  assert.equal(prefixed('overview-native-project:').length, 7);
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], ['p0', 'p1']);
+  assert.equal(text(byId('overview-project-filter-title')), '2/7');
+  assert.match(text(byId('overview-scope-counts')), /2 of 7 projects/);
+  assert.equal(prefixed('overview-native-project:').length, 2);
+  assert.ok(byId('overview-native-project:p0'));
+  assert.ok(byId('overview-native-project:p1'));
+
+  // One project remains filtered after another draft change, dismissal then Cancel.
+  await press('overview-project-filter');
+  await press('overview-project-filter-option-p1');
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], ['p0']);
+  assert.equal(text(byId('overview-project-filter-title')), '1/7');
+  assert.equal(prefixed('overview-native-project:').length, 1);
+  await press('overview-project-filter');
+  await press('overview-project-filter-option-p2');
+  assert.equal(byId('overview-project-filter-option-p2').props['aria-checked'], true);
+  assert.equal(prefixed('overview-native-project:').length, 1);
+  assert.deepEqual([...state.projectFilter], ['p0']);
+  await press('overview-modal-close');
+  assert.equal(byId('overview-project-filter-menu'), undefined);
+  assert.deepEqual([...state.projectFilter], ['p0']);
+  await press('overview-project-filter');
+  assert.equal(byId('overview-project-filter-option-p0').props['aria-checked'], true);
+  assert.equal(byId('overview-project-filter-option-p2').props['aria-checked'], false);
+  await press('overview-project-filter-cancel');
+  assert.deepEqual([...state.projectFilter], ['p0']);
+
+  // Show all is the only automatic reset and restores the complete graph.
+  await press('overview-project-filter');
+  await press('overview-project-filter-option-p3');
+  await press('overview-project-filter-show-all');
+  assert.equal(state.projectFilter, null);
+  assert.equal(text(byId('overview-project-filter-title')), 'All');
+  assert.equal(prefixed('overview-native-project:').length, 7);
+
+  // A filtered root keeps only its projects; focus/back and group expansion
+  // survive the filter, and the breadcrumb appears only while focused.
+  await press('overview-project-filter');
+  for (const id of ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']) await press(`overview-project-filter-option-${id}`);
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], ['p0']);
+  await press('overview-native-project:p0');
+  assert.equal(text(byId('overview-scope-title')), 'Application');
+  await press('overview-native-workspace:w0');
+  const filteredGroup = prefixed('overview-native-completed:')[0];
+  const filteredGroupId = filteredGroup.props.testID.slice('overview-native-completed:'.length);
+  await press(filteredGroup.props.testID);
+  assert.equal(state.groups.get(filteredGroupId), 'expanded');
+  await press('overview-back');
+  await press('overview-back');
+  assert.equal(byId('overview-scope-title'), undefined);
+  assert.equal(prefixed('overview-native-project:').length, 1);
+  assert.ok(byId('overview-native-project:p0'));
+  await press('overview-native-project:p0');
+  await press('overview-native-workspace:w0');
+  assert.equal(state.groups.get(filteredGroupId), 'expanded', 'Expansion survives filtered focus changes');
+  assert.ok(byId('overview-native-agent:closed-child'));
+  await press('overview-back');
+  await press('overview-back');
+
+  // Empty selection is explicit, native-empty and recoverable by Show all.
+  await press('overview-project-filter');
+  await press('overview-project-filter-option-p0');
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], []);
+  assert.equal(state.scope, null);
+  assert.equal(state.selectedId, null);
+  assert.equal(text(byId('overview-project-filter-title')), 'None');
+  assert.match(text(byId('overview-scope-counts')), /0 of 7 projects/);
+  assert.equal(prefixed('overview-native-project:').length, 0);
+  assert.match(text(tree.root), /No projects selected/);
+  const emptyShowAll = byId('overview-native-show-all');
+  assert.ok(emptyShowAll);
+  assert.equal(styleValue(emptyShowAll, 'minHeight'), 44);
+  await press('overview-native-show-all');
+  assert.equal(state.projectFilter, null);
+  assert.equal(prefixed('overview-native-project:').length, 7);
+
+  // Removing an unavailable project edits only the open draft; Apply is required.
+  await press('overview-project-filter');
+  for (const id of ['p0', 'p2', 'p3', 'p4', 'p5', 'p6']) await press(`overview-project-filter-option-${id}`);
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], ['p1']);
+  model = { ...model, projects: model.projects.filter(project => project.id !== 'p1') };
+  await update();
+  assert.match(text(tree.root), /No projects selected/);
+  await press('overview-project-filter');
+  assert.match(text(byId('overview-project-filter-option-p1')), /Unavailable project/);
+  assert.equal(byId('overview-project-filter-option-p1').props['aria-checked'], true);
+  assert.match(text(byId('overview-project-filter-unavailable')), /1 unavailable project/);
+  await press('overview-project-filter-remove-unavailable');
+  assert.equal(byId('overview-project-filter-option-p1').props['aria-checked'], false);
+  assert.deepEqual([...state.projectFilter], ['p1'], 'Unavailable removal stays in the draft');
+  assert.match(text(tree.root), /No projects selected/);
+  await press('overview-project-filter-apply');
+  assert.deepEqual([...state.projectFilter], []);
+  model = { ...module.exports.nativeFixture, nodes: module.exports.nativeFixture.nodes.map(node => node.id === "a9-0" ? { ...node, state: "working" } : node) };
+  await update();
+  await press('overview-native-show-all');
+  assert.equal(state.projectFilter, null);
+  assert.equal(prefixed('overview-native-project:').length, 7);
 
   visible = false; await update(); assert.equal(active.size, 0);
   visible = true; await update(); assert.ok(active.size > 0);
@@ -284,27 +441,61 @@ const output = process.env.OVERVIEW_ACCEPTANCE_OUTPUT || '/out';
   await pressIn(multiTree, 'overview-host-filter');
   await pressIn(multiTree, 'overview-host-option-all');
   await pressIn(multiTree, 'overview-project-filter');
-  assert.match(text(byIdIn(multiTree, 'overview-project-option-first:project:same')), /Shared name — first host/);
-  assert.match(text(byIdIn(multiTree, 'overview-project-option-second:project:same')), /Shared name — second host/);
-  await pressIn(multiTree, 'overview-modal-close');
-  assert.equal(byIdIn(multiTree, 'overview-project-option-all'), undefined);
+  assert.match(text(byIdIn(multiTree, 'overview-project-filter-option-first:project:same')), /Shared name — first host/);
+  assert.match(text(byIdIn(multiTree, 'overview-project-filter-option-second:project:same')), /Shared name — second host/);
+  for (const option of hostsIn(multiTree).filter(node => String(node.props.testID || '').startsWith('overview-project-filter-option-'))) {
+    assert.equal(option.props.accessibilityRole, 'checkbox');
+    assert.equal(option.props['aria-checked'], true);
+    assert.equal(styleValue(option, 'minHeight'), 44);
+  }
+  await pressIn(multiTree, 'overview-project-filter-option-second:project:same');
+  assert.equal(byIdIn(multiTree, 'overview-project-filter-option-second:project:same').props['aria-checked'], false);
+  assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
+  await pressIn(multiTree, 'overview-project-filter-cancel');
+  assert.equal(byIdIn(multiTree, 'overview-project-filter-menu'), undefined);
+  assert.equal(multiState.projectFilter, null);
+  await pressIn(multiTree, 'overview-project-filter');
+  assert.equal(byIdIn(multiTree, 'overview-project-filter-option-first:project:same').props['aria-checked'], true);
+  assert.equal(byIdIn(multiTree, 'overview-project-filter-option-second:project:same').props['aria-checked'], true);
+  await pressIn(multiTree, 'overview-project-filter-option-second:project:same');
+  await pressIn(multiTree, 'overview-project-filter-apply');
+  assert.deepEqual([...multiState.projectFilter], ['first:project:same']);
+  assert.equal(text(byIdIn(multiTree, 'overview-project-filter-title')), '1/2');
+  assert.match(text(byIdIn(multiTree, 'overview-scope-counts')), /1 of 2 projects/);
+  assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
+  assert.equal(byIdIn(multiTree, 'overview-native-project:second:project:same'), undefined);
+  await pressIn(multiTree, 'overview-native-project:first:project:same');
+  assert.equal(multiState.scope.kind, 'project');
+  assert.equal(multiState.scope.id, 'first:project:same');
+  assert.equal(text(byIdIn(multiTree, 'overview-scope-title')), 'Shared name');
+  await pressIn(multiTree, 'overview-back');
+  assert.equal(multiState.scope, null);
+  assert.equal(byIdIn(multiTree, 'overview-scope-title'), undefined);
+  assert.equal(hostsIn(multiTree).filter(node => String(node.props.testID || '').startsWith('overview-native-project:')).length, 1);
+  await pressIn(multiTree, 'overview-project-filter');
+  await pressIn(multiTree, 'overview-project-filter-show-all');
+  assert.equal(multiState.projectFilter, null);
+  assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
   await pressIn(multiTree, 'overview-host-filter');
   await pressIn(multiTree, 'overview-host-option-second');
   assert.equal(multiState.hostFilter, 'second');
+  assert.equal(multiState.projectFilter, null);
   assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
   assert.equal(byIdIn(multiTree, 'overview-native-project:first:project:same'), undefined);
   assert.equal(text(byIdIn(multiTree, 'overview-host-filter')), 'second host');
   await pressIn(multiTree, 'overview-project-filter');
-  await pressIn(multiTree, 'overview-project-option-second:project:same');
-  assert.equal(multiState.scope.kind, 'project');
-  assert.equal(multiState.scope.id, 'second:project:same');
-  assert.equal(text(byIdIn(multiTree, 'overview-scope-title')), 'Shared name');
+  await pressIn(multiTree, 'overview-project-filter-option-second:project:same');
+  await pressIn(multiTree, 'overview-project-filter-option-second:project:same');
+  await pressIn(multiTree, 'overview-project-filter-apply');
+  assert.deepEqual([...multiState.projectFilter], ['second:project:same']);
+  assert.equal(text(byIdIn(multiTree, 'overview-project-filter-title')), '1/1');
+  assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
   await pressIn(multiTree, 'overview-host-filter');
   await pressIn(multiTree, 'overview-host-option-all');
   assert.equal(multiState.hostFilter, null);
-  await pressIn(multiTree, 'overview-project-filter');
-  await pressIn(multiTree, 'overview-project-option-all');
-  assert.equal(multiState.scope, null);
+  assert.equal(multiState.projectFilter, null);
   assert.ok(byIdIn(multiTree, 'overview-native-project:first:project:same'));
   assert.ok(byIdIn(multiTree, 'overview-native-project:second:project:same'));
   assert.match(text(byIdIn(multiTree, 'overview-host-status:offline')), /Offline host: offline/);

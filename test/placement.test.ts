@@ -122,7 +122,10 @@ class FakeElement {
   readonly dataset: Record<string, string> = {};
   readonly children: FakeElement[] = [];
   readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
-  textContent = "";
+  private textValue = "";
+  contentWrites = 0;
+  get textContent() { return this.textValue; }
+  set textContent(value: string) { this.textValue = value; this.contentWrites++; }
   type = "";
   disabled = false;
   tabIndex = -1;
@@ -224,6 +227,26 @@ describe("incremental graph overlay", () => {
     overlay.sync(sceneLayout(model.projects.map(project => positionedNode(project.id, { kind: "project", label: project.name }))), model);
     expect(nodeButton(overlay, model.projects[0]!.id).attributes.get("aria-label")).toContain("1 working · 0 waiting · 0 errors");
     expect(nodeButton(overlay, model.projects[1]!.id).attributes.get("aria-label")).toContain("0 working · 0 waiting · 1 errors");
+  });
+
+  it("retains unchanged content across sync and publishes changed labels/status immediately", () => {
+    const { overlay } = graphFixture(), model = modelWith(["agent"]);
+    const node = positionedNode("agent", { label: "First" });
+    overlay.sync(sceneLayout([node]), model);
+    const button = nodeButton(overlay, "agent");
+    const elements = [button, ...button.children];
+    for (const element of elements) { element.styleWrites.length = 0; element.contentWrites = 0; }
+    const setAttribute = vi.spyOn(button, "setAttribute");
+    overlay.sync(sceneLayout([{ ...node }]), { ...model, revision: 2 });
+    expect(elements.flatMap(element => element.styleWrites)).toEqual([]);
+    expect(elements.reduce((sum, element) => sum + element.contentWrites, 0)).toBe(0);
+    expect(setAttribute).not.toHaveBeenCalled();
+    overlay.sync(sceneLayout([{ ...node, label: "Changed" }]), {
+      ...model, nodes: model.nodes.map(agent => ({ ...agent, label: "Changed", state: "error" as const })),
+    });
+    expect(button.attributes.get("aria-label")).toContain("Changed");
+    expect(button.dataset.overviewStatus).toBe("error");
+    expect(button.children.find(child => child.textContent === "!")).toBeDefined();
   });
 
   it("writes no styles for an unchanged node frame", () => {

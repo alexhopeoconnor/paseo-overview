@@ -49,6 +49,23 @@ function valid(layout: SceneLayout) {
 }
 
 describe("project-root layout", () => {
+  it("explicitly fits a selected subset without rebuilding its local geometry", () => {
+    const value = model([4, 4, 4, 3]), engine = new StableLayout();
+    const full = engine.update(value, 1000, 750);
+    const subset = { ...value, projects: value.projects.slice(0, 1),
+      workspaces: value.workspaces.filter(workspace => workspace.projectDisplayId === "p0"),
+      nodes: value.nodes.filter(node => node.workspaceId?.startsWith("w0:")) };
+    const retained = engine.update(subset, 1000, 750);
+    expect(retained.projects[0]!.position).toEqual(full.projects[0]!.position);
+    const fitted = engine.update(subset, 1000, 750, null, { framing: "fit" });
+    const fresh = new StableLayout().update(subset, 1000, 750);
+    expect(fitted.projects[0]!.position).toEqual(fresh.projects[0]!.position);
+    expect(fitted.projects[0]!.scale).toBe(fresh.projects[0]!.scale);
+    expect(fitted.projects[0]!.edges).toBe(full.projects[0]!.edges);
+    expect(fitted.projects[0]!.position).not.toEqual(retained.projects[0]!.position);
+    valid(fitted);
+  });
+
   it("remeasures an expanded control when its count grows without changing visible topology", () => {
     const value = model([1], 100), parent = "a:w0:0";
     value.nodes = value.nodes.map(item => item.kind === "provider-subagent" && item.id !== "native:99"

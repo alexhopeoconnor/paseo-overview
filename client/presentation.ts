@@ -1,6 +1,7 @@
 import type { OverviewModel } from "../shared/model";
 import {
-  unassignedScopeId, type OverviewPresentation, type OverviewScope, type PresentationAction,
+  canonicalProjectFilter, sameProjectFilter, unassignedScopeId,
+  type OverviewPresentation, type OverviewScope, type PresentationAction, type ProjectFilter,
 } from "../shared/presentation";
 import { hostForDisplayId, hostState, isHostAuthoritative } from "../shared/hosts";
 import { buildOwnershipIndex } from "./normalize";
@@ -10,7 +11,7 @@ const MAX_HOSTS = 8;
 const MAX_GROUP_PREFERENCES = 512;
 
 export function initialPresentation(): OverviewPresentation {
-  return { scope: null, selectedId: null, groups: new Map(), motion: true, hostFilter: null };
+  return { scope: null, selectedId: null, groups: new Map(), motion: true, hostFilter: null, projectFilter: null };
 }
 
 export function reducePresentation(state: OverviewPresentation, action: PresentationAction): OverviewPresentation {
@@ -20,12 +21,23 @@ export function reducePresentation(state: OverviewPresentation, action: Presenta
   }
   if (action.type === "select") return state.selectedId === action.id ? state : { ...state, selectedId: action.id };
   if (action.type === "set-motion") return state.motion === action.enabled ? state : { ...state, motion: action.enabled };
+  if (action.type === "set-project-filter") {
+    const projectFilter = canonicalProjectFilter(action.projectIds);
+    if (sameProjectFilter(state.projectFilter, projectFilter)) return state;
+    // A changed selection is an overview of that set. The screen reconciles the
+    // retained agent against catalogue ownership before rendering it again.
+    return {
+      ...state, projectFilter, scope: null,
+      selectedId: projectFilter?.length === 0 ? null : state.selectedId,
+    };
+  }
   if (action.type === "set-host-filter") {
     if (state.hostFilter === action.hostId) return state;
     const included = (id: string | null) => !action.hostId || (!!id && hostForDisplayId(id) === action.hostId);
+    // The renderer refits on the input's refit flag. Clear scope here as well
+    // so a later focus effect cannot restore the preceding host's graph.
     return {
-      ...state, hostFilter: action.hostId,
-      scope: included(state.scope?.id ?? null) ? state.scope : null,
+      ...state, hostFilter: action.hostId, projectFilter: null, scope: null,
       selectedId: included(state.selectedId) ? state.selectedId : null,
     };
   }
@@ -40,7 +52,9 @@ export function reducePresentation(state: OverviewPresentation, action: Presenta
 
 export function recallPresentation(hostId: string): OverviewPresentation {
   const saved = sessions.get(hostId);
-  return saved ? { ...saved, groups: new Map(saved.groups) } : initialPresentation();
+  return saved
+    ? { ...saved, projectFilter: saved.projectFilter ?? null, groups: new Map(saved.groups) }
+    : initialPresentation();
 }
 
 export function rememberPresentation(hostId: string, state: OverviewPresentation): void {
@@ -73,10 +87,43 @@ function owningHost(model: OverviewModel, id: string): string | undefined {
 }
 
 /** Only an owning host's authoritative directory/roster data can remove a scope or selection. */
-export function reconcilePresentation(state: OverviewPresentation, model: OverviewModel): OverviewPresentation {
+export function reconcilePresentation(
+  state: OverviewPresentation,
+  model: OverviewModel,
+  projectFilter: ProjectFilter = state.projectFilter ?? null,
+): OverviewPresentation {
   const inFilter = (id: string | null) => !state.hostFilter || (!!id && owningHost(model, id) === state.hostFilter);
+  const filter = canonicalProjectFilter(projectFilter);
+  const selectedFilter = filter === null ? null : new Set(filter);
+  const ownership = selectedFilter ? buildOwnershipIndex(model) : undefined;
+  const allowsUnassigned = (hostId: string | undefined): boolean => {
+    if (!selectedFilter) return true;
+    if (!hostId) return selectedFilter.size > 0;
+    return selectedFilter.has(unassignedScopeId(hostId));
+  };
+  const scopeVisible = (value: NonNullable<OverviewScope>): boolean => {
+    if (!selectedFilter) return true;
+    if (value.kind === "project" || value.kind === "unassigned") return selectedFilter.has(value.id);
+    const workspace = model.workspaces.find(item => item.id === value.id);
+    const projectId = ownership?.projectByNode.get(value.id);
+    if (projectId) return selectedFilter.has(projectId);
+    const hostId = workspace?.hostId ?? hostForDisplayId(value.id);
+    return allowsUnassigned(hostId);
+  };
+  const selectionVisible = (id: string): boolean => {
+    if (!selectedFilter) return true;
+    if (selectedFilter.size === 0) return false;
+    const node = model.nodes.find(item => item.id === id);
+    // A retained native child can outlive a partial snapshot. Only ownership we
+    // can read from this catalogue may exclude it.
+    if (!node) return true;
+    const projectId = ownership?.projectByNode.get(id);
+    if (projectId) return selectedFilter.has(projectId);
+    return allowsUnassigned(node.hostId ?? hostForDisplayId(id));
+  };
   let scope = state.scope;
   if (scope && !inFilter(scope.id)) scope = null;
+  if (scope && !scopeVisible(scope)) scope = null;
   if (scope) {
     const hostId = owningHost(model, scope.id);
     if (!hostId || !hostState(model, hostId)) scope = null;
@@ -85,8 +132,8 @@ export function reconcilePresentation(state: OverviewPresentation, model: Overvi
     else if (scope.kind === "workspace" && isHostAuthoritative(model, hostId)
       && !model.workspaces.some(workspace => workspace.id === scope!.id && workspace.hostId === hostId)) scope = null;
   }
-  const selectedId = state.selectedId && inFilter(state.selectedId) && canRetainSelection(model, state.selectedId)
-    ? state.selectedId : null;
+  const selectedId = state.selectedId && inFilter(state.selectedId) && selectionVisible(state.selectedId)
+    && canRetainSelection(model, state.selectedId) ? state.selectedId : null;
   return scope === state.scope && selectedId === state.selectedId ? state : { ...state, scope, selectedId };
 }
 
