@@ -18,6 +18,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   Project-filter checks distinguish the complete catalogue from the rendered
   subset, verify one explicit refit, empty selection, retained eligible details,
   hidden DOM/cloud removal and no event replay on reveal.
+  Confirmed removals retain surviving presentation and use fresh fitting when
+  visible packing changes. Native roster unloading remains distinct. Structured
+  communication routes survive Background Off and are consumed on Pause,
+  filtering, hiding and remounting instead of replaying later.
 - `performance.cjs` connects to an explicitly supplied isolated hardware-browser
   CDP endpoint. It records frame intervals, browser main-thread/script work,
   resource counts and automated pointer-selection timing. It rejects software
@@ -38,6 +42,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   totals. Counters assert one field flush per render, unchanged-field reuse and
   retained geometry during heartbeat-only frames. Unit tests cover exact field
   equivalence and accumulated subpixel transform commits.
+  A separate communication/feed burst checks route bounds and released geometry,
+  captures real cloud arrivals and decay, and exercises resize, endpoint removal,
+  hiding and remounting. These samples do not replace the matched baseline.
   Distinguish an Overview-local theme update from the current host's global
   appearance boundary: the latter remounts screen contents and reloads passive
   rosters/icons. Renderer identity preservation applies to local appearance
@@ -51,6 +58,11 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   The native-only fixture includes a mixed finished/idle/closed/canceled group;
   both native runners check its accessibility summary and the expanded visible
   outcomes and member selection.
+  The same runner renders shared agent details with archive recovery, recent
+  communication and known/unknown background work, including the Open chat
+  touch target. These are rendered component checks, not physical-device results.
+  Communication metadata in this component fixture is supplied explicitly; the
+  native screen does not enable the browser's activity timeline subscriptions.
 - `native-interaction.cjs` runs the same native components without a DOM or
   Three.js. Native primitives and animation scheduling are mocked so phase
   continuity, obsolete callbacks, visibility, AppState, reduced motion and
@@ -72,6 +84,14 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   host/project menus, correct-host chat navigation and offline retention.
   Light-mode movement must change enough composited pixels with a meaningful
   contrast delta; merely changing a few pixel values is insufficient.
+  Structured provenance is sent through the real client/daemon path and must
+  remain discoverable in recipient details after the transient pulse expires,
+  without retaining the message body. A real dense-workspace archive must remove
+  its entities, preserve the canvas and a surviving selection, enlarge the
+  remaining graph, and match the established explicit-fit result. Workspace Undo
+  restores the fixture through the host API. Recovery failure labels are covered
+  with controlled observation/component fixtures; this runner does not introduce
+  another host archive-failure implementation or claim to retest its internals.
 
 Browser screenshots and JSON results go under `/out` in the container, or the
 path selected by `OVERVIEW_ACCEPTANCE_OUTPUT`. Keep outputs outside Git. Chromium
@@ -83,6 +103,12 @@ repeat native interaction or paired-phone acceptance when native behaviour chang
 or a native regression is found. Run focused unit tests while editing and let the
 artifact builder perform its final declared checks. Repeat affected checks after
 fixes rather than rerunning every runner after documentation or lock-only edits.
+The runners do not expose scenario selectors. Select the relevant runner, not an
+invented subset flag. For an Overview-only release, accept the candidate against
+the selected current host package. Testing another host release is necessary
+only when that compatibility is part of the release promise; two instances of the
+current package can establish cross-host identity behavior. Retain the previous
+Overview artifact and its current-host approval for plugin rollback.
 
 Inspect the saved full, selected, activity and dark-theme captures after a pass:
 the floor/wall, feeds and faint clouds must be noticeable at normal browser zoom while labels, ownership links,

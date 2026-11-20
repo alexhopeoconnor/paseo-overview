@@ -1,9 +1,12 @@
+import type { OverviewArchiveOperation, OverviewBackgroundWork } from "./model";
+
 /** The read-only subset used by Overview; provider-specific content stays opaque. */
 export interface AgentRecord {
   id: string; workspaceId?: string; provider: string; title: string | null;
   status: string; labels?: Record<string, string>; pendingPermissions?: readonly unknown[];
   requiresAttention?: boolean; attentionReason?: string | null; lastError?: string;
   archivedAt?: string | null; internal?: boolean; providerUnavailable?: boolean;
+  archiveOperation?: OverviewArchiveOperation | null; backgroundWork?: OverviewBackgroundWork;
 }
 export interface WorkspaceRecord {
   id: string; projectId: string; name: string; projectDisplayName: string;

@@ -238,6 +238,40 @@ describe("perspective room and projection", () => {
     room.dispose(); expect(scene.children).toHaveLength(0);
   });
 
+  it("reprojects non-retracing feed contours after a resize", () => {
+    const projection = new OverviewProjection(1200, 800, 1);
+    const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
+    projection.resize(900, 600, 2); room.resize(2);
+    const projects = [
+      spatialProject("resized-wall", { screenCentre: { x: 450, y: 160 }, screenBounds: { x: 360, y: 120, width: 180, height: 60 } }),
+      spatialProject("resized-floor", { screenCentre: { x: 450, y: 520 }, screenBounds: { x: 360, y: 480, width: 180, height: 60 } }),
+    ];
+    for (const project of projects) for (let sequence = 0; sequence < 8; sequence++) {
+      const route = room.feedSurfaceRoute(project, sequence);
+      expect(route.length).toBeGreaterThanOrEqual(2);
+      expect(route[route.length - 1]!.surface)
+        .toBe(project.screenCentre.y < projection.height * ROOM_SEAM_SCREEN_FRACTION ? "wall" : "floor");
+      expect(route.every(point => Math.abs(point.u - Math.round(point.u)) < 1e-9 && Math.abs(point.v - Math.round(point.v)) < 1e-9)).toBe(true);
+      for (let index = 1; index < route.length; index++) {
+        const before = route[index - 1]!, after = route[index]!;
+        expect(before.surface !== after.surface || before.u !== after.u || before.v !== after.v).toBe(true);
+        if (before.surface === after.surface) expect(before.u === after.u || before.v === after.v).toBe(true);
+        else expect([before.v, after.v, before.u === after.u]).toEqual([0, 0, true]);
+      }
+      for (const surface of ["floor", "wall"] as const) {
+        const values = route.filter(point => point.surface === surface);
+        for (const axis of ["u", "v"] as const) {
+          const coordinates = values.map(point => point[axis]);
+          expect(coordinates.every((value, index) => index === 0 || value >= coordinates[index - 1]!) ||
+            coordinates.every((value, index) => index === 0 || value <= coordinates[index - 1]!)).toBe(true);
+        }
+      }
+      if (route.every(point => point.surface === route[0]!.surface)) expect(route.length).toBeLessThanOrEqual(3);
+      else expect(route.slice(1).filter((point, index) => point.surface !== route[index]!.surface)).toHaveLength(1);
+    }
+    room.dispose();
+  });
+
   it("keeps feed contours on the shared grid and dissolves behind each cloud", () => {
     const projection = new OverviewProjection(1200, 800, 1);
     const room = new PerspectiveRoom(new THREE.Scene(), projection, gridTheme);
@@ -268,6 +302,26 @@ describe("perspective room and projection", () => {
           const before = route[index - 1]!, after = route[index]!;
           if (before.surface !== after.surface) expect(before.v).toBe(0), expect(after.v).toBe(0), expect(before.u).toBe(after.u);
           else expect(before.u === after.u || before.v === after.v).toBe(true);
+        }
+        // No feed contour retraces positive length on either surface: each
+        // axis is monotonic within a surface, and same-surface routes use one
+        // orthogonal elbow rather than a seam descent and reversal.
+        for (const surface of ["floor", "wall"] as const) {
+          const values = route.filter(point => point.surface === surface);
+          for (const axis of ["u", "v"] as const) {
+            const coordinates = values.map(point => point[axis]);
+            expect(coordinates.every((value, index) => index === 0 || value >= coordinates[index - 1]!) ||
+              coordinates.every((value, index) => index === 0 || value <= coordinates[index - 1]!)).toBe(true);
+          }
+        }
+        if (route.every(point => point.surface === route[0]!.surface)) expect(route.length).toBeLessThanOrEqual(3);
+        else {
+          const seams = route.slice(1).filter((point, index) => point.surface !== route[index]!.surface);
+          expect(seams).toHaveLength(1);
+        }
+        for (let index = 1; index < route.length; index++) {
+          const before = route[index - 1]!, after = route[index]!;
+          expect(before.surface !== after.surface || before.u !== after.u || before.v !== after.v).toBe(true);
         }
       }
     }
@@ -544,21 +598,86 @@ describe("project particle clouds", () => {
     clouds.dispose();
   });
 
-  it("combines sustained and arrival energy with max and clears transients", () => {
+  it("stages one local impact separately from sustained energy and clears it", () => {
     const project = spatialProject("project", { energy: 1 });
-    const { clouds } = setup([project]);
+    const { clouds, projection, room } = setup([project]);
     clouds.advance(2, true, 1);
     clouds.flushState();
     const sustained = cloudState(clouds)[7]!;
-    clouds.arrive("project", 0.4);
+    const endpoint = { surface: "floor" as const, u: 0, v: 0 };
+    clouds.arrive({ projectId: "project", endpoint, energy: 0.4, ageSeconds: 0 });
     clouds.flushState();
+    // Impact strength has its own texel and never rewrites sustained energy.
     expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
-    clouds.arrive("project", 1);
+    const screen = projection.screenPoint(room.warpSurfacePoint(endpoint));
+    const energyScale = 0.94 + sustained * 0.18;
+    const radiusX = Math.max(52, Math.abs(project.screenBounds.width) * 0.56) * energyScale;
+    const radiusY = Math.max(46, Math.abs(project.screenBounds.height) * 0.56) * energyScale;
+    expect(cloudState(clouds)[12]).toBeCloseTo((screen.x - project.screenCentre.x) / radiusX, 5);
+    expect(cloudState(clouds)[13]).toBeCloseTo((project.screenCentre.y - screen.y) / radiusY, 5);
+    expect(cloudState(clouds)[14]).toBe(0);
+    expect(cloudState(clouds)[15]).toBeCloseTo(0.65 + 0.35 * 0.4);
+
+    // A newer arrival before the same flush replaces the pending impact.
+    clouds.arrive({ projectId: "project", endpoint, energy: 0.8, ageSeconds: 0 });
     clouds.flushState();
-    expect(cloudState(clouds)[7]!).toBe(1);
+    expect(cloudState(clouds)[15]).toBeCloseTo(0.65 + 0.35 * 0.8);
     clouds.clearTransient();
     clouds.flushState();
+    expect(cloudState(clouds)[15]).toBe(0);
     expect(cloudState(clouds)[7]!).toBeCloseTo(sustained);
+    clouds.dispose();
+  });
+
+  it("resolves a pending impact against the field after a same-frame move", () => {
+    const project = spatialProject("project", { energy: 1 });
+    const { clouds, projection, room } = setup([project]);
+    clouds.advance(2, true, 1);
+    clouds.flushState();
+    const endpoint = { surface: "floor" as const, u: 2, v: 4 };
+    const beforeWorld = room.warpSurfacePoint(endpoint), beforeScreen = projection.screenPoint(beforeWorld);
+    const moved = { ...project, screenCentre: { x: project.screenCentre.x + 90, y: project.screenCentre.y } };
+    clouds.updateProjects([moved]);
+    clouds.arrive({ projectId: "project", endpoint, energy: 0.6, ageSeconds: 0 });
+    clouds.flushState();
+    const afterWorld = room.warpSurfacePoint(endpoint), afterScreen = projection.screenPoint(afterWorld);
+    expect(afterWorld).not.toEqual(beforeWorld);
+    const energy = cloudState(clouds)[7]!, energyScale = 0.94 + energy * 0.18;
+    const radiusX = Math.max(52, Math.abs(moved.screenBounds.width) * 0.56) * energyScale;
+    const radiusY = Math.max(46, Math.abs(moved.screenBounds.height) * 0.56) * energyScale;
+    const expectedX = (afterScreen.x - moved.screenCentre.x) / radiusX;
+    const expectedY = (moved.screenCentre.y - afterScreen.y) / radiusY;
+    expect(cloudState(clouds)[12]).toBeCloseTo(expectedX, 5);
+    expect(cloudState(clouds)[13]).toBeCloseTo(expectedY, 5);
+    expect(cloudState(clouds)[12]).not.toBeCloseTo((beforeScreen.x - moved.screenCentre.x) / radiusX, 5);
+    // Twice before one flush leaves only the latest impact.
+    clouds.arrive({ projectId: "project", endpoint, energy: 0.25, ageSeconds: 0 });
+    clouds.arrive({ projectId: "project", endpoint, energy: 0.75, ageSeconds: 0 });
+    clouds.flushState();
+    expect(cloudState(clouds)[15]).toBeCloseTo(0.65 + 0.35 * 0.75);
+    clouds.clearTransient();
+    clouds.arrive({ projectId: "project", endpoint, energy: 1, ageSeconds: 1 });
+    clouds.flushState();
+    expect(cloudState(clouds)[15]).toBe(0);
+    clouds.dispose();
+  });
+
+  it("advances the impact by visual age and removes it at the duration", () => {
+    const project = spatialProject("project", { energy: 0 });
+    const { clouds } = setup([project]);
+    const endpoint = { surface: "floor" as const, u: 0, v: 0 };
+    clouds.arrive({ projectId: "project", endpoint, energy: 1, ageSeconds: 0.2 });
+    clouds.flushState();
+    expect(cloudState(clouds)[14]).toBeCloseTo(0.2);
+    clouds.advance(0.3, true, 1);
+    clouds.flushState();
+    expect(cloudState(clouds)[14]).toBeCloseTo(0.5);
+    expect(cloudState(clouds)[15]).toBeGreaterThan(0);
+    clouds.advance(0.5, true, 1);
+    clouds.flushState();
+    expect(cloudState(clouds)[14]).toBe(0);
+    expect(cloudState(clouds)[15]).toBe(0);
+    clouds.dispose();
   });
 
   it("bounds integrated cloud phase, honors speed, and freezes static time", () => {
@@ -607,13 +726,14 @@ describe("project particle clouds", () => {
     clouds.flushState();
     const phase = cloudState(clouds, 1)[3]!, otherPhase = cloudState(clouds, 0)[3]!;
     const energy = cloudState(clouds, 1)[7]!;
-    clouds.arrive("project", 1);
+    clouds.arrive({ projectId: "project", endpoint: { surface: "floor", u: 0, v: 0 }, energy: 1, ageSeconds: 0 });
     clouds.flushState();
-    expect(cloudState(clouds, 1)[7]).toBe(1);
+    expect(cloudState(clouds, 1)[15]).toBe(1);
     clouds.clearProjects(new Set(["project"]));
     clouds.flushState();
     expect(cloudState(clouds, 1)[3]).toBe(phase);
     expect(cloudState(clouds, 1)[7]).toBe(energy);
+    expect(cloudState(clouds, 1)[15]).toBe(0);
     expect(cloudState(clouds, 0)[3]).toBe(otherPhase);
     clouds.updateProjects([{ ...project, live: false }, other]);
     clouds.advance(1, true, 1);

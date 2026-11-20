@@ -65,6 +65,29 @@ function App() {
 }
 createRoot(document.getElementById("app")!).render(<App />);`;
   await build({ ...sharedBuild, stdin: { contents: multiSource, resolveDir: '/plugin', loader: 'tsx' }, outfile: `${output}/native-multi.js` });
+  const detailsSource = `
+import { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { AgentDetails } from "/plugin/client/agent-details";
+import { full, lightTheme } from "/plugin/acceptance/fixture";
+function App() {
+  const [recovery, setRecovery] = useState("children_pending");
+  const [count, setCount] = useState(2);
+  (window as any).nativeContact = { recovery: setRecovery, background: setCount };
+  const node = { ...full.nodes.find(node => node.id === "a0-0")!, state: "idle", label: "Observed recipient",
+    archiveOperation: recovery ? { state: recovery, canRetry: true } : null,
+    backgroundWork: count === undefined ? undefined : { count } };
+  const now = Date.now();
+  const model = { ...full, nodes: full.nodes.map(item => item.id === node.id ? node
+    : item.id === "a0-1" ? { ...item, label: "Observed sender" } : item),
+    recentCommunications: [{ id: "native-contact", senderId: "a0-1", recipientId: node.id,
+      senderHostId: node.hostId, recipientHostId: node.hostId, kind: "message",
+      observedAt: now - 20_000, expiresAt: now + 280_000 }] };
+  return <AgentDetails model={model} node={node} theme={lightTheme} onClose={() => {}}
+    onOpenAgent={() => { (window as any).nativeContactOpened = true; }} />;
+}
+createRoot(document.getElementById("app")!).render(<App />);`;
+  await build({ ...sharedBuild, stdin: { contents: detailsSource, resolveDir: '/plugin', loader: 'tsx' }, outfile: `${output}/native-details.js` });
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const errors = [];
   let page;
@@ -410,9 +433,39 @@ createRoot(document.getElementById("app")!).render(<App />);`;
     await desktop.getByTestId('overview-native-project:first:project:same').waitFor({ state: 'visible' });
     await desktop.getByTestId('overview-native-project:second:project:same').waitFor({ state: 'visible' });
     await desktop.close();
+    await page.close();
+    page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+    page.on('pageerror', error => errors.push(error.message));
+    await page.setContent('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;font-family:Arial,sans-serif}#app{height:100%;display:flex;flex-direction:column}</style><div id="app"></div></html>');
+    await page.addScriptTag({ path: `${output}/native-details.js` });
+    await page.waitForFunction(() => !!window.nativeContact);
+    const detailStates = [];
+    for (const [state, expected] of [['children_pending', /children pending/i], ['unresolved', /archive unresolved/i], ['in_progress', /archiving/i]]) {
+      await page.evaluate(value => window.nativeContact.recovery(value), state);
+      await page.getByText(expected).first().waitFor({ state: 'visible' });
+      detailStates.push({ state, text: await page.getByTestId('overview-selection').innerText() });
+      if (state === 'children_pending') await page.screenshot({ path: `${output}/phone-archive-recovery.png` });
+    }
+    await page.evaluate(() => window.nativeContact.recovery(null));
+    await page.getByText(/Idle/).first().waitFor({ state: 'visible' });
+    const contacts = page.getByTestId('overview-recent-communication');
+    assert.match(await contacts.innerText(), /Observed sender/);
+    assert.equal((await page.getByTestId('overview-selection').innerText()).match(/2 background tasks/g)?.length, 1,
+      'Known background work is stated once in shared details');
+    const openChat = await page.getByTestId('overview-open-chat').boundingBox();
+    assert.ok(openChat.width >= 44 && openChat.height >= 44, 'Shared details retain a usable Open chat target');
+    const detailsBox = await page.getByTestId('overview-selection').boundingBox();
+    assert.ok(detailsBox.x >= 0 && detailsBox.x + detailsBox.width <= 390, 'Shared recovery/contact details fit the phone viewport');
+    await page.screenshot({ path: `${output}/phone-recent-communication.png` });
+    await page.evaluate(() => window.nativeContact.background(undefined));
+    await page.waitForFunction(() => !document.querySelector('[data-testid="overview-selection"]')?.textContent.includes('background task'));
+    assert.doesNotMatch(await page.getByTestId('overview-selection').innerText(), /0 background tasks/i, 'Unavailable background inventory is not rendered as zero');
+    await page.getByTestId('overview-open-chat').tap();
+    assert.equal(await page.evaluate(() => window.nativeContactOpened), true);
     assert.deepEqual(errors, []);
     await fs.writeFile(`${output}/native-preview-results.json`, JSON.stringify({ ok: true, actualComponent: true, environment: 'React Native Web at 390×844, touch and DPR2; physical phone acceptance remains separate', inactiveLabel, terminalLabels: ['Closed', 'Canceled'], appearance: { dark: darkHeader, restored }, initial, project, workspace, reset, filtered, explicitAll, filteredRoot, emptyFilter, recovered, errors }, null, 2));
-    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header with a plain focused breadcrumb, one Projects filter with real draft checkboxes (no graph change before Apply), Cancel/Escape/outside dismissal preserving the applied filter and restoring the trigger, Show all automatic reset, explicit all-applied list distinct from automatic all, native empty-selection recovery, host/project duplicate-name disambiguation, offline host isolation, absolute desktop menus with keyboard/focus restoration, quick appearance theme/background without scope loss, 44px touch targets and aria-checked, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion retention through filtered focus, parent selection, reset and motion controls' }));
+    await fs.writeFile(`${output}/native-details-results.json`, JSON.stringify({ ok: true, detailStates, detailsBox, openChat, contacts: await contacts.innerText(), physicalDevice: false }, null, 2));
+    console.log(JSON.stringify({ ok: true, output, checks: 'controlled scope/header with a plain focused breadcrumb, one Projects filter with real draft checkboxes (no graph change before Apply), Cancel/Escape/outside dismissal preserving the applied filter and restoring the trigger, Show all automatic reset, explicit all-applied list distinct from automatic all, native empty-selection recovery, host/project duplicate-name disambiguation, offline host isolation, absolute desktop menus with keyboard/focus restoration, quick appearance theme/background without scope loss, 44px touch targets and aria-checked, actual emoji nodes, mixed inactive outcomes, visible closed/canceled statuses and selection, group expansion retention through filtered focus, parent selection, reset and motion controls, recovery states and recent communication in actual shared details' }));
   } catch (error) {
     if (page) {
       await page.screenshot({ path: `${output}/native-preview-failure.png` }).catch(() => {});

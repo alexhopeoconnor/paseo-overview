@@ -49,6 +49,61 @@ async function assistantMessageText(message) {
   });
 }
 
+async function checkArchiveRefit({ page, client, overviewUrl, workspaceId, agents, output }) {
+  await page.goto(overviewUrl);
+  await page.getByTestId("overview-screen").waitFor({ state: "visible" });
+  for (let step = 0; step < 2 && await page.getByTestId("overview-back").count(); step++)
+    await page.getByTestId("overview-back").click();
+  await page.getByTestId("overview-project-filter").click();
+  await page.getByTestId("overview-project-filter-show-all").click();
+  const moving = await page.getByTestId("overview-motion").getAttribute("aria-label") === "Pause animation";
+  if (moving) await page.getByTestId("overview-motion").click();
+  await delay(250);
+  const serverId = client.getLastServerInfoMessage().serverId;
+  const survivor = agents.at(-1);
+  const survivorId = `${encodeURIComponent(serverId)}:agent:${encodeURIComponent(survivor.id)}`;
+  await page.locator(`[data-overview-id="${survivorId}"]`).click();
+  await page.getByTestId("overview-selection").waitFor({ state: "visible" });
+  const canvas = await page.getByTestId("overview-canvas-host").locator("canvas").elementHandle();
+  const geometry = () => page.locator('[data-overview-kind="project"]').evaluateAll(nodes => nodes.map(node => {
+    const box = node.getBoundingClientRect();
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(node).transform);
+    return { id: node.dataset.overviewId, x: box.x, y: box.y, width: box.width, height: box.height, scale: matrix.a };
+  }).sort((a, b) => a.id.localeCompare(b.id)));
+  const before = await geometry();
+  await client.archiveWorkspace(workspaceId);
+  await waitFor(async () => await page.locator('[data-overview-kind="workspace"]').count() === 13
+    && await page.locator('[data-overview-kind="agent"]').count() === 14, "authoritative workspace archive disappears without reload");
+  await delay(300);
+  const after = await geometry();
+  assert.ok(await canvas.evaluate(element => element.isConnected
+    && element === document.querySelector('[data-testid="overview-canvas-host"] canvas')), "Archive preserves the renderer canvas");
+  assert.ok(await page.getByTestId("overview-selection").isVisible(), "Archive preserves a separately surviving selection");
+  assert.ok((await page.getByTestId("overview-selection").innerText()).includes(survivor.title), "The surviving agent stays selected");
+  assert.ok(after.some((node, index) => node.scale > before[index].scale + 0.001), "Removing the dense branch enlarges remaining project framing");
+  await page.screenshot({ path: path.join(output, "archive-refit.png") });
+
+  // An explicit all-project Apply invokes the established fresh-fit path.
+  // Compare against that result without refreshing or replacing the renderer.
+  await page.getByTestId("overview-project-filter").click();
+  const option = page.locator('[data-testid^="overview-project-filter-option-"]').first();
+  await option.click(); await option.click();
+  await page.getByTestId("overview-project-filter-apply").click();
+  await delay(200);
+  const fresh = await geometry();
+  assert.deepEqual(after.map(node => node.id), fresh.map(node => node.id));
+  for (let index = 0; index < after.length; index++) for (const key of ["x", "y", "width", "height", "scale"])
+    assert.ok(Math.abs(after[index][key] - fresh[index][key]) < 0.5, "Removal framing matches the explicit fresh fit");
+
+  await client.undoWorkspaceArchive(workspaceId);
+  await waitFor(async () => await page.locator('[data-overview-kind="workspace"]').count() === 14
+    && await page.locator('[data-overview-kind="agent"]').count() === 18, "workspace Undo restores its managed agents");
+  await page.getByTestId("overview-project-filter").click();
+  await page.getByTestId("overview-project-filter-show-all").click();
+  if (moving) await page.getByTestId("overview-motion").click();
+  return { before, after, fresh, canvasPreserved: true, survivingSelection: true, undo: true };
+}
+
 function copySourceCheckout(destination) {
   fs.mkdirSync(destination, { recursive: true });
   for (const name of ["package.json", "package-lock.json", "paseo-plugin.json", "index.client.tsx", "index.server.ts", "client", "server", "shared", "OVERVIEW.md"])
@@ -558,6 +613,22 @@ async function run() {
     }
     await fragmentedPrompt;
     await delay(2800);
+    const communicationMessageId = "overview-acceptance-structured-contact";
+    await client.sendAgentMessage(agents[1].id, "Observe this structured acceptance contact.", {
+      sourceAgentId: agents[0].id, messageId: communicationMessageId,
+    });
+    await page.locator('[data-overview-kind="agent"][aria-label^="Acceptance agent 1.2"]').click();
+    const recentCommunication = page.getByTestId("overview-recent-communication");
+    await waitFor(async () => await recentCommunication.count() > 0
+      && (await recentCommunication.innerText()).includes("Acceptance agent 1.1"), "structured communication appears in recipient details");
+    const communicationBefore = await recentCommunication.innerText();
+    await delay(8500);
+    const communicationAfter = await recentCommunication.innerText();
+    assert.ok(communicationAfter.includes("Acceptance agent 1.1"), "Recent contact survives the transient pulse lifetime");
+    assert.ok(!communicationAfter.includes("Observe this structured acceptance contact."), "Recent contact does not retain message bodies");
+    await page.screenshot({ path: path.join(output, "recent-communication.png") });
+    const structuredCommunication = { before: communicationBefore, after: communicationAfter, survivesTransient: true };
+    await page.getByTestId("overview-details-close").click();
     const overviewRequests=browserRequests.slice(requestsBeforeFixtures);
     const forbidden=overviewRequests.filter(type=>/^(?:create_agent_request|agent\.create\.request|send_agent_message_request|agent\.message\.send\.request|agent\.stop\.request|stop_agent_request|archive_agent_request|agent\.archive\.request|workspace\.clear_attention\.request|agent\.clear_attention\.request|permission_response)$/.test(type));
     assert.deepEqual(forbidden,[],"Observing Overview must not send mutation operations");
@@ -657,11 +728,15 @@ async function run() {
       await waitFor(async () => (await assistantMessageText(customMessage)).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
       assert.equal(await customMessage.getByText("Show less",{exact:true}).count(),0);
     }
-    const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version, expectedOfflineErrors, onRemoteShutdown });
+    const archiveRefit = await checkArchiveRefit({ page, client, overviewUrl, workspaceId: denseWorkspace.workspaceId, agents, output });
+    const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version, expectedOfflineErrors, onRemoteShutdown, localClient: client, localAgent: agents[0] });
     fs.writeFileSync(path.join(output, "multi-host.json"), JSON.stringify(multipleHosts, null, 2));
     assert.deepEqual(pageErrors,[]);
     assert.deepEqual(consoleErrors,[]);
     const result={ok:true,...identity,expectation,runtimeVersion:status.version,packagedGrid,multipleHosts,expectedOfflineErrors,projectCount:7,workspaceCount:14,managedCount:18,nativeFixtureCount,nativeRosterSource:"sanitised delayed transport fixture after real passive RPC",proxiedPages,geometry,consoleErrors,pageErrors,overviewRequestTypes:[...new Set(overviewRequests)],checks:["two exact hosts without remote Overview installation", "host/project filters and correct-host chat", "project checkbox draft Apply/Cancel/Escape and selected-set framing", "explicit empty selection and Show all", "offline-host isolation without provider wakeups", "exact packaged daemon","compiled grid visible in both themes","compiled perspective room coverage","compiled grid pause","persisted quick theme and background modes","real plugin compiler","served browser UI","cold multi-project load","real five-item directory pagination","delayed native branch fixture","all projects including empty","project/workspace focus","selection/Escape","empty project live icon and rename without movement","dynamic project add/remove","zero provider wakeups","live activity","readable additive streaming","real element fullscreen and state preservation","fullscreen navigation exit","no Overview mutations","bounded floating details card", "stable tab restore with delayed rosters", "explicit inactive groups", "36-member dense group expand/collapse/re-expand", "stable emoji roles", "unchanged graph dimensions on selection","explicit Open chat navigation","Overview remount after chat", ...(expectation.chatPreviewSettings === "required" ? ["default chat preview collapse and one-way expansion", "bounded Overview previews independent of chat preferences", "stock chat preview disable/enable and one-way expansion"] : [])]};
+    result.structuredCommunication = structuredCommunication;
+    result.archiveRefit = archiveRefit;
+    result.checks.push("structured communication retained after pulse expiry", "authoritative archive refits without refresh and preserves selection", "workspace Undo restores the graph");
     fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ ok: true, output, runtimeVersion: status.version, origin: identity.origin }));
   } catch (error) {

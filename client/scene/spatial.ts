@@ -28,6 +28,17 @@ export interface SurfacePoint {
   v: number;
 }
 
+/** One completed activity feed, resolved against the route that actually crossed. */
+export interface StreamArrival {
+  projectId: string;
+  /** Actual terminal point of the stream's current route. */
+  endpoint: SurfacePoint;
+  /** Coalesced visual energy in 0..1. */
+  energy: number;
+  /** Visual seconds already elapsed past the head crossing on a slow frame. */
+  ageSeconds: number;
+}
+
 /** Shared uniform objects: assign these exact references to every warped material. */
 export interface RoomFieldUniforms {
   uRoomField: { value: THREE.Texture };

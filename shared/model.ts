@@ -5,6 +5,39 @@ export type AttentionReason = "finished" | "permission" | "error" | null;
 export type ObservationFreshness = "current" | "refreshing" | "stale";
 export type OverviewConnection = "connected" | "connecting" | "disconnected";
 export type OverviewHostStatus = "idle" | "connecting" | "online" | "offline" | "error";
+export type OverviewArchiveOperationState = "in_progress" | "children_pending" | "unresolved";
+export type OverviewCommunicationKind = "message" | "finished" | "errored" | "permission-required" | "closed";
+
+/** Public daemon archive progress. It never replaces the agent's runtime state. */
+export interface OverviewArchiveOperation {
+  state: OverviewArchiveOperationState;
+  canRetry: boolean;
+}
+
+/** Known live background work. An absent value means unknown, not zero. */
+export interface OverviewBackgroundWork {
+  count: number;
+}
+
+/**
+ * Metadata-only provenance for a public agent-message tool row delivered to a
+ * managed recipient. It never contains the message body.
+ */
+export interface OverviewCommunication {
+  /** Stable semantic identity across timeline epochs, reconnects and store replacements. */
+  id: string;
+  /** Host-qualified sender agent display identity. */
+  senderId: string;
+  senderHostId: string;
+  /** Host-qualified recipient agent display identity; this is the recipient timeline's node. */
+  recipientId: string;
+  recipientHostId: string;
+  kind: OverviewCommunicationKind;
+  /** Unix time in milliseconds when Overview observed the delivery. */
+  observedAt: number;
+  /** Unix time in milliseconds when this bounded recent detail expires. */
+  expiresAt: number;
+}
 
 export interface EventPreview {
   title: string;
@@ -66,6 +99,10 @@ export interface OverviewNode {
   rosterFreshness?: ObservationFreshness;
   /** Last-known status remains useful during a passive refresh, but is not live activity. */
   freshness?: ObservationFreshness;
+  /** Absent means the host did not report archive progress; null is explicit known-none. */
+  archiveOperation?: OverviewArchiveOperation | null;
+  /** Absent means unknown background work; `{ count: 0 }` is explicit known-none. */
+  backgroundWork?: OverviewBackgroundWork;
 }
 
 export interface OverviewEdge {
@@ -88,6 +125,8 @@ export interface OverviewEvent {
   displayOnly?: true;
   /** Unix time in milliseconds, established at observation rather than history import. */
   timestamp: number;
+  /** Metadata-only communication provenance; never the delivered message body. */
+  communication?: OverviewCommunication;
 }
 
 /** The host-independent graph shared by one host snapshot and the composed model. */
@@ -131,6 +170,8 @@ export interface OverviewHostState {
 /** The composed view across configured hosts. Readiness and connection are per host. */
 export interface OverviewModel extends OverviewGraph {
   hosts: readonly OverviewHostState[];
+  /** Optional for legacy fixtures; absent means no retained communications. Oldest first. */
+  recentCommunications?: readonly OverviewCommunication[];
   revision: number;
 }
 

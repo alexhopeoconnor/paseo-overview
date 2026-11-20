@@ -1,10 +1,20 @@
 import type {
-  AttentionReason, OverviewEdge, OverviewHostSnapshot, OverviewModel, OverviewNode, OverviewReadiness, OverviewState, OwnershipIndex,
+  AttentionReason, OverviewArchiveOperation, OverviewEdge, OverviewHostSnapshot, OverviewModel, OverviewNode,
+  OverviewReadiness, OverviewState, OwnershipIndex,
 } from "../shared/model";
 import type { AgentRecord, ProjectRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 
 export function displayId(hostId: string, kind: string, ...parts: string[]): string {
   return [hostId, kind, ...parts].map(encodeURIComponent).join(":");
+}
+function knownArchiveOperation(value: AgentRecord["archiveOperation"]): OverviewArchiveOperation | null | undefined {
+  if (value === undefined || value === null) return value;
+  if ((value.state === "in_progress" || value.state === "children_pending" || value.state === "unresolved")
+    && typeof value.canRetry === "boolean") return { state: value.state, canRetry: value.canRetry };
+  return undefined;
+}
+function knownBackgroundWork(value: AgentRecord["backgroundWork"]): { count: number } | undefined {
+  return value && Number.isInteger(value.count) && value.count >= 0 ? { count: value.count } : undefined;
 }
 export function agentState(agent: AgentRecord): OverviewState {
   if (agent.pendingPermissions?.length || (agent.requiresAttention && agent.attentionReason === "permission")) return "waiting";
@@ -37,6 +47,8 @@ export function normalise(input: {
   const nodes: OverviewNode[] = agents.map(agent => {
     const parent = agent.labels?.["paseo.parent-agent-id"];
     const parentHost = agent.labels?.["paseo.parent-server-id"] || hostId;
+    const archiveOperation = knownArchiveOperation(agent.archiveOperation);
+    const backgroundWork = knownBackgroundWork(agent.backgroundWork);
     return {
       id: displayId(hostId, "agent", agent.id), hostId, kind: "agent", managedAgentId: agent.id,
       workspaceId: agent.workspaceId && knownWorkspaces.has(agent.workspaceId) ? displayId(hostId, "workspace", agent.workspaceId) : null,
@@ -51,6 +63,10 @@ export function normalise(input: {
       rosterFreshness: input.freshness && input.freshness !== "current" ? input.freshness
         : input.rosters.get(agent.id)?.freshness ?? (input.rosters.has(agent.id) ? "current" : "refreshing"),
       freshness: input.freshness ?? "current",
+      // Absent archive progress is unknown; explicit null is known-none.
+      ...(archiveOperation !== undefined ? { archiveOperation } : {}),
+      // Missing background work is unknown. Only a valid non-negative count is known.
+      ...(backgroundWork !== undefined ? { backgroundWork } : {}),
     };
   });
   const agentNodes = new Map(nodes.map(node => [node.managedAgentId, node]));

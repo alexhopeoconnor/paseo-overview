@@ -190,6 +190,7 @@ export function createHostSnapshotComposer(): (
 
 export function emptyOverviewModel(hosts: readonly OverviewHostState[] = [], revision = 0): OverviewModel {
   return {
-    hosts: [...hosts], projects: [], workspaces: [], nodes: [], edges: [], events: [], revision,
+    hosts: [...hosts], projects: [], workspaces: [], nodes: [], edges: [], events: [],
+    recentCommunications: [], revision,
   };
 }

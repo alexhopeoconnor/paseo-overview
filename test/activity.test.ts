@@ -29,6 +29,22 @@ describe("activity", () => {
     expect(heartbeatBpm(true, 20)).toBe(84);
   });
 
+  it("gives a recognized communication one ordinary message weight, never a tool plus message", () => {
+    const tracker = new ActivityTracker();
+    const message: OverviewEvent = {
+      id: "communication", hostId: "h", nodeId: "agent", kind: "message", timestamp: 1000,
+      communication: {
+        id: "h:communication:agent:call", senderId: "h:agent:sender", senderHostId: "h",
+        recipientId: "h:agent:agent", recipientHostId: "h", kind: "finished",
+        observedAt: 1000, expiresAt: 301_000,
+      },
+    };
+    expect(tracker.ingest([message], 1000)).toEqual([message]);
+    expect(tracker.score("agent", 1000)).toBe(1);
+    expect(tracker.ingest([{ ...message, id: "duplicate" }], 1000)).toHaveLength(1);
+    expect(tracker.score("agent", 1000)).toBe(2);
+  });
+
   it("rejects historical or invalid activity and prunes removed nodes", () => {
     const tracker = new ActivityTracker();
     expect(tracker.ingest([

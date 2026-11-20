@@ -261,6 +261,12 @@ function checkRepresentation(nodes) {
     await page.waitForTimeout(3500);
     const feedArrival = await page.evaluate(() => window.overviewTest.feedEvidence());
     assert.ok(feedArrival.arrivals > 0 && feedArrival.arrivals <= feedArrival.admitted, 'Admitted streams arrive without duplicate callbacks');
+    assert.ok(feedArrival.lastArrival, 'An arrival reports its actual terminal');
+    assert.ok(['floor', 'wall'].includes(feedArrival.lastArrival.endpoint.surface)
+      && Number.isFinite(feedArrival.lastArrival.endpoint.u) && Number.isFinite(feedArrival.lastArrival.endpoint.v),
+    'Arrival carries a finite current-route SurfacePoint');
+    assert.ok(feedArrival.lastArrival.energy > 0 && feedArrival.lastArrival.energy <= 1
+      && feedArrival.lastArrival.ageSeconds >= 0, 'Arrival carries bounded energy and visual-age overshoot');
     await page.evaluate(() => { window.overviewTest.appearance({ background: 'static' }); window.overviewTest.motion(false); });
     await settle(page);
     const fieldBeforeIdle = await page.evaluate(() => window.overviewTest.fieldEvidence());
@@ -352,6 +358,95 @@ function checkRepresentation(nodes) {
     await page.keyboard.press('Escape');
     await page.evaluate(() => window.overviewTest.loadNative());
     await settle(page);
+
+    // Confirmed removal contract: managed archives keep surviving focus and
+    // selection, native unload is not a removal, and a project removal that
+    // changes packing converges on the same final fit as a fresh layout.
+    await page.evaluate(() => window.overviewTest.focus({ kind: 'project', id: 'p0' }));
+    await settle(page);
+    await page.evaluate(() => window.overviewTest.motion(false));
+    await node(page, 'n0').click();
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.overviewTest.removeManaged('a0-1')), true);
+    await settle(page);
+    assert.equal(await node(page, 'a0-1').count(), 0, 'Confirmed managed removal is immediate');
+    assert.equal(await node(page, 'n0').count(), 1);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.focused), { kind: 'project', id: 'p0' }, 'Removal preserves surviving focus');
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'n0', 'Removal preserves an unrelated selection');
+    assert.equal(await page.evaluate(() => window.overviewTest.unloadNative('a0-2')), true);
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.overviewTest.filterEvidence().nodes.includes('n36')), false,
+      'Native roster unload removes membership, including collapsed children');
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'n0');
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.focused), { kind: 'project', id: 'p0' });
+    await page.evaluate(() => window.overviewTest.loadNative());
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.overviewTest.filterEvidence().nodes.includes('n36')), true,
+      'Undo restores native membership while retaining the collapsed presentation');
+    assert.equal(await page.evaluate(() => window.overviewTest.removeProject('p2')), true);
+    await settle(page);
+    assert.equal(await node(page, 'p2').count(), 0);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.focused), { kind: 'project', id: 'p0' }, 'Project removal preserves another surviving focus');
+    assert.equal(await page.evaluate(() => window.overviewTest.state.selected), 'n0');
+    await page.evaluate(() => { window.overviewTest.loadNative(); window.overviewTest.focus(null); window.overviewTest.motion(false); });
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.overviewTest.removeProject('p3')), true);
+    await settle(page);
+    assert.equal(await node(page, 'p3').count(), 0);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.layoutEvidence().sort((a, b) => a.id.localeCompare(b.id))),
+      await page.evaluate(() => window.overviewTest.freshFitEvidence().sort((a, b) => a.id.localeCompare(b.id))),
+      'A confirmed removal that changes packing matches a fresh fit');
+    await page.evaluate(() => { window.overviewTest.loadNative(); window.overviewTest.focus(null); window.overviewTest.motion(false); });
+    await settle(page);
+    // Finish the restored structure before admitting activity: ownership pulses
+    // intentionally disappear during a structural transition.
+    await page.evaluate(() => window.overviewTest.motion(true));
+    await settle(page);
+
+    // Communications are foreground information independent of Background Off,
+    // clear on pause without replay, and are consumed by a filter before reveal.
+    await page.evaluate(() => window.overviewTest.communication('a0-0', 'a0-1', 'message'));
+    await page.waitForTimeout(120);
+    assert.ok((await page.evaluate(() => window.overviewTest.communicationEvidence())).active > 0, 'Fresh communication draws a foreground route');
+    const combined = await page.evaluate(async () => {
+      window.overviewTest.resetTelemetry(); window.overviewTest.activity();
+      // Inspect the requested frame directly. A later automation round-trip on
+      // SwiftShader can miss the deliberately short ownership pulse entirely.
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      return { comm: window.overviewTest.communicationEvidence(), feed: window.overviewTest.feedEvidence(),
+        pulseUpdates: window.overviewTest.telemetry().pulseUpdates };
+    });
+    assert.ok(combined.comm.active > 0 && combined.pulseUpdates > 0 && combined.feed.admitted > 0,
+      `Communication, pulse and cloud feed coexist: ${JSON.stringify(combined)}`);
+    await page.evaluate(() => { window.overviewTest.appearance({ background: 'off' }); window.overviewTest.communication('a0-0', 'a0-2', 'finished'); });
+    await page.waitForTimeout(150);
+    assert.ok((await page.evaluate(() => window.overviewTest.communicationEvidence())).active > 0, 'Background Off does not erase communication information');
+    await page.evaluate(() => window.overviewTest.motion(false));
+    await settle(page);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Pause clears travelling communication markers');
+    await page.evaluate(() => window.overviewTest.motion(true));
+    await page.waitForTimeout(300);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Resume does not replay a paused communication');
+    await page.evaluate(() => { window.overviewTest.appearance({ background: 'animated' }); window.overviewTest.communication('a0-0', 'a0-1', 'message'); });
+    await page.waitForTimeout(120);
+    assert.ok((await page.evaluate(() => window.overviewTest.communicationEvidence())).active > 0);
+    await page.evaluate(() => window.overviewTest.filter(['p6']));
+    await settle(page);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Filtering removes hidden communications');
+    await page.evaluate(() => window.overviewTest.filter(null));
+    await settle(page);
+    await page.waitForTimeout(250);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Reveal does not replay consumed communications');
+    await page.evaluate(() => window.overviewTest.communication('a0-0', 'a0-1', 'message'));
+    await page.waitForTimeout(120);
+    assert.ok((await page.evaluate(() => window.overviewTest.communicationEvidence())).active > 0);
+    await page.evaluate(() => { window.overviewTest.dispose(); window.overviewTest.recreate(); });
+    await settle(page);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Remount does not replay retained communications');
+    await page.evaluate(() => window.overviewTest.communication('a0-0', 'a0-1', 'message'));
+    await page.waitForTimeout(120);
+    assert.ok((await page.evaluate(() => window.overviewTest.communicationEvidence())).active > 0, 'New notices still animate after remount');
+
     // Filtering is independent of focus and the authoritative catalogue.
     await page.evaluate(() => { window.overviewTest.motion(false); window.overviewTest.focus(null); });
     await settle(page);

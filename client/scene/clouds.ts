@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { gridPalette, isDarkBackground } from "../appearance";
 import type { OverviewTheme } from "../../shared/renderer";
-import type { ProjectSpatialPresentation } from "./spatial";
+import type { ProjectSpatialPresentation, StreamArrival } from "./spatial";
 import { AMBIENT_PHASE_PERIOD_SECONDS, cloudFragmentShader, cloudLineFragmentShader, cloudVertexShader } from "./ambient-shader";
 import type { OverviewProjection } from "./projection";
 import type { PerspectiveRoom } from "./room";
@@ -11,7 +11,7 @@ export const CLOUD_PROJECT_POINT_LIMIT = 64;
 const CLOUD_BIN_COLUMNS = 64;
 const CLOUD_BIN_ROWS = CLOUD_GLOBAL_POINT_BUDGET / CLOUD_BIN_COLUMNS;
 const CLOUD_ACTIVITY_TIME_CONSTANT = 0.45;
-const CLOUD_ARRIVAL_TIME_CONSTANT = 0.8;
+export const CLOUD_IMPACT_DURATION_SECONDS = 0.9;
 const CLOUD_STATE_WIDTH = 4;
 const CLOUD_STATE_MIN_ROWS = 16;
 const CLOUD_STATE_MAX_ROWS = CLOUD_GLOBAL_POINT_BUDGET;
@@ -66,8 +66,13 @@ interface CloudState {
   energy: number;
   targetEnergy: number;
   focusEnergy: number;
-  arrival: number;
-  arrivalEnergy: number;
+  /** One local-space impact; a newer arrival replaces it without queueing. */
+  impactAge: number;
+  impactStrength: number;
+  impactOriginX: number;
+  impactOriginY: number;
+  /** Staged until this frame's room field commit; newest replaces, never queues. */
+  pendingImpact: StreamArrival | null;
   phase: number;
   links: Map<number, Int16Array>;
   seen: number;
@@ -271,7 +276,8 @@ export class ProjectParticleClouds {
       project: snapshot, fieldProject,
       field: { valid: false, screenX: 0, screenY: 0, energy: 0, visibility: 0 },
       seed, offsets, energy: 0, targetEnergy: bounded(project.energy), focusEnergy: 0,
-      arrival: 0, arrivalEnergy: 0, phase: 0, links: new Map(), seen: 0,
+      impactAge: 0, impactStrength: 0, impactOriginX: 0, impactOriginY: 0,
+      pendingImpact: null, phase: 0, links: new Map(), seen: 0,
     };
   }
 
@@ -444,6 +450,14 @@ export class ProjectParticleClouds {
       changed = this.surface.updateProjects(fieldProjects);
       this.fieldDirty = false;
     }
+    // Arrivals were staged by streams.advance earlier in this frame. Resolve
+    // only now, against the field committed immediately above.
+    for (const state of this.states.values()) {
+      if (!state.pendingImpact) continue;
+      const arrival = state.pendingImpact;
+      state.pendingImpact = null;
+      this.resolveArrival(state, arrival);
+    }
     if (this.stateDirty || this.stateReload) {
       this.writeStateTexture();
       this.stateDirty = false;
@@ -475,21 +489,25 @@ export class ProjectParticleClouds {
     for (const id of projectIds) {
       const state = this.states.get(id);
       if (!state) continue;
-      if (state.arrival !== 0 || state.arrivalEnergy !== 0) changed = true;
-      state.arrival = 0; state.arrivalEnergy = 0;
+      if (state.impactStrength !== 0 || state.pendingImpact !== null) changed = true;
+      state.impactAge = 0; state.impactStrength = 0; state.impactOriginX = 0; state.impactOriginY = 0;
+      state.pendingImpact = null;
     }
     if (changed) this.stateDirty = true;
   }
 
+  /** Sustained activity and the short impact never feed one another's energy. */
   private energyFor(state: CloudState): number {
-    return Math.max(state.energy, state.focusEnergy, state.arrival * state.arrivalEnergy);
+    return Math.max(state.energy, state.focusEnergy);
   }
 
   private writeState(index: number, centre: { x: number; y: number; z: number }, phase: number,
-    radius: { x: number; y: number; z: number }, energy: number, alpha: number, worldPerPixel: number): void {
+    radius: { x: number; y: number; z: number }, energy: number, alpha: number, worldPerPixel: number,
+    impact = { x: 0, y: 0, age: 0, strength: 0 }): void {
     let dirty = false;
     const base = index * CLOUD_STATE_WIDTH * 4;
-    const values = [centre.x, centre.y, centre.z, phase, radius.x, radius.y, radius.z, energy, alpha, worldPerPixel, 1, 0];
+    const values = [centre.x, centre.y, centre.z, phase, radius.x, radius.y, radius.z, energy,
+      alpha, worldPerPixel, 1, 0, impact.x, impact.y, impact.age, impact.strength];
     for (let offset = 0; offset < values.length; offset++) dirty = store(this.stateArray, base + offset, values[offset]!) || dirty;
     if (dirty) this.stateWriteDirty = true;
   }
@@ -533,7 +551,8 @@ export class ProjectParticleClouds {
         const radiusY = Math.max(46, Math.abs(project.screenBounds.height) * 0.56) * worldPerPixel * energyScale;
         const centre = this.surface.projectPoint(project.screenCentre, project.viewDepth);
         const alpha = bounded(project.visibility) * 0.46 * (0.24 + energy * 0.76);
-        this.writeState(index, centre, state.phase, { x: radiusX, y: radiusY, z: (radiusX + radiusY) * 0.38 }, energy, alpha, worldPerPixel);
+        this.writeState(index, centre, state.phase, { x: radiusX, y: radiusY, z: (radiusX + radiusY) * 0.38 }, energy, alpha, worldPerPixel,
+          { x: state.impactOriginX, y: state.impactOriginY, age: state.impactAge, strength: state.impactStrength });
       });
     }
     // One version bump per flush keeps the upload atomic instead of per slot.
@@ -564,26 +583,58 @@ export class ProjectParticleClouds {
       if (state.project.live === false) continue;
       state.phase = (state.phase + step % AMBIENT_PHASE_PERIOD_SECONDS) % AMBIENT_PHASE_PERIOD_SECONDS;
       state.energy = ease(state.energy, state.targetEnergy, elapsed);
-      const arrival = state.arrival > 0 ? Math.max(0, state.arrival * Math.exp(-elapsed / CLOUD_ARRIVAL_TIME_CONSTANT)) : 0;
-      state.arrival = arrival < 0.001 ? 0 : arrival;
+      if (state.impactStrength > 0) {
+        state.impactAge += elapsed * safeRate;
+        if (state.impactAge >= CLOUD_IMPACT_DURATION_SECONDS) {
+          state.impactAge = 0; state.impactStrength = 0; state.impactOriginX = 0; state.impactOriginY = 0;
+        }
+      }
     }
     this.stateDirty = true;
   }
 
-  arrive(projectId: string, energy: number): void {
-    const state = this.states.get(projectId);
-    if (!state || state.project.live === false || this.disposed) return;
-    state.arrival = 1;
-    state.arrivalEnergy = bounded(energy);
+  /** Stage one real completion until flushState commits the same frame's field. */
+  arrive(arrival: StreamArrival): void {
+    const state = this.states.get(arrival.projectId);
+    if (!state || state.project.live === false || this.disposed || this.aggregated ||
+      !Number.isFinite(arrival.energy) || arrival.energy <= 0 ||
+      !Number.isFinite(arrival.ageSeconds) || arrival.ageSeconds < 0 || arrival.ageSeconds >= CLOUD_IMPACT_DURATION_SECONDS) return;
+    state.pendingImpact = {
+      projectId: arrival.projectId, endpoint: { ...arrival.endpoint },
+      energy: arrival.energy, ageSeconds: arrival.ageSeconds,
+    };
     this.stateDirty = true;
+  }
+
+  private resolveArrival(state: CloudState, arrival: StreamArrival): void {
+    if (state.project.live === false || this.aggregated || arrival.ageSeconds >= CLOUD_IMPACT_DURATION_SECONDS) return;
+    try {
+      // This runs only after surface.updateProjects: the stream's warped route
+      // endpoint and this lookup therefore use one identical committed field.
+      const world = this.surface.warpSurfacePoint(arrival.endpoint);
+      const screen = this.projection.screenPoint(world);
+      const centre = state.project.screenCentre;
+      const energyScale = 0.94 + this.energyFor(state) * 0.18;
+      const radiusX = Math.max(52, Math.abs(state.project.screenBounds.width) * 0.56) * energyScale;
+      const radiusY = Math.max(46, Math.abs(state.project.screenBounds.height) * 0.56) * energyScale;
+      const x = (screen.x - centre.x) / radiusX, y = (centre.y - screen.y) / radiusY;
+      if (![screen.x, screen.y, x, y].every(Number.isFinite)) return;
+      state.impactOriginX = Math.max(-1.5, Math.min(1.5, x));
+      state.impactOriginY = Math.max(-1.5, Math.min(1.5, y));
+      state.impactAge = arrival.ageSeconds;
+      // A single raw event must remain perceptible over the sustained cloud;
+      // keep the response bounded while retaining energy at the top of the range.
+      state.impactStrength = 0.65 + 0.35 * bounded(arrival.energy);
+    } catch { /* An invalid route endpoint cannot fabricate an impact. */ }
   }
 
   clearTransient(): void {
     if (this.disposed) return;
     let changed = false;
     for (const state of this.states.values()) {
-      if (state.arrival !== 0 || state.arrivalEnergy !== 0) changed = true;
-      state.arrival = 0; state.arrivalEnergy = 0;
+      if (state.impactStrength !== 0 || state.pendingImpact !== null) changed = true;
+      state.impactAge = 0; state.impactStrength = 0; state.impactOriginX = 0; state.impactOriginY = 0;
+      state.pendingImpact = null;
     }
     if (changed) this.stateDirty = true;
   }

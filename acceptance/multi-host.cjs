@@ -5,7 +5,7 @@ const { spawn } = require("node:child_process");
 const { setTimeout: delay } = require("node:timers/promises");
 
 /** Exercise borrowed host APIs with the plugin installed only on the first host. */
-async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directory, freePort, waitFor, DaemonClient, WebSocket, runtimeVersion, expectedOfflineErrors, onRemoteShutdown }) {
+async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directory, freePort, waitFor, DaemonClient, WebSocket, runtimeVersion, expectedOfflineErrors, onRemoteShutdown, localClient, localAgent }) {
   const home = path.join(output, "remote-state");
   fs.mkdirSync(home, { mode: 0o700 });
   const listen = `127.0.0.1:${await freePort()}`;
@@ -64,6 +64,17 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
     const remoteAgent = page.locator(`[data-overview-id="${remoteAgentId}"]`);
     await remoteAgent.waitFor({ state: "visible" });
     assert.deepEqual(wakeups(), baselineWakeups, "Observing a remote host does not start its provider");
+    const senderHostId = localClient.getLastServerInfoMessage().serverId;
+    await client.sendAgentMessage(agent.id, "Observe the exact cross-host acceptance sender.", {
+      sourceAgentId: localAgent.id, sourceAgentServerId: senderHostId,
+      messageId: "overview-acceptance-cross-host-contact",
+    });
+    await remoteAgent.click();
+    await waitFor(async () => await page.getByTestId("overview-recent-communication").count() > 0
+      && (await page.getByTestId("overview-recent-communication").innerText()).includes(localAgent.title),
+    "cross-host structured sender resolves to the local agent");
+    await page.screenshot({ path: path.join(output, "cross-host-communication.png") });
+    await page.getByTestId("overview-details-close").click();
     const wasMoving = await page.getByTestId("overview-motion").getAttribute("aria-label") === "Pause animation";
     if (wasMoving) await page.getByTestId("overview-motion").click();
     const canvas = await page.getByTestId("overview-canvas-host").boundingBox();
@@ -103,7 +114,8 @@ async function checkMultipleHosts({ page, cli, env, output, overviewUrl, directo
     await waitFor(async () => (await page.getByTestId("overview-host-filter").getAttribute("aria-label"))?.includes("offline") || (await page.locator("body").innerText()).toLowerCase().includes("offline"), "remote offline indicator");
     assert.equal(await page.locator('[data-overview-kind="project"]').count(), 8, "Disconnected host retains its known graph");
     await page.screenshot({ path: path.join(output, "two-hosts-offline.png") });
-    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true, hostFilterRefit: true, expectedOfflineErrors };
+    return { ok: true, pluginInstalledOnRemote: false, projectCount: 8, remoteChatHost: serverId, passiveRemoteObservation: true, hostFilterRefit: true,
+      structuredCommunication: { senderHostId, recipientHostId: serverId, senderAgentId: localAgent.id, recipientAgentId: agent.id }, expectedOfflineErrors };
   } finally { await stop(); }
 }
 

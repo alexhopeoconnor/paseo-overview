@@ -151,26 +151,33 @@ export class PerspectiveRoom implements RoomSurface {
       if (footprint <= 1 && distance < best) { best = distance; destination = candidate; }
     }
     const route: SurfacePoint[] = [];
-    if ((hash & 2) === 0) {
-      const nearY = this.projection.height * 1.18, nearDepth = this.floorDepthAt(nearY);
-      const nearZ = grid(-nearDepth + ROOM_WALL_VIEW_DEPTH) - ROOM_WALL_VIEW_DEPTH;
-      const entranceX = grid(this.projectPoint({ x: outsideX, y: nearY }, nearDepth).x);
-      route.push(
-        { surface: "floor", u: u(entranceX), v: (nearZ + ROOM_WALL_VIEW_DEPTH) / spacing },
-        { surface: "floor", u: u(junctionX), v: (nearZ + ROOM_WALL_VIEW_DEPTH) / spacing },
-        { surface: "floor", u: u(junctionX), v: 0 },
-      );
+    const push = (point: SurfacePoint): void => {
+      const last = route[route.length - 1];
+      if (!last || last.surface !== point.surface || last.u !== point.u || last.v !== point.v) route.push(point);
+    };
+    const nearY = this.projection.height * 1.18, nearDepth = this.floorDepthAt(nearY);
+    const nearZ = grid(-nearDepth + ROOM_WALL_VIEW_DEPTH) - ROOM_WALL_VIEW_DEPTH;
+    const entrance: SurfacePoint = (hash & 2) === 0
+      ? { surface: "floor", u: u(grid(this.projectPoint({ x: outsideX, y: nearY }, nearDepth).x)),
+        v: (nearZ + ROOM_WALL_VIEW_DEPTH) / spacing }
+      : { surface: "wall", u: u(grid(this.projectPoint({ x: outsideX, y: wallScreenY }, ROOM_WALL_VIEW_DEPTH).x)),
+        v: (wallY - floorY) / spacing };
+    push(entrance);
+    if (destination.surface === entrance.surface) {
+      // A same-surface feed uses one deterministic orthogonal elbow at the
+      // destination column. It never descends to the seam and reverses back up
+      // the same junction segment.
+      push({ surface: entrance.surface, u: destination.u, v: entrance.v });
+      push(destination);
     } else {
-      const entranceX = grid(this.projectPoint({ x: outsideX, y: wallScreenY }, ROOM_WALL_VIEW_DEPTH).x);
-      route.push(
-        { surface: "wall", u: u(entranceX), v: (wallY - floorY) / spacing },
-        { surface: "wall", u: u(junctionX), v: (wallY - floorY) / spacing },
-        { surface: "wall", u: u(junctionX), v: 0 },
-      );
+      const junctionU = u(junctionX);
+      push({ surface: entrance.surface, u: junctionU, v: entrance.v });
+      push({ surface: entrance.surface, u: junctionU, v: 0 });
+      // A genuine floor/wall seam keeps both surface discriminators.
+      push({ surface: destination.surface, u: junctionU, v: 0 });
+      push({ surface: destination.surface, u: junctionU, v: destination.v });
+      push(destination);
     }
-    const seam = route[route.length - 1]!;
-    if (destination.surface !== seam.surface) route.push({ surface: destination.surface, u: seam.u, v: 0 });
-    route.push({ surface: destination.surface, u: seam.u, v: destination.v }, destination);
     return route;
   }
 

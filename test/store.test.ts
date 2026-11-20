@@ -6,6 +6,7 @@ import { isHostAuthoritative, isHostLive } from "../shared/hosts";
 import type { AgentRecord, NativeRecord, ProjectIcon, RosterSnapshot } from "../shared/observation";
 import { BubbleStore } from "../client/bubbles";
 import { ActivityTracker } from "../client/activity";
+import { COMMUNICATION_TTL_MS } from "../client/communications";
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -637,6 +638,103 @@ describe("Overview observations", () => {
   });
 });
 
+describe("managed communication provenance", () => {
+  type Store = ReturnType<typeof setup>;
+  const message = (overrides: Record<string, unknown> = {}) => ({
+    event: "message", sender: { id: "sender", title: "Parent" }, text: "PRIVATE BODY", ...overrides,
+  });
+  function emit(test: Store, seq: number, callId: string, payload: unknown, epoch = "epoch", replayed = false) {
+    test.timelineHandlers.get("parent")?.({ epoch, seq, replayed, event: { type: "timeline", item: {
+      type: "tool_call", callId, name: "agent_message", status: "completed", agentMessage: payload,
+    } } });
+  }
+
+  it("produces one metadata-only message event for a managed recipient, with no tool duplicate or body", async () => {
+    const test = setup(); await test.store.start(); await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = test.store.model;
+    emit(test, 1, "paseo-agent-message:one", message());
+    await vi.advanceTimersByTimeAsync(50);
+    const events = test.store.model.events;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      hostId: "host", nodeId: "host:agent:parent", kind: "message",
+      preview: { title: "Message received", truncated: false },
+    });
+    expect(events[0].text).toBeUndefined();
+    expect(events[0].communication).toEqual({
+      id: "host:communication:parent:paseo-agent-message%3Aone",
+      senderId: "host:agent:sender", senderHostId: "host",
+      recipientId: "host:agent:parent", recipientHostId: "host",
+      kind: "message", observedAt: expect.any(Number), expiresAt: expect.any(Number),
+    });
+    expect(events[0].communication!.expiresAt - events[0].communication!.observedAt).toBe(300_000);
+    expect(JSON.stringify(events)).not.toContain("PRIVATE BODY");
+    expect(events.filter(event => event.kind === "tool")).toEqual([]);
+    expect(test.store.model.nodes.some(node => node.id === "host:agent:sender")).toBe(false);
+    expect(test.store.model.edges).toBe(before.edges);
+    const tracker = new ActivityTracker();
+    expect(tracker.ingest(events, Date.now())).toHaveLength(1);
+    expect(tracker.score("host:agent:parent", Date.now())).toBe(1);
+  });
+
+  it("deduplicates across epochs and replay, and rejects malformed or unknown structured payloads", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    emit(test, 1, "duplicate", message());
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events).toHaveLength(1);
+
+    emit(test, 1, "duplicate", message(), "other-epoch");
+    emit(test, 2, "duplicate", message(), "epoch");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events).toHaveLength(1);
+
+    emit(test, 3, "replayed", message(), "epoch", true);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events).toHaveLength(1);
+
+    const malformed = [
+      message({ sender: { id: "sender", serverId: "" } }),
+      message({ sender: { id: "sender", serverId: 42 } }),
+      message({ event: "later" }),
+      message({ sender: {} }),
+      message({ text: 42 }),
+      message({ sender: { id: "sender", title: "Parent" }, extra: true, event: "unknown" }),
+      null,
+    ];
+    for (const [index, payload] of malformed.entries()) {
+      emit(test, 10 + index, `malformed-${index}`, payload);
+    }
+    await vi.advanceTimersByTimeAsync(50);
+    const communications = test.store.model.events.filter(event => event.communication);
+    expect(communications).toHaveLength(1);
+    const tools = test.store.model.events.filter(event => event.kind === "tool");
+    expect(tools).toHaveLength(malformed.length);
+    expect(tools.every(event => !event.communication)).toBe(true);
+    expect(JSON.stringify(tools)).not.toContain("PRIVATE BODY");
+
+    emit(test, 20, "remote", message({ sender: { id: "sender", serverId: "remote", title: "Parent", extra: true }, ignored: true }));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events.filter(event => event.communication)).toHaveLength(2);
+    expect(test.store.model.events.filter(event => event.communication).at(-1)?.communication).toMatchObject({
+      senderId: "remote:agent:sender", senderHostId: "remote",
+      recipientId: "host:agent:parent", recipientHostId: "host",
+    });
+    expect(test.store.model.nodes.some(node => node.id === "host:agent:parent")).toBe(true);
+  });
+
+  it("does not parse provider-native timeline rows as managed recipient provenance", async () => {
+    const test = setup(); await test.store.start(); await flush();
+    test.events.emit({ type: "agent.provider_subagents.update", payload: {
+      kind: "timeline", parentAgentId: "parent", subagentId: "child", epoch: "e", seq: 1,
+      item: { type: "tool_call", callId: "native", name: "agent_message", status: "completed",
+        agentMessage: message() }, timestamp: "now",
+    } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(test.store.model.events.every(event => !event.communication)).toBe(true);
+    expect(test.store.model.events).toMatchObject([{ kind: "tool", nodeId: "host:native:parent:child" }]);
+  });
+});
+
 describe("directory resynchronization", () => {
   type Value = { id: string; name: string; seq?: number };
   const snapshot = (name: string, generation: string, headSeq: number): DirectoryPage<Value> => ({
@@ -1051,6 +1149,154 @@ describe("multi-host coordinator", () => {
     one.timelineHandlers.get("same")?.({ timestamp: "fresh", event: { type: "turn_started", turnId: "fresh" } });
     await vi.advanceTimersByTimeAsync(50);
     expect(hosts.model.events.filter(event => event.hostId === "one")).toHaveLength(1);
+  });
+
+  function emitCommunication(host: ReturnType<typeof coordinatorHost>, seq: number, callId: string, input: {
+    kind?: "message" | "finished" | "errored" | "permission-required" | "closed";
+    senderId?: string; serverId?: string; text?: string; epoch?: string; replayed?: boolean; agentId?: string;
+  } = {}) {
+    host.timelineHandlers.get(input.agentId ?? "same")?.({ epoch: input.epoch ?? "epoch", seq, replayed: input.replayed,
+      event: { type: "timeline", item: {
+        type: "tool_call", callId, name: "agent_message", status: "completed",
+        agentMessage: { event: input.kind ?? "message", sender: {
+          id: input.senderId ?? "sender", ...(input.serverId ? { serverId: input.serverId } : {}),
+        }, text: input.text ?? "PRIVATE BODY" },
+      } } });
+  }
+
+  it("keeps cross-host communication identities distinct and never turns provenance into nodes or edges", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    const before = hosts.model;
+    emitCommunication(one, 1, "same-call", { serverId: "two" });
+    emitCommunication(two, 1, "same-call");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications?.map(communication => communication.id)).toEqual([
+      "one:communication:same:same-call", "two:communication:same:same-call",
+    ]);
+    expect(hosts.model.events.filter(event => event.kind === "message")).toHaveLength(2);
+    expect(hosts.model.nodes.some(node => node.id.endsWith(":agent:sender"))).toBe(false);
+    expect(hosts.model.edges.some(edge => edge.id.includes("communication"))).toBe(false);
+    expect(hosts.model.projects).toBe(before.projects);
+    expect(hosts.model.workspaces).toBe(before.workspaces);
+    expect(hosts.model.nodes).toBe(before.nodes);
+    expect(hosts.model.edges).toBe(before.edges);
+  });
+
+  it("suppresses a duplicate communication event before scoring across a store replacement", async () => {
+    const first = coordinatorHost("one"), replacement = coordinatorHost("one");
+    let current = first.api;
+    const hosts = createOverviewHosts({
+      acquire: () => current, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    emitCommunication(first, 1, "replacement-call");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+    expect(hosts.model.events.filter(event => event.communication)).toHaveLength(1);
+
+    current = replacement.api;
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    emitCommunication(replacement, 1, "replacement-call", { epoch: "new" });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+    expect(hosts.model.events.filter(event => event.communication)).toEqual([]);
+    expect(hosts.model.events.some(event => event.kind === "tool")).toBe(false);
+  });
+
+  it("retains metadata through transient expiry and disconnect, then re-ages it while hidden", async () => {
+    const one = coordinatorHost("one");
+    const changed = vi.fn();
+    const hosts = createOverviewHosts({
+      acquire: () => one.api, observeActivity: true, onChange: changed,
+    });
+    disposals.push(() => hosts.dispose());
+    const online = { id: "one", label: "One", status: "online" as const };
+    hosts.setHosts([online]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    emitCommunication(one, 1, "retained");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(hosts.model.events).toEqual([]);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+
+    hosts.setHosts([{ ...online, status: "offline" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.hosts[0]?.connection).toBe("disconnected");
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+
+    hosts.setVisible(false);
+    const emissions = changed.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(COMMUNICATION_TTL_MS + 1000);
+    expect(changed).toHaveBeenCalledTimes(emissions);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+
+    hosts.setVisible(true);
+    await flush();
+    expect(hosts.model.recentCommunications).toEqual([]);
+  });
+
+  it("keeps ordinary activity and one full-weight event when retained history saturates", async () => {
+    const one = coordinatorHost("one");
+    const hosts = createOverviewHosts({
+      acquire: () => one.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+
+    for (let seq = 1; seq <= 1100; seq++) {
+      emitCommunication(one, seq, `call-${seq}`);
+      if (seq % 60 === 0) await vi.advanceTimersByTimeAsync(50);
+    }
+    await vi.advanceTimersByTimeAsync(50);
+    const retained = hosts.model.recentCommunications ?? [];
+    expect(retained).toHaveLength(512);
+    expect(new Set(retained.map(communication => communication.id)).size).toBe(512);
+    expect(retained.some(communication => communication.id.includes("call-1100"))).toBe(false);
+
+    const limited = hosts.model.events.filter(event => event.kind === "message" && !event.communication);
+    expect(limited.length).toBeGreaterThan(0);
+    const tracker = new ActivityTracker();
+    expect(tracker.ingest(hosts.model.events, Date.now())).toEqual(hosts.model.events);
+    expect(tracker.score("one:agent:same", Date.now())).toBeGreaterThan(0);
+
+    one.timelineHandlers.get("same")?.({ timestamp: "ordinary", event: { type: "turn_started", turnId: "ordinary" } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.events.some(event => event.kind === "activity" && !event.communication)).toBe(true);
+  });
+
+  it("drops metadata touching a removed host but keeps metadata for an offline recipient host", async () => {
+    const one = coordinatorHost("one"), two = coordinatorHost("two");
+    const hosts = createOverviewHosts({
+      acquire: hostId => hostId === "one" ? one.api : two.api, observeActivity: true, onChange: vi.fn(),
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([
+      { id: "one", label: "One", status: "online" },
+      { id: "two", label: "Two", status: "online" },
+    ]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    emitCommunication(one, 1, "from-two", { serverId: "two" });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications).toHaveLength(1);
+
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(hosts.model.recentCommunications).toEqual([]);
   });
 });
 

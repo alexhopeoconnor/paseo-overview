@@ -62,6 +62,37 @@ describe("explicit inactive branches", () => {
     const unread = { ...model, nodes: model.nodes.map(node => node.id === "a" ? { ...node, attention: true, attentionReason: "finished" as const } : node) };
     expect(compute(unread).hidden.has("a")).toBe(false);
   });
+  it("keeps known background work visible but treats zero and unknown as quiet", () => {
+    const model = fixture();
+    const withBackground = { ...model, nodes: model.nodes.map(node =>
+      node.id === "a" ? { ...node, backgroundWork: { count: 1 } } : node) };
+    const visible = compute(withBackground);
+    expect(visible.hidden.has("a")).toBe(false);
+    expect(visible.hidden.has("grandchild")).toBe(false);
+    expect(visible.groups).toEqual([]);
+
+    const knownEmpty = { ...model, nodes: model.nodes.map(node =>
+      node.id === "a" ? { ...node, backgroundWork: { count: 0 } } : node) };
+    expect(compute(knownEmpty).hidden.has("a")).toBe(true);
+    expect(compute(model).hidden.has("a")).toBe(true);
+  });
+
+  it("keeps every archive recovery state visible while null or absent stays quiet", () => {
+    const model = fixture();
+    for (const state of ["in_progress", "children_pending", "unresolved"] as const) {
+      const withArchive = { ...model, nodes: model.nodes.map(node =>
+        node.id === "a" ? { ...node, state: "idle" as const, archiveOperation: { state, canRetry: true } } : node) };
+      const result = compute(withArchive);
+      expect(result.hidden.has("a")).toBe(false);
+      expect(result.hidden.has("grandchild")).toBe(false);
+      expect(result.groups).toEqual([]);
+    }
+    const knownNone = { ...model, nodes: model.nodes.map(node =>
+      node.id === "a" ? { ...node, archiveOperation: null } : node) };
+    expect(compute(knownNone).hidden.has("a")).toBe(true);
+    expect(compute(model).hidden.has("a")).toBe(true);
+  });
+
   it("does not fold a previously expanded nested branch into a newly eligible ancestor group", () => {
     const model = fixture();
     model.nodes = [...model.nodes, { ...model.nodes[4]!, id: "second-grandchild" }];

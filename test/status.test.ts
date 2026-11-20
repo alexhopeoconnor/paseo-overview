@@ -54,4 +54,26 @@ describe("status presentation", () => {
     expect(statusColour(legacy, theme)).toBe(theme.accent);
     expect(needsInput(legacy)).toBe(false);
   });
+
+  it("shows archive progress distinctly without rewriting the runtime state", () => {
+    expect(statusLabel(node({ state: "idle", archiveOperation: { state: "in_progress", canRetry: false } })))
+      .toBe("Idle · Archiving");
+    expect(statusLabel(node({ state: "idle", archiveOperation: { state: "children_pending", canRetry: true } })))
+      .toBe("Idle · Archive incomplete · children pending");
+    expect(statusLabel(node({ state: "working", archiveOperation: { state: "unresolved", canRetry: true } })))
+      .toBe("Working · Archive unresolved");
+    expect(statusLabel(node({ state: "closed", archiveOperation: { state: "unresolved", canRetry: false } })))
+      .toBe("Closed · Archive unresolved");
+    expect(statusColour(node({ state: "idle", archiveOperation: { state: "unresolved", canRetry: true } }), theme))
+      .toBe(theme.muted);
+    expect(statusLabel(node({ archiveOperation: null }))).toBe("Idle");
+  });
+
+  it("shows only positive known background work and keeps a zero count quiet", () => {
+    expect(statusLabel(node({ backgroundWork: { count: 2 } }))).toBe("Idle · 2 background tasks");
+    expect(statusLabel(node({ backgroundWork: { count: 1 } }))).toBe("Idle · 1 background task");
+    expect(statusLabel(node({ backgroundWork: { count: 0 } }))).toBe("Idle");
+    expect(statusLabel(node())).toBe("Idle");
+    expect(statusColour(node({ backgroundWork: { count: 2 } }), theme)).toBe(theme.muted);
+  });
 });

@@ -132,9 +132,86 @@ const percentile = (values, fraction) => {
     assert.deepEqual(errors, []);
     assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), [], 'Renderer reports no internal failure');
     assert.ok(results.find(item => item.name === 'quiet-clouds').frames > 0, 'Online quiet clouds still animate');
+
+    // New behavior is sampled separately so the original matched workloads stay
+    // directly comparable with the retained hardware baseline.
+    await page.evaluate(() => {
+      window.overviewTest.visibility(true); window.overviewTest.loadNative();
+      window.overviewTest.motion(true); window.overviewTest.background(true);
+      window.overviewTest.theme(false);
+    });
+    await page.waitForTimeout(1500);
+    const resourcesBeforeBurst = await page.evaluate(() => window.overviewTest.resourceEvidence());
+    await page.evaluate(() => {
+      const agents = ['a0-0', 'a0-1', 'a0-2', 'a1-0', 'a1-1', 'a2-0'];
+      for (let index = 0; index < 36; index++) {
+        const sender = agents[index % agents.length];
+        const recipient = agents[(index + 1 + Math.floor(index / agents.length)) % agents.length];
+        if (sender !== recipient) window.overviewTest.communication(sender, recipient);
+      }
+      window.overviewTest.activity();
+    });
+    await page.waitForTimeout(180);
+    const communicationBurst = await page.evaluate(() => window.overviewTest.communicationEvidence());
+    assert.ok(communicationBurst.active > 0 && communicationBurst.active <= 12);
+    assert.ok(communicationBurst.objects <= 36, 'Directed burst keeps at most twelve three-object routes');
+    await page.screenshot({ path: `${output}/hardware-communication.png` });
+    const resourcesDuringBurst = await page.evaluate(() => window.overviewTest.resourceEvidence());
+    const burstSample = await sample('communication-and-feed-burst', 4000);
+    await page.waitForTimeout(4500);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Burst routes expire without a queue');
+    await page.evaluate(() => window.overviewTest.refresh());
+    await page.waitForTimeout(150);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Publication does not replay retained communication');
+    const resourcesAfterBurst = await page.evaluate(() => window.overviewTest.resourceEvidence());
+    assert.equal(resourcesAfterBurst.textures, resourcesBeforeBurst.textures, 'Communications allocate no textures');
+    assert.ok(resourcesAfterBurst.geometries <= resourcesDuringBurst.geometries - communicationBurst.active * 2,
+      'Each expired route releases its path and arrow geometry; the existing activity pool may remain warm');
+
+    // Capture an actual feed completion on a busy cloud, then its decay.
+    const arrivalsBefore = await page.evaluate(() => window.overviewTest.feedEvidence().arrivals);
+    await page.evaluate(() => window.overviewTest.activity());
+    await page.waitForFunction(count => window.overviewTest.feedEvidence().arrivals > count, arrivalsBefore);
+    await page.waitForTimeout(120);
+    const cloudArrival = await page.evaluate(() => window.overviewTest.feedEvidence().lastArrival);
+    const impactCapture = await page.evaluate(id => window.overviewTest.impactEvidence(id), cloudArrival.projectId);
+    const { on: impactOn, off: impactOff, ...impactEvidence } = impactCapture;
+    await fs.writeFile(`${output}/hardware-impact-on.png`, Buffer.from(impactOn.split(',')[1], 'base64'));
+    await fs.writeFile(`${output}/hardware-impact-control.png`, Buffer.from(impactOff.split(',')[1], 'base64'));
+    assert.ok(impactEvidence.impacts.length > 0, 'Capture contains a committed real arrival');
+    assert.ok(impactEvidence.strongChangedPixels > 20,
+      `The same-frame impact changes visible cloud pixels: ${JSON.stringify(impactEvidence)}`);
+    await page.screenshot({ path: `${output}/hardware-cloud-arrival.png` });
+    await page.waitForTimeout(1000);
+    await page.screenshot({ path: `${output}/hardware-cloud-decayed.png` });
+    assert.ok(cloudArrival && Number.isFinite(cloudArrival.ageSeconds));
+
+    await page.evaluate(() => window.overviewTest.communication('a0-0', 'a0-1'));
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.overviewTest.removeManaged('a0-1')), true);
+    await page.waitForTimeout(300);
+    const afterRemoval = await page.evaluate(() => window.overviewTest.communicationEvidence());
+    assert.equal(afterRemoval.active, 0, 'Removal clears a route whose endpoint disappeared');
+    await page.evaluate(() => {
+      window.overviewTest.communication('a0-0', 'a0-2');
+      window.overviewTest.visibility(false);
+    });
+    const hiddenCommunication = await sample('hidden-after-communication', 500);
+    assert.equal(hiddenCommunication.frames, 0);
+    await page.evaluate(() => window.overviewTest.visibility(true));
+    await page.waitForTimeout(150);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Visibility restoration does not replay');
+    await page.evaluate(() => { window.overviewTest.dispose(); window.overviewTest.recreate(); });
+    await page.waitForTimeout(200);
+    assert.equal((await page.evaluate(() => window.overviewTest.communicationEvidence())).active, 0, 'Remount consumes the retained event baseline');
+    assert.deepEqual(errors, []);
+    assert.deepEqual(await page.evaluate(() => window.overviewTest.state.errors), []);
+    const newBehavior = { communicationBurst, burstSample, resourcesBeforeBurst, resourcesDuringBurst, resourcesAfterBurst,
+      cloudArrival, impactEvidence, afterRemoval, hiddenCommunication, resize: { width: 1280, height: 900 }, lifecycle: true };
     await fs.writeFile(`${output}/performance-results.json`, JSON.stringify({ gpu, viewport: { width: 1516, height: 1100 },
       comparison: 'Matched foreground with background on/off. Off also removes decorative scheduling; CPU metrics include browser work.',
-      pointerSelectionMs: selections, results, errors }, null, 2));
+      pointerSelectionMs: selections, results, newBehavior, errors }, null, 2));
     console.log(JSON.stringify({ gpu, pointerSelectionMs: selections, results }, null, 2));
   } finally {
     await context?.close();

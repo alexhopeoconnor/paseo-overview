@@ -49,6 +49,24 @@ arrow keys move between parents, children and siblings. Escape or a background
 click closes details first; another returns to the filtered overview. The graph has no
 wheel zoom or orbit controls; browser zoom remains available.
 
+Confirmed removals re-fit the graph when visible packing changes, retaining
+surviving focus, selection, filters and expanded groups. A partial refresh,
+disconnection or unloaded native roster does not imply an archive.
+
+Archive progress is presented separately from the agent's runtime status:
+**Archiving**, **Archive incomplete · children pending**, or **Archive unresolved**.
+A retryable archive only points back to **Open chat**; Overview never performs it.
+Known background work is also informational, and a missing count remains unknown
+rather than zero. Recent structured agent-to-agent deliveries to a managed
+recipient can add a bounded details readout with the counterpart, direction,
+automatic notice kind and last contact. It contains no message text and does not
+create graph nodes, membership or delegation edges.
+In the browser, fresh deliveries draw a short solid directional route between
+visible agents; dashed lines continue to mean parent delegation. Routes are
+bounded to twelve directed pairs and disappear after a few seconds. Pausing,
+hiding or filtering consumes them without later replay; Recent communication
+details remain available for the longer observation window.
+
 **Fullscreen graph** expands the Overview container, including its header,
 bubbles and details, while leaving the surrounding Paseo navigation outside it.
 The existing graph stays mounted. **Exit fullscreen** or Escape restores the
@@ -59,8 +77,11 @@ Quiet subordinate branches appear as **N inactive**. Click the count to expand;
 use **Collapse N** on the owner to fold them again. Preferences survive focus,
 tab suspension and reopening Overview during the same plugin session. Working,
 waiting, failed, unknown and attention-bearing agents remain visible, as do
-selected nodes and delegation endpoints. Groups explain their finished, idle,
-closed and canceled composition and preserve original membership and activity totals.
+selected nodes, delegation endpoints, agents with positive reported background
+work and agents with archive recovery progress. An absent background-work count is
+unknown and does not block grouping; an explicit null archive state does not either.
+Groups explain their finished, idle, closed and canceled composition and preserve
+original membership and activity totals.
 
 Fresh observed events produce bounded light trails along ownership connections.
 Their arrival highlights each ancestor once. A quiet heartbeat also indicates
@@ -79,8 +100,11 @@ The browser graph floats in front of a procedural room with a perspective floor
 and back wall. Soft particle clouds drift behind the graphs, with their sparse
 connecting lines following the same particles. Active clouds gently bend the
 grid behind them. Small binary heads and fading light trails follow that same
-surface, including the floor/wall seam. Fresh activity admits a bounded feed
-to a grid junction behind its cloud; arrival briefly brightens the cloud. A few
+surface, including the floor/wall seam. Same-surface feeds do not retrace their
+segments. Fresh activity admits a bounded feed to a grid junction behind its
+cloud; arrival creates one localized ripple and glow at that endpoint, separate
+from sustained activity. Particle connections follow the displaced particles.
+A few
 decorative streams also cross the room without a cloud destination. These are
 visual summaries and decoration, not byte counters. They never add activity
 scores or replay missed events. Selected quiet and empty projects remain visible.
@@ -144,6 +168,36 @@ chat history. It does not prompt, stop, archive, answer permissions, change
 metadata or clear attention. **Open chat** deliberately navigates into the normal
 Paseo chat screen on the agent's owning host, where that screen's usual behaviour applies.
 
+Optional public agent fields carry archive progress and live background-work
+counts without changing runtime state. A recognized structured delivery on a
+managed recipient's timeline is reduced at observation time to bounded
+metadata: semantic identity, host-qualified sender and recipient, notice kind,
+observation time and expiry after about five minutes. The delivered text is never
+retained or displayed. Timeline replay and malformed payloads are rejected;
+missing sender host metadata is treated as the recipient's local host, while an
+explicitly invalid value is rejected rather than guessed. Duplicate deliveries
+are deduplicated across epochs, reconnects and store replacements, and the
+bounded recent-history collection never displaces ordinary event activity. The
+readout says **last known** when its counterpart host is unavailable and shows an
+exact identity instead of inventing a node when the counterpart is outside the
+current view.
+
+Recent communication is collected by the browser view's existing activity
+subscriptions. The native view keeps its passive roster behavior and does not
+subscribe to activity timelines. Rendered native component checks establish how
+shared details present supplied metadata, not live communication observation on
+a phone.
+
+The retained history is capped at 512 deliveries for about five minutes, with a
+finite semantic-identity ceiling of 1,024 in each host store and the coordinator.
+At that ceiling Overview stops admitting new communication identities for the
+rest of the current identity window instead of evicting unexpired identities and
+later re-admitting their replays. Deliveries declined by saturation still appear as one
+ordinary message event with its normal activity weight; only their communication
+metadata/history is omitted. Once the window expires, a later delivery is treated
+as a new observation. Overview does not claim strict once-only scoring for an
+unlimited number of unique communication IDs under bounded memory.
+
 Project filtering changes rendering, not host observation. Hidden projects keep
 current roster, status and icon information in the complete catalogue. Their
 bubbles, pulses, clouds and feeds are removed, and excluded event IDs are consumed.
@@ -188,6 +242,10 @@ The snapshot host advertises `providerSubagentSnapshots`. Descriptor updates
 carry their cursor, and historical hydration updates carry `replayed: true`.
 An older native client's parser may omit new optional fields; cursor-less
 updates invalidate the snapshot instead of being treated as an ordered stream.
+Optional public agent `archiveOperation` and `backgroundWork` fields, plus
+structured `tool_call.agentMessage` provenance on managed recipient timelines,
+are used when present. Older hosts omit them; Overview keeps those values
+unknown rather than inventing archive, background or message state.
 
 The broad manifest SDK requirement does not assert that an unmodified stock
 host provides these additions. The managed deployment lock records exact tested
@@ -217,8 +275,9 @@ cross-platform screen, browser-only scene and server handlers. The tests cover
 ownership, passive host reads, snapshot races, icon revisions, activity bounds,
 empty-to-populated loading, suspension, stable identity, explicit grouping,
 branch layout, routed geometry, preview assembly, fullscreen ownership, bounded
-depth, once-only pulse/feed arrivals, persisted appearance, multi-host isolation
-and room projection. Activity and icon updates preserve packed positions.
+depth, once-only pulse/feed arrivals, persisted appearance, multi-host isolation,
+archive/background presentation, structured communication dedup and room
+projection. Activity and icon updates preserve packed positions.
 Heartbeat-only frames reuse node presentation, routes and activity aggregation;
 unchanged overlay properties are not rewritten. Cloud particle motion runs in
 GPU shaders from cached offsets and per-project state. Cloud targets, clock
@@ -258,10 +317,10 @@ is found; browser-only rendering changes do not add an unrelated device gate.
 - `client/native-layout.ts`, `native-node.tsx`, `native-motion.ts`: touch graph.
 - `client/identity.ts`, `appearance.ts`, `collapse.ts`: shared visual policies.
 - `client/hosts.ts`, `host-api.ts`, `transport.ts`, `store.ts`, `rosters.ts`, `icons.ts`: independent passive host observation.
+- `client/communications.ts`, `activity.ts`, `assistant-preview.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: bounded provenance, activity and previews.
 - `shared/hosts.ts`, `shared/model.ts`: host-qualified composition and freshness contracts.
 - `client/normalize.ts`: ownership and display model.
 - `client/layout.ts`, `geometry.ts`, `routing.ts`: branch layout and validated paths.
-- `client/activity.ts`, `assistant-preview.ts`, `event-preview.ts`, `bubbles.ts`, `status.ts`: activity and bounded previews.
 - `client/web.ts`, `client/scene/`: browser rendering and accessible overlays.
 - `index.server.ts`, `server/api.ts`, `shared/rpc.ts`: read-only host bridge.
 

@@ -4,7 +4,7 @@ import { buildOwnershipIndex, displayId, normalise } from "../client/normalize";
 import { canRetainSelection, initialPresentation, reconcilePresentation, reducePresentation } from "../client/presentation";
 import { createProjectView, projectView } from "../client/project-filter";
 import { composeHostSnapshots, emptyOverviewModel, hostForDisplayId, isHostAuthoritative } from "../shared/hosts";
-import type { OverviewEvent } from "../shared/model";
+import type { OverviewCommunication, OverviewEvent } from "../shared/model";
 import type { AgentRecord, RosterState, WorkspaceRecord } from "../shared/observation";
 import type { OverviewTheme } from "../shared/renderer";
 import { getProjectIconRpc, getRosterRpc } from "../shared/rpc";
@@ -62,6 +62,40 @@ describe("graph ownership", () => {
     const result = model([agent("a", "one", { status: "running" }), agent("b", "one", { status: "running", pendingPermissions: [{}] })], [workspace("one")]);
     expect(result.nodes.map(node => node.state)).toEqual(["working", "waiting"]);
     expect(result.nodes[1].attention).toBe(true);
+  });
+
+  it("preserves archive progress separately from runtime status and distinguishes zero background work", () => {
+    const result = model([
+      agent("archiving", "one", { status: "running", archiveOperation: { state: "in_progress", canRetry: false } }),
+      agent("pending", "one", { archiveOperation: { state: "children_pending", canRetry: true } }),
+      agent("unresolved", "one", { archiveOperation: { state: "unresolved", canRetry: true } }),
+      agent("cleared", "one", { archiveOperation: null }),
+      agent("busy", "one", { backgroundWork: { count: 2 } }),
+      agent("known-empty", "one", { backgroundWork: { count: 0 } }),
+      agent("unknown", "one"),
+    ], [workspace("one")]);
+    expect(result.nodes.map(node => node.state)).toEqual(["working", "idle", "idle", "idle", "idle", "idle", "idle"]);
+    expect(result.nodes.map(node => node.archiveOperation)).toEqual([
+      { state: "in_progress", canRetry: false },
+      { state: "children_pending", canRetry: true },
+      { state: "unresolved", canRetry: true },
+      null, undefined, undefined, undefined,
+    ]);
+    expect(result.nodes.map(node => node.backgroundWork)).toEqual([
+      undefined, undefined, undefined, undefined, { count: 2 }, { count: 0 }, undefined,
+    ]);
+    expect("archiveOperation" in result.nodes[6]!).toBe(false);
+    expect("backgroundWork" in result.nodes[6]!).toBe(false);
+  });
+
+  it("ignores malformed optional archive and background fields instead of inventing state", () => {
+    const result = model([
+      agent("bad-archive", "one", { archiveOperation: { state: "later", canRetry: true } as never }),
+      agent("bad-background", "one", { backgroundWork: { count: Number.NaN } }),
+      agent("negative", "one", { backgroundWork: { count: -1 } }),
+    ], [workspace("one")]);
+    expect(result.nodes.every(node => !("archiveOperation" in node))).toBe(true);
+    expect(result.nodes.every(node => !("backgroundWork" in node))).toBe(true);
   });
 
   it("preserves closed managed agents and canceled native children as distinct outcomes", () => {
@@ -226,7 +260,7 @@ describe("multi-host composition", () => {
     expect(model.hosts.some(host => host.id === "two")).toBe(false);
     expect(isHostAuthoritative(model, "one")).toBe(false);
     expect(emptyOverviewModel()).toEqual({
-      hosts: [], projects: [], workspaces: [], nodes: [], edges: [], events: [], revision: 0,
+      hosts: [], projects: [], workspaces: [], nodes: [], edges: [], events: [], recentCommunications: [], revision: 0,
     });
   });
 
@@ -383,6 +417,29 @@ describe("project filtering", () => {
     const partial = { ...model, projects: [], workspaces: [], nodes: [], edges: [], events: [] };
     expect(projectView(partial, [missing]).unavailableProjectIds).toEqual([missing]);
     expect(projectView(partial, [missing]).model.hosts).toBe(partial.hosts);
+  });
+
+  it("retains metadata-only communications through project filtering without adding graph edges", () => {
+    const model = catalogue();
+    const communication: OverviewCommunication = {
+      id: displayId(one, "communication", "a2", "call"), senderId: nodeId(one, "a1"), senderHostId: one,
+      recipientId: nodeId(one, "a2"), recipientHostId: one, kind: "message",
+      observedAt: 10, expiresAt: 10 + 300_000,
+    };
+    const withCommunications = { ...model, recentCommunications: [communication] };
+    const filtered = projectView(withCommunications, [project(one, "p1")]);
+    expect(filtered.model.recentCommunications).toBe(withCommunications.recentCommunications);
+    expect(filtered.model.edges.some(edge => edge.id.includes(communication.id))).toBe(false);
+    expect(filtered.model.nodes.some(node => node.id === communication.senderId)).toBe(true);
+
+    const factory = createProjectView();
+    const first = factory(withCommunications, [project(one, "p1")]);
+    const next = factory({ ...withCommunications, revision: 6, events: [...withCommunications.events,
+      event("e4", one, nodeId(one, "a1"), 4)] }, [project(one, "p1")]);
+    expect(next.model.recentCommunications).toBe(first.model.recentCommunications);
+    expect(next.model.projects).toBe(first.model.projects);
+    expect(next.model.nodes).toBe(first.model.nodes);
+    expect(next.model.edges).toBe(first.model.edges);
   });
 
   it("clears a zero selection and reconciles scope and retained selection from the catalogue", () => {

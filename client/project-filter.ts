@@ -84,7 +84,8 @@ export function projectView(catalog: OverviewModel, filter: ProjectFilter): Proj
   return {
     model: {
       hosts: catalog.hosts, projects: visibleProjects, workspaces: visibleWorkspaces,
-      nodes: visibleNodes, edges, events: events.events, revision: catalog.revision,
+      nodes: visibleNodes, edges, events: events.events,
+      recentCommunications: catalog.recentCommunications, revision: catalog.revision,
     },
     visibleNodeIds,
     suppressedEvents: events.suppressed,
@@ -127,7 +128,8 @@ export function createProjectView(): (catalog: OverviewModel, filter: ProjectFil
         hosts: catalog.hosts,
         projects: view.model.projects, workspaces: view.model.workspaces,
         nodes: view.model.nodes, edges: view.model.edges,
-        events: events.events, revision: catalog.revision,
+        events: events.events, recentCommunications: catalog.recentCommunications,
+        revision: catalog.revision,
       };
       const next: ProjectView = {
         model, visibleNodeIds: view.visibleNodeIds,

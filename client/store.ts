@@ -5,6 +5,9 @@ import { displayId, normalise } from "./normalize";
 import { RosterTracker } from "./rosters";
 import { AssistantPreviewBuffer } from "./assistant-preview";
 import { previewSummary, previewText, timelinePreview } from "./event-preview";
+import {
+  COMMUNICATION_IDENTITY_LIMIT, COMMUNICATION_TTL_MS, communicationPreview, parseCommunication,
+} from "./communications";
 import { createOverviewReader } from "./host-api";
 import { ReadQueue, errorText, observeDirectory, record, type DirectoryChange, type DirectoryPage, type OverviewApi, type ReadGate } from "./transport";
 
@@ -40,7 +43,10 @@ function excerpt(value: unknown): string | undefined {
   return previewText(value).text || undefined;
 }
 
+let storeInstance = 0;
+
 export function createOverviewStore(options: Options) {
+  const instance = ++storeInstance;
   const reader = createOverviewReader(options.paseo);
   const readRoster = options.readRoster ? (parentAgentId: string) => options.readRoster!(parentAgentId) : reader.readRoster;
   const readIcon = options.readIcon ? (projectId: string) => options.readIcon!(projectId) : reader.readIcon;
@@ -63,6 +69,7 @@ export function createOverviewStore(options: Options) {
   let starting: Promise<void> | undefined;
   const timelines = new Map<string, () => void>();
   const seen = new Map<string, number>();
+  const seenCommunications = new Map<string, number>();
   const timelinePositions = new Map<string, { epoch: string; seq: number }>();
   const turnSources = new Map<string, string>();
   const latestPreviews = new Map<string, OverviewEvent>();
@@ -178,21 +185,56 @@ export function createOverviewStore(options: Options) {
     for (const [id, at] of seen) if (now - at > 30000 || seen.size > 1024) seen.delete(id);
     return true;
   }
-  function recordEvent(nodeId: string, kind: OverviewEvent["kind"], text?: string, preview?: EventPreview, sourceKey?: string) {
+  function recordEvent(nodeId: string, kind: OverviewEvent["kind"], text?: string, preview?: EventPreview, sourceKey?: string, communication?: OverviewEvent["communication"]) {
     events.push({
-      id: displayId(options.hostId, "event", String(generation), String(++eventSequence)),
-      hostId: options.hostId, nodeId, kind, text, preview, sourceKey, timestamp: Date.now(),
+      id: displayId(options.hostId, "event", String(instance), String(generation), String(++eventSequence)),
+      hostId: options.hostId, nodeId, kind, text, preview, sourceKey, timestamp: Date.now(), communication,
     });
     events = events.slice(-64); schedule();
   }
   function addEvent(nodeId: string, kind: OverviewEvent["kind"], text: string | undefined, key: string, preview?: EventPreview, sourceKey?: string) {
     if (claimEvent(key)) recordEvent(nodeId, kind, text, preview, sourceKey);
   }
-  function timelineItem(nodeId: string, item: unknown, key: string, parentId?: string, sourceNamespace = nodeId, sequenced = false) {
+  type CommunicationClaim = "new" | "duplicate" | "limited";
+  /**
+   * Semantic delivery identity, independent of timeline epoch/sequence and of
+   * a store replacement. Expired claims are pruned before checking so a same-key
+   * delivery can be accepted again after its TTL. The finite identity ceiling is
+   * never bypassed by eviction; deliveries beyond it stay ordinary activity and
+   * let the coordinator decide whether its bounded history still has room.
+   */
+  function claimCommunication(id: string, now: number): CommunicationClaim {
+    if (!active() || options.observeActivity === false) return "duplicate";
+    for (const [seenId, at] of seenCommunications) {
+      if (now - at >= COMMUNICATION_TTL_MS) seenCommunications.delete(seenId);
+    }
+    if (seenCommunications.has(id)) return "duplicate";
+    if (seenCommunications.size >= COMMUNICATION_IDENTITY_LIMIT) return "limited";
+    seenCommunications.set(id, now);
+    return "new";
+  }
+  function timelineItem(
+    nodeId: string, item: unknown, key: string, parentId?: string,
+    sourceNamespace = nodeId, sequenced = false, managedRecipientId?: string,
+  ) {
     const value = record(item);
     if (!value) return;
     if (value.type !== "assistant_message") assistantPreviews.boundary(nodeId);
     if (value.type === "tool_call") {
+      if (managedRecipientId && value.agentMessage !== undefined) {
+        // Only the managed recipient's public structured provenance is trusted.
+        // A parentId used for native mirroring is never sufficient on its own.
+        // Recognized deliveries produce one ordinary message event and replace
+        // the generic tool row. Malformed provenance keeps its ordinary tool
+        // activity but never fabricates communication metadata.
+        const now = Date.now();
+        const communication = parseCommunication(value.agentMessage, options.hostId, managedRecipientId, value.callId, now);
+        if (communication) {
+          if (claimCommunication(communication.id, now) === "duplicate") return;
+          recordEvent(nodeId, "message", undefined, communicationPreview(communication.kind), undefined, communication);
+          return;
+        }
+      }
       // The parent tool row often mirrors the provider's separate native child.
       if (parentId && rosters?.state(parentId)?.subagents.some(child => child.toolCallId && child.toolCallId === value.callId)) return;
       const preview = timelinePreview(value)!;
@@ -243,7 +285,7 @@ export function createOverviewStore(options: Options) {
     if (event.type === "timeline") {
       if (!acceptPosition(nodeId, data.epoch, data.seq)) return;
       timelineItem(nodeId, event.item, key, parentId, `${nodeId}:${data.epoch ?? "live"}`,
-        typeof data.epoch === "string" && typeof data.seq === "number" && Number.isInteger(data.seq) && data.seq >= 0);
+        typeof data.epoch === "string" && typeof data.seq === "number" && Number.isInteger(data.seq) && data.seq >= 0, parentId);
     }
     else if (event.type === "turn_started") {
       if (!claimEvent(`${key}:${data.timestamp}`)) return;
@@ -526,7 +568,7 @@ export function createOverviewStore(options: Options) {
         disposed = true;
         halt(); rosters?.dispose(); icons?.dispose();
         rosters = undefined; icons = undefined;
-        seen.clear();
+        seen.clear(); seenCommunications.clear();
       }
     },
   };

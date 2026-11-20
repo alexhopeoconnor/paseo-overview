@@ -70,7 +70,7 @@ export class ProceduralAmbientGrid implements AmbientGrid {
     const seconds = Math.max(0, Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0);
     const enabled = moving && this.appearance.background === "animated";
     this.clouds.advance(seconds, enabled, appearancePolicy(this.appearance).backgroundRate);
-    this.streams.advance(seconds, enabled, (projectId, energy) => this.clouds.arrive(projectId, energy));
+    this.streams.advance(seconds, enabled, arrival => this.clouds.arrive(arrival));
   }
 
   updateProjects(projects: readonly ProjectSpatialPresentation[], online = true): void {

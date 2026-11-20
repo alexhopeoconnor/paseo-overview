@@ -54,8 +54,11 @@ export function inactiveGroupSummary(counts: InactiveStatusCounts): string {
 export function quietAgent(node: OverviewNode): boolean {
   // A cached quiet state stays geometrically quiet during a passive refresh.
   // Status/coverage presentation still identifies its freshness separately.
+  // Known live background work and recovery/archive progress are not quiet.
+  // An absent background count remains unknown; null archive stays normal.
   return (node.state === "finished" || node.state === "idle" || node.state === "closed" || node.state === "canceled") &&
-    !node.attention && !hasError(node) && !needsInput(node);
+    !node.attention && !hasError(node) && !needsInput(node) &&
+    !(node.backgroundWork && node.backgroundWork.count > 0) && !node.archiveOperation;
 }
 
 /** Shared policy: only subordinate subtrees fold; workspace-level agents stay visible. */

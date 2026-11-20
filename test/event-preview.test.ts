@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fallbackGraphemes, previewText, timelinePreview } from "../client/event-preview";
+import { COMMUNICATION_KIND_LABEL, communicationPreview } from "../client/communications";
 
 describe("bounded event previews", () => {
   it.each([false, true])("keeps complete graphemes with fallback=%s", fallback => {
@@ -30,5 +31,13 @@ describe("bounded event previews", () => {
     expect(timelinePreview({ type: "reasoning", text: "Private reasoning" })).toBeUndefined();
     expect(timelinePreview({ type: "tool_call", name: "unknown", status: "running", input: "secret", output: "secret" })).toEqual({ title: "unknown · running", detail: undefined, truncated: false });
     expect(timelinePreview({ type: "assistant_message", text: "🌳".repeat(500) })).toEqual({ title: "Assistant update", detail: "🌳".repeat(239) + "…", truncated: true });
+  });
+
+  it("labels automatic communication notices without carrying a message body", () => {
+    for (const [kind, label] of Object.entries(COMMUNICATION_KIND_LABEL) as Array<["message" | "finished" | "errored" | "permission-required" | "closed", string]>) {
+      expect(communicationPreview(kind)).toEqual({ title: label, truncated: false });
+      expect(communicationPreview(kind).detail).toBeUndefined();
+    }
+    expect(COMMUNICATION_KIND_LABEL["permission-required"]).toBe("Agent needs permission");
   });
 });

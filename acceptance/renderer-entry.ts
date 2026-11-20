@@ -1,17 +1,18 @@
 import { createProjectView } from "../client/project-filter";
 import { createOverviewRenderer } from "../client/scene/renderer";
 import { initialPresentation, reducePresentation } from "../client/presentation";
-import type { OverviewModel, OverviewHostState } from "../shared/model";
+import type { OverviewCommunication, OverviewModel, OverviewHostState } from "../shared/model";
 import type { OverviewScope, PresentationAction } from "../shared/presentation";
 import { addEdges, darkTheme, fixtureHost, full, icon, lightTheme, managed, multiHostFixture, projects, workspaces } from "./fixture";
 import { Scene, type Camera, type WebGLRenderer, type Mesh, type ShaderMaterial } from "three";
 import { DEFAULT_APPEARANCE, type OverviewAppearance } from "../shared/settings";
+import { appearancePolicy } from "../client/appearance-policy";
 import { ProceduralAmbientGrid } from "../client/scene/ambient";
 import { EnergyStreams } from "../client/scene/streams";
-import type { ProjectSpatialPresentation } from "../client/scene/spatial";
+import type { ProjectSpatialPresentation, StreamArrival } from "../client/scene/spatial";
 import { FibreLight } from "../client/scene/lines";
 import { StableLayout, type ProjectLayout } from "../client/layout";
-import { GraphOverlay } from "../client/scene/overlay";
+import { GraphOverlay, createCollapseTextMeasure } from "../client/scene/overlay";
 import { RoomField } from "../client/scene/room-field";
 import { ProjectParticleClouds } from "../client/scene/clouds";
 
@@ -75,12 +76,17 @@ ProceduralAmbientGrid.prototype.updateProjects = function (projects, online) {
   spatialProjects = projects.map(project => ({ ...project }));
   spatialUpdate.call(this, projects, online);
 };
-const feeds = { admitted: 0, arrivals: 0 };
+const feeds = { admitted: 0, arrivals: 0, lastArrival: null as StreamArrival | null, arrivalLog: [] as StreamArrival[] };
 const admitFeed = EnergyStreams.prototype.admit;
 EnergyStreams.prototype.admit = function (projectId) { const admitted = admitFeed.call(this, projectId); if (admitted) feeds.admitted++; return admitted; };
 const advanceFeeds = EnergyStreams.prototype.advance;
 EnergyStreams.prototype.advance = function (seconds, moving, arrival) {
-  advanceFeeds.call(this, seconds, moving, (id, energy) => { feeds.arrivals++; arrival(id, energy); });
+  advanceFeeds.call(this, seconds, moving, value => {
+    feeds.arrivals++;
+    feeds.lastArrival = { ...value, endpoint: { ...value.endpoint } };
+    if (feeds.arrivalLog.length < 32) feeds.arrivalLog.push(feeds.lastArrival);
+    arrival(value);
+  });
 };
 const beforeRender = Scene.prototype.onBeforeRender;
 Scene.prototype.onBeforeRender = function (...args) {
@@ -103,7 +109,7 @@ Scene.prototype.onBeforeRender = function (...args) {
   }
   if (performanceMode) return;
   const projects = [...displayedProjects.values()];
-  telemetry.graphs = this.children.filter(child => child.type === "Group").map((child, index) => {
+  telemetry.graphs = this.children.filter(child => child.type === "Group" && !child.userData.overviewCommunications).map((child, index) => {
     // Measure the actual packed footprint, not an animated halo's Box3. The
     // latter changes size/asymmetry with heartbeats and is not the layout centre.
     const bounds = projects[index]!.bounds;
@@ -151,6 +157,50 @@ function update(value: OverviewModel, stage: string) {
   current = { ...value, revision: current.revision + 1 };
   renderer.update(renderInput());
 }
+function withoutNodes(ids: Set<string>, stage: string) {
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const node of current.nodes) {
+      if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) { ids.add(node.id); changed = true; }
+    }
+  }
+  update(addEdges({ ...current, nodes: current.nodes.filter(node => !ids.has(node.id)), edges: [],
+    events: current.events.filter(event => !ids.has(event.nodeId)) }), stage);
+}
+function removeManagedNode(id: string) {
+  const node = current.nodes.find(item => item.id === id);
+  if (!node || node.kind !== "agent") return false;
+  withoutNodes(new Set([id]), "removal-managed");
+  return true;
+}
+function unloadNativeRoster(parentId: string) {
+  const ids = new Set<string>();
+  for (const node of current.nodes) if (node.kind === "provider-subagent" && node.parentId === parentId) ids.add(node.id);
+  if (!ids.size) return false;
+  withoutNodes(ids, "removal-native");
+  return true;
+}
+function removeProjectFixture(id: string) {
+  const project = current.projects.find(item => item.id === id);
+  if (!project) return false;
+  const workspaceIds = new Set(project.workspaceIds);
+  const nodeIds = new Set(current.nodes.filter(node => node.workspaceId && workspaceIds.has(node.workspaceId)).map(node => node.id));
+  update(addEdges({ ...current, projects: current.projects.filter(item => item.id !== id),
+    workspaces: current.workspaces.filter(item => !workspaceIds.has(item.id)),
+    nodes: current.nodes.filter(node => !nodeIds.has(node.id)), edges: [],
+    events: current.events.filter(event => !nodeIds.has(event.nodeId)) }), "removal-project");
+  return true;
+}
+let communicationSequence = 0;
+function addCommunicationFixture(senderId: string, recipientId: string, kind: OverviewCommunication["kind"] = "message") {
+  const now = Date.now(), id = `fixture-communication-${++communicationSequence}`;
+  const value: OverviewCommunication = {
+    id, senderId, senderHostId: fixtureHost.id, recipientId, recipientHostId: fixtureHost.id, kind,
+    observedAt: now, expiresAt: now + 60_000,
+  };
+  update({ ...current, events: [...current.events, { hostId: fixtureHost.id, id: `fixture-communication-event-${communicationSequence}`,
+    nodeId: recipientId, kind: "message", text: `${senderId} -> ${recipientId}`, timestamp: now, communication: value }] }, "communication");
+}
 (window as any).overviewTest = {
   state,
   filter(projectIds: readonly string[] | null) {
@@ -168,7 +218,7 @@ function update(value: OverviewModel, stage: string) {
   appearance(value: Partial<OverviewAppearance>) { appearance = { ...appearance, ...value }; renderer.setAppearance(appearance); },
   spatialEvidence() { return spatialProjects; },
   geometryEvidence() {
-    const groups = observedScene!.children.filter(child => child.type === "Group");
+    const groups = observedScene!.children.filter(child => child.type === "Group" && !child.userData.overviewCommunications);
     let maximumNodeError = 0;
     [...displayedProjects.values()].forEach((project, index) => {
       const group = groups[index]!;
@@ -182,7 +232,87 @@ function update(value: OverviewModel, stage: string) {
     });
     return { maximumNodeError };
   },
-  feedEvidence() { return { ...feeds }; },
+  feedEvidence() { return { ...feeds, lastArrival: feeds.lastArrival ? { ...feeds.lastArrival, endpoint: { ...feeds.lastArrival.endpoint } } : null,
+    arrivalLog: feeds.arrivalLog.map(value => ({ ...value, endpoint: { ...value.endpoint } })) }; },
+  impactEvidence(projectId: string) {
+    const project = spatialProjects.find(project => project.projectId === projectId)!;
+    const scene = backgroundScene!, renderer = observedRenderer!;
+    const cloud = scene.children.find(child => child.userData.overviewClouds) as Mesh;
+    const texture = (cloud.material as ShaderMaterial).uniforms.uCloudStates!.value;
+    const data = texture.image.data as Float32Array;
+    const impacts: Array<{ row: number; origin: number[]; age: number; strength: number; sustained: number }> = [];
+    for (let offset = 0; offset < data.length; offset += 16) if (data[offset + 15]! > 0)
+      impacts.push({ row: offset / 16, origin: [data[offset + 12]!, data[offset + 13]!],
+        age: data[offset + 14]!, strength: data[offset + 15]!, sustained: data[offset + 7]! });
+    const bounds = project.screenBounds;
+    const crop = { x: Math.max(0, Math.floor(bounds.x - 40)), y: Math.max(0, Math.floor(bounds.y - 40)),
+      width: 0, height: 0 };
+    crop.width = Math.min(parent.clientWidth - crop.x, Math.ceil(bounds.width + 80));
+    crop.height = Math.min(parent.clientHeight - crop.y, Math.ceil(bounds.height + 80));
+    const draw = () => {
+      renderer.clear(); renderer.render(scene, backgroundCamera!);
+      renderer.clearDepth(); renderer.render(observedScene!, observedCamera!);
+      const canvas = document.createElement("canvas");
+      canvas.width = crop.width; canvas.height = crop.height;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = currentTheme.background; context.fillRect(0, 0, crop.width, crop.height);
+      const ratioX = renderer.domElement.width / parent.clientWidth, ratioY = renderer.domElement.height / parent.clientHeight;
+      context.drawImage(renderer.domElement, crop.x * ratioX, crop.y * ratioY, crop.width * ratioX, crop.height * ratioY,
+        0, 0, crop.width, crop.height);
+      return { image: canvas.toDataURL("image/png"), pixels: context.getImageData(0, 0, crop.width, crop.height).data };
+    };
+    // Fixture-only matched control: no clock, field, geometry, energy or DOM
+    // update occurs between these draws. Restore the actual committed texel.
+    const on = draw();
+    let off: ReturnType<typeof draw>;
+    try {
+      for (const impact of impacts) data[impact.row * 16 + 15] = 0;
+      texture.needsUpdate = true;
+      off = draw();
+    } finally {
+      for (const impact of impacts) data[impact.row * 16 + 15] = impact.strength;
+      texture.needsUpdate = true;
+      renderer.clear(); renderer.render(scene, backgroundCamera!);
+      renderer.clearDepth(); renderer.render(observedScene!, observedCamera!);
+    }
+    let changedPixels = 0, strongChangedPixels = 0, maximumDelta = 0;
+    for (let index = 0; index < on.pixels.length; index += 4) {
+      const delta = Math.max(Math.abs(on.pixels[index]! - off.pixels[index]!),
+        Math.abs(on.pixels[index + 1]! - off.pixels[index + 1]!), Math.abs(on.pixels[index + 2]! - off.pixels[index + 2]!));
+      if (delta > 3) changedPixels++;
+      if (delta > 8) strongChangedPixels++;
+      maximumDelta = Math.max(maximumDelta, delta);
+    }
+    return { projectId, crop, impacts, changedPixels, strongChangedPixels, maximumDelta,
+      on: on.image, off: off.image, canvasOnly: true };
+  },
+  layoutEvidence() {
+    return [...displayedProjects.values()].map(project => ({ id: project.id, position: { ...project.position },
+      scale: project.scale, bounds: { ...project.bounds } }));
+  },
+  freshFitEvidence() {
+    const builds = telemetry.layoutBuilds, displayed = new Map(displayedProjects);
+    const engine = new StableLayout(createCollapseTextMeasure());
+    engine.setDepthReservation(0.1 * appearancePolicy(appearance).depthStrength);
+    const result = engine.update(deriveView(current, presentation.projectFilter).model, parent.clientWidth, parent.clientHeight)
+      .projects.map(project => ({ id: project.id, position: { ...project.position }, scale: project.scale, bounds: { ...project.bounds } }));
+    telemetry.layoutBuilds = builds;
+    displayedProjects.clear();
+    for (const [id, project] of displayed) displayedProjects.set(id, project);
+    return result;
+  },
+  removeManaged(id: string) { return removeManagedNode(id); },
+  unloadNative(parentId: string) { return unloadNativeRoster(parentId); },
+  removeProject(id: string) { return removeProjectFixture(id); },
+  communication(senderId: string, recipientId: string, kind: OverviewCommunication["kind"] = "message") {
+    addCommunicationFixture(senderId, recipientId, kind);
+  },
+  communicationEvidence() {
+    const object = observedScene?.children.find(child => child.userData.overviewCommunications);
+    const diagnostics = (object?.userData.overviewCommunicationState ?? {}) as { active?: number; moving?: number; coalesced?: number; dropped?: number };
+    return { ...diagnostics, lines: object?.children.filter(child => child.name.startsWith("overview-communication:")).length ?? 0,
+      objects: object?.children.length ?? 0 };
+  },
   shaderLogs() { return [...shaderLogs]; },
   presentation: () => ({ ...presentation, groups: [...presentation.groups] }),
   loadProjects() { update({ ...current, projects, hosts: [{ ...fixtureHost, readiness: { projects: true, workspaces: false, agents: false } }] }, "projects"); },

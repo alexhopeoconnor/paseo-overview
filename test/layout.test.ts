@@ -205,6 +205,48 @@ describe("project-root layout", () => {
     const second = engine.update(remaining, 1200, 800);
     expect(second.projects.map(project => project.position)).toEqual(first.projects.slice(0, 2).map(project => project.position));
   });
+  it("removes a managed node immediately while retaining surviving root anchors", () => {
+    const engine = new StableLayout(), value = model([2, 2], 4);
+    const first = engine.update(value, 1200, 900);
+    const remaining = { ...value, nodes: value.nodes.filter(node => node.id !== "native:0") };
+    const second = engine.update(remaining, 1200, 900);
+    expect(second.nodes.has("native:0")).toBe(false);
+    expect(second.projects.map(project => [project.id, project.position, project.scale]))
+      .toEqual(first.projects.map(project => [project.id, project.position, project.scale]));
+    valid(second);
+  });
+  it("uses the existing fitter for a removal that changes packed bounds", () => {
+    const engine = new StableLayout(), value = model([2, 2], 4);
+    engine.update(value, 1200, 900);
+    const remaining = { ...value, projects: value.projects.slice(1),
+      workspaces: value.workspaces.filter(workspace => workspace.projectDisplayId === "p1"),
+      nodes: value.nodes.filter(node => node.workspaceId?.startsWith("w1:")) };
+    const fitted = engine.update(remaining, 1200, 900, null, { framing: "fit" });
+    const fresh = new StableLayout().update(remaining, 1200, 900);
+    expect(fitted.projects.map(project => [project.position, project.scale]))
+      .toEqual(fresh.projects.map(project => [project.position, project.scale]));
+    valid(fitted);
+  });
+  it("restores the prior packing after a confirmed removal is undone", () => {
+    const engine = new StableLayout(), value = model([2, 1, 2], 0);
+    const first = engine.update(value, 1200, 900);
+    const removed = { ...value, projects: value.projects.slice(0, 2) };
+    engine.update(removed, 1200, 900, null, { framing: "fit" });
+    const restored = engine.update(value, 1200, 900);
+    expect(restored.projects.map(project => [project.id, project.position, project.scale]))
+      .toEqual(first.projects.map(project => [project.id, project.position, project.scale]));
+  });
+  it("unloads native roster children without treating the parent as removed", () => {
+    const engine = new StableLayout(), value = model([2, 1], 6);
+    const first = engine.update(value, 1200, 900);
+    const unloaded = { ...value, nodes: value.nodes.filter(node => node.kind === "agent") };
+    const second = engine.update(unloaded, 1200, 900);
+    expect(second.nodes.has("a:w0:0")).toBe(true);
+    expect([...second.nodes.keys()].some(id => id.startsWith("native:"))).toBe(false);
+    expect(second.projects.map(project => [project.id, project.position, project.scale]))
+      .toEqual(first.projects.map(project => [project.id, project.position, project.scale]));
+    valid(second);
+  });
   it("is deterministic regardless of project, workspace and agent arrival order", () => {
     const value = model([2, 0, 3, 1], 12);
     const forward = new StableLayout().update(value, 1400, 1000);

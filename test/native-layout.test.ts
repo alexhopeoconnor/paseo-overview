@@ -108,6 +108,26 @@ describe("native spatial ownership graph", () => {
     for (const edge of expanded.edges) expect(edge.points.slice(1).some((point, index) =>
       segmentIntersectsRect(edge.points[index]!, point, parent.controlBounds!))).toBe(false);
   });
+  it("keeps positive background work and archive recovery out of inactive groups", () => {
+    const model = fixture();
+    model.nodes = [...model.nodes,
+      { ...agent("background", "w0", "a0", true), state: "idle", backgroundWork: { count: 1 } },
+      { ...agent("recovering", "w0", "a0", true), state: "idle", archiveOperation: { state: "children_pending", canRetry: true } },
+      { ...agent("quiet-a", "w0", "a0", true), state: "finished" },
+      { ...agent("quiet-b", "w0", "a0", true), state: "finished" }];
+    const layout = nativeGraphLayout(model, { kind: "workspace", id: "w0" }, 360);
+    expect(layout.nodes.some(node => node.id === "background")).toBe(true);
+    expect(layout.nodes.some(node => node.id === "recovering")).toBe(true);
+    expect(layout.groups.every(group => !group.memberIds.includes("background")
+      && !group.memberIds.includes("recovering"))).toBe(true);
+    expect(layout.nodes.find(node => node.id === "background")?.label).toBe("background");
+    expect(layout.nodes.some(node => node.kind === "completed-group")).toBe(true);
+
+    const knownEmpty = { ...model, nodes: model.nodes.map(node =>
+      node.id === "background" ? { ...node, backgroundWork: { count: 0 } } : node) };
+    expect(nativeGraphLayout(knownEmpty, { kind: "workspace", id: "w0" }, 360).nodes.some(node => node.id === "background")).toBe(false);
+  });
+
   it("preserves actual ownership, including unknown workspaces, orphans and cycles", () => {
     const model = fixture();
     model.workspaces = [...model.workspaces, { hostId, id: "unknown", projectId: "missing", projectDisplayId: null, name: "Unknown project", projectName: "Missing", agentIds: [] }];

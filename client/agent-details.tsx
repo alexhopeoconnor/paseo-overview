@@ -5,6 +5,7 @@ import type { AgentTarget, OverviewTheme } from "../shared/renderer";
 import { agentIdentity, agentRole } from "./identity";
 import { buildOwnershipIndex } from "./normalize";
 import { statusColour, statusLabel } from "./status";
+import { communicationKindLabel, communicationReadout, lastContactLabel } from "./communications";
 
 interface AgentDetailsProps {
   model: OverviewModel;
@@ -27,8 +28,28 @@ export function AgentDetails({ model, node, theme, onClose, onOpenAgent }: Agent
   const host = model.hosts.find(item => item.id === node.hostId);
   const activity = model.events.filter(event => event.nodeId === node.id && (event.preview || event.text)).slice(-2).reverse();
   const delegations = model.edges.filter(edge => edge.kind === "delegation" && (edge.source === node.id || edge.target === node.id));
+  const communications = communicationReadout(model.recentCommunications ?? [], node.id);
   const identity = agentIdentity(node.id);
   const selection = theme.selection ?? "#6264dc";
+  const communicationLines = communications.summaries.map(summary => {
+    const counterpart = agents.get(summary.counterpartId);
+    const counterpartHost = model.hosts.find(item => item.id === summary.counterpartHostId);
+    const availability = !counterpart ? "not in current view"
+      : counterpartHost && counterpartHost.connection !== "connected" ? "last known" : "";
+    const notice = summary.direction === "outgoing" && summary.kind === "message"
+      ? "Message sent" : communicationKindLabel(summary.kind);
+    return {
+      key: `${summary.direction}:${summary.counterpartId}:${summary.kind}`,
+      text: `${notice} ${summary.direction === "incoming" ? "from" : "to"} ${counterpart?.label ?? summary.counterpartId}`
+        + `${summary.count > 1 ? ` · ${summary.count} retained` : ""} · last contact ${lastContactLabel(summary.lastObservedAt)}`
+        + `${availability ? ` · ${availability}` : ""}`,
+    };
+  });
+  const communicationAccessibility = communications.retained
+    ? `Recent communication. ${communications.retained} retained ${communications.retained === 1 ? "delivery" : "deliveries"}. `
+      + communicationLines.map(line => line.text).join(". ")
+      + `${communications.hidden ? `. ${communications.hidden} more conversations` : ""}`
+    : undefined;
   return <ScrollView testID="overview-selection" style={styles.scroll} contentContainerStyle={styles.content}>
     <View style={styles.heading}>
       <View style={[styles.avatar, { backgroundColor: theme.background, borderColor: theme.border }]}><Text accessible={false} style={styles.emoji}>{identity.emoji}</Text></View>
@@ -41,11 +62,17 @@ export function AgentDetails({ model, node, theme, onClose, onOpenAgent }: Agent
       </Pressable>
     </View>
     <Text style={[styles.status, { color: statusColour(node, theme) }]}>{statusLabel(node)}</Text>
+    {node.archiveOperation?.canRetry ? <Text selectable style={[styles.detail, { color: theme.muted }]}>Archive can be retried from Open chat.</Text> : null}
     {parent ? <Text selectable numberOfLines={2} accessibilityLabel={`Subagent of ${parent.label}`} style={[styles.detail, { color: theme.muted }]}>Subagent of {agentIdentity(parent.id).emoji} {parent.label}</Text> : null}
     <View style={styles.context}>
       <Text selectable style={[styles.detail, { color: theme.foreground }]}>{project?.name ?? "Unassigned"}</Text>
       <Text selectable style={[styles.detail, { color: theme.muted }]}>{workspace?.name ?? "No workspace"}{model.hosts.length > 1 && host ? ` · ${host.label}` : ""}</Text>
     </View>
+    {communicationAccessibility ? <View testID="overview-recent-communication" accessible accessibilityLabel={communicationAccessibility} style={styles.context}>
+      <Text style={[styles.role, { color: theme.muted }]}>RECENT COMMUNICATION</Text>
+      {communicationLines.map(line => <Text key={line.key} selectable style={[styles.detail, { color: theme.foreground }]}>{line.text}</Text>)}
+      {communications.hidden ? <Text style={[styles.detail, { color: theme.muted }]}>+{communications.hidden} more conversations</Text> : null}
+    </View> : null}
     {activity.map(event => <View key={event.id} style={[styles.event, { borderLeftColor: theme.border }]}>
       {event.preview ? <><Text style={[styles.detail, { color: theme.foreground, fontWeight: "600" }]}>{event.preview.title}</Text>{event.preview.detail ? <Text selectable numberOfLines={3} style={[styles.detail, { color: theme.muted }]}>{event.preview.detail}</Text> : null}</> : <Text selectable numberOfLines={3} style={[styles.detail, { color: theme.foreground }]}>{event.text}</Text>}
     </View>)}

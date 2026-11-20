@@ -25,6 +25,7 @@ interface SurfaceHarness {
   warpCalls: number;
   length: number;
   valid: boolean;
+  route?: readonly SurfacePoint[];
 }
 
 function fieldUniforms(): RoomFieldUniforms {
@@ -83,7 +84,7 @@ function surfaceFor(length = 400): SurfaceHarness {
 
 function contourSurfaceFor(route: readonly SurfacePoint[]): SurfaceHarness {
   const harness: SurfaceHarness = {
-    length: 70, valid: true, calls: [], baseCalls: 0, warpCalls: 0,
+    length: 70, valid: true, calls: [], baseCalls: 0, warpCalls: 0, route,
     surface: {
       revision: 0,
       fieldRevision: 0,
@@ -101,11 +102,11 @@ function contourSurfaceFor(route: readonly SurfacePoint[]): SurfaceHarness {
       },
       feedSurfaceRoute(project, sequence) {
         harness.calls.push({ projectId: project.projectId, sequence });
-        return harness.valid ? route : [];
+        return harness.valid ? harness.route ?? [] : [];
       },
       transitSurfaceRoute(sequence) {
         harness.calls.push({ projectId: "__transit__", sequence });
-        return harness.valid ? route : [];
+        return harness.valid ? harness.route ?? [] : [];
       },
     },
   };
@@ -206,10 +207,13 @@ describe("energy stream admission", () => {
     vi.setSystemTime(1200); expect(streams.admit("a")).toBe(false);
     expect(stateOf(streams).streams).toHaveLength(1);
     expect(stateOf(streams).streams[0]!.energy).toBe(3);
-    const arrivals: Array<[string, number]> = [];
-    streams.advance(10, true, (projectId, energy) => arrivals.push([projectId, energy]));
-    streams.advance(10, true, (projectId, energy) => arrivals.push([projectId, energy]));
-    expect(arrivals).toEqual([["a", 0.75]]);
+    const arrivals: Array<{ projectId: string; endpoint: SurfacePoint; energy: number; ageSeconds: number }> = [];
+    streams.advance(10, true, arrival => arrivals.push(arrival));
+    streams.advance(10, true, arrival => arrivals.push(arrival));
+    expect(arrivals).toHaveLength(1);
+    expect(arrivals[0]).toMatchObject({ projectId: "a", endpoint: { surface: "floor", u: 4, v: 0 }, energy: 0.75 });
+    // length 400 -> the 1.6 s minimum duration; a 10 s frame overshoots by 8.4 s.
+    expect(arrivals[0]!.ageSeconds).toBeCloseTo(8.4, 6);
     expect(stateOf(streams).arrivals).toBe(1);
     expect(stateOf(streams).streams).toHaveLength(0);
     streams.dispose();
@@ -221,10 +225,10 @@ describe("energy stream admission", () => {
     streams.updateProjects([presentation("a")], harness.surface);
     streams.admit("a");
     const arrivals: string[] = [];
-    streams.advance(1.5, true, id => arrivals.push(id));
+    streams.advance(1.5, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual([]);
     expect(stateOf(streams).streams[0]!.progress).toBeLessThan(1);
-    streams.advance(3, true, id => arrivals.push(id));
+    streams.advance(3, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual(["a"]);
     streams.dispose();
   });
@@ -235,8 +239,8 @@ describe("energy stream admission", () => {
     streams.updateProjects([presentation("a")], harness.surface);
     streams.admit("a");
     const arrivals: string[] = [];
-    streams.advance(60, true, projectId => arrivals.push(projectId));
-    streams.advance(60, true, projectId => arrivals.push(projectId));
+    streams.advance(60, true, arrival => arrivals.push(arrival.projectId));
+    streams.advance(60, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual(["a"]);
     expect(stateOf(streams).arrivals).toBe(1);
     streams.dispose();
@@ -343,7 +347,7 @@ describe("energy stream lifecycle", () => {
     streams.updateProjects([presentation("a")], harness.surface);
     expect(stateOf(streams).streams).toHaveLength(0);
     const arrivals: string[] = [];
-    streams.advance(10, true, id => arrivals.push(id));
+    streams.advance(10, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual([]);
     streams.dispose();
     expect(scene.children).not.toContain(streams.object);
@@ -457,6 +461,30 @@ describe("surface-conforming streams", () => {
     streams.dispose();
   });
 
+  it("reports the actual current terminal after a route retarget", () => {
+    const scene = new THREE.Scene(), harness = contourSurfaceFor([
+      { surface: "floor", u: 0, v: 0 }, { surface: "floor", u: 4, v: 0 },
+    ]);
+    const streams = new EnergyStreams(scene, { background: "#10151f", surface: "#1b2432", foreground: "#e1e6f0", muted: "#95a0b4", border: "#354458", accent: "#9aaeff", working: "#4bd5ad", waiting: "#e5ae68", error: "#f28391" });
+    streams.updateProjects([presentation("a")], harness.surface);
+    expect(streams.admit("a")).toBe(true);
+    streams.advance(0.2, true, () => {});
+    // Same route budget, different terminal surface point. Progress is reclocked
+    // against the new route; the arrival must report that route's endpoint.
+    harness.route = [
+      { surface: "floor", u: 0, v: 0 }, { surface: "floor", u: 1, v: 0 },
+      { surface: "wall", u: 1, v: 0 }, { surface: "wall", u: 1, v: 3 },
+    ];
+    harness.surface.revision = 1;
+    streams.updateProjects([presentation("a")], harness.surface);
+    const arrivals: Array<{ endpoint: SurfacePoint; ageSeconds: number }> = [];
+    streams.advance(2, true, arrival => arrivals.push(arrival));
+    expect(arrivals).toHaveLength(1);
+    expect(arrivals[0]!.endpoint).toEqual({ surface: "wall", u: 1, v: 3 });
+    expect(arrivals[0]!.ageSeconds).toBeGreaterThan(0.5);
+    streams.dispose();
+  });
+
   it("does not rebuild routes for field, elevation or energy-only updates", () => {
     const scene = new THREE.Scene(), harness = surfaceFor();
     const streams = new EnergyStreams(scene, { background: "#10151f", surface: "#1b2432", foreground: "#e1e6f0", muted: "#95a0b4", border: "#354458", accent: "#9aaeff", working: "#4bd5ad", waiting: "#e5ae68", error: "#f28391" });
@@ -482,10 +510,10 @@ describe("surface-conforming streams", () => {
     const streams = new EnergyStreams(scene, { background: "#10151f", surface: "#1b2432", foreground: "#e1e6f0", muted: "#95a0b4", border: "#354458", accent: "#9aaeff", working: "#4bd5ad", waiting: "#e5ae68", error: "#f28391" });
     streams.setOnline(true);
     streams.updateProjects([], harness.surface);
-    const arrivals: Array<[string, number]> = [];
+    const arrivals: Array<{ projectId: string; energy: number }> = [];
     let peak = 0, seen = false;
     for (let frame = 0; frame < 80; frame++) {
-      streams.advance(0.25, true, (projectId, energy) => arrivals.push([projectId, energy]));
+      streams.advance(0.25, true, arrival => arrivals.push({ projectId: arrival.projectId, energy: arrival.energy }));
       const transit = stateOf(streams).streams.filter(stream => stream.transit);
       peak = Math.max(peak, transit.length);
       seen = seen || transit.length > 0;
@@ -510,16 +538,16 @@ describe("surface-conforming streams", () => {
     streams.updateProjects([presentation("a")], harness.surface);
     streams.admit("a");
     const arrivals: string[] = [];
-    streams.advance(2, true, projectId => arrivals.push(projectId));
+    streams.advance(2, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual(["a"]);
     expect(stateOf(streams).streams).toHaveLength(1);
     expect(stateOf(streams).streams[0]!.arrived).toBe(true);
     expect(stateOf(streams).streams[0]!.progress).toBe(1);
 
-    streams.advance(0.4, true, projectId => arrivals.push(projectId));
+    streams.advance(0.4, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual(["a"]);
     expect(stateOf(streams).streams).toHaveLength(1);
-    streams.advance(0.3, true, projectId => arrivals.push(projectId));
+    streams.advance(0.3, true, arrival => arrivals.push(arrival.projectId));
     expect(arrivals).toEqual(["a"]);
     expect(stateOf(streams).streams).toHaveLength(0);
     expect(stateOf(streams).arrivals).toBe(1);

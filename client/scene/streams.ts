@@ -6,6 +6,7 @@ import type {
   ProjectSpatialPresentation,
   RoomFieldUniforms,
   RoomSurface,
+  StreamArrival,
   SurfacePoint,
   WorldPoint,
 } from "./spatial";
@@ -1181,7 +1182,7 @@ export class EnergyStreams {
     return true;
   }
 
-  advance(seconds: number, moving: boolean, onArrival: (projectId: string, energy: number) => void): void {
+  advance(seconds: number, moving: boolean, onArrival: (arrival: StreamArrival) => void): void {
     if (this.disposed) return;
     this.moving = moving;
     const step = Math.max(0, Math.min(MAX_STEP_SECONDS, Number.isFinite(seconds) ? seconds : 0));
@@ -1220,9 +1221,18 @@ export class EnergyStreams {
       if (stream.transit) this.state.transitArrivals++;
       else {
         this.state.arrivals++;
+        const terminal = stream.route.points[stream.route.points.length - 1]!;
+        // A slow frame may cross the head after extra visual time has already
+        // elapsed; report that overshoot instead of replaying the impact from 0.
+        const ageSeconds = Math.max(0, (this.rawProgressOf(stream) - 1) / stream.rate);
         // Clouds consume normalised energy; four coalesced raw events saturate
         // the visual arrival. B combines this with its sustained cloud energy.
-        onArrival(stream.projectId, Math.min(1, stream.energy / 4));
+        onArrival({
+          projectId: stream.projectId,
+          endpoint: { surface: terminal.surface, u: terminal.u, v: terminal.v },
+          energy: Math.min(1, stream.energy / 4),
+          ageSeconds,
+        });
       }
     }
     for (const stream of tailDone) this.retire(stream);

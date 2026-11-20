@@ -26,6 +26,20 @@ path. **Open chat** opens the normal Paseo chat on that agent's owning host. Esc
 background click closes details first, then returns to the filtered overview. Arrow keys
 navigate relationships; browser zoom works and the graph has no wheel zoom.
 
+Archive progress appears separately from runtime status: **Archiving**,
+**Archive incomplete · children pending** or **Archive unresolved**. A retry hint
+only points to **Open chat**. Known background work is shown without turning a
+missing count into zero. In the browser, recent agent-to-agent notices show their counterpart,
+direction, notice kind and last contact for a few minutes, without message text or
+extra graph connections.
+Fresh deliveries also draw a brief solid directional route between visible
+agents. Dashed lines retain their parent-delegation meaning. Pause or hiding
+consumes communication routes without replaying them later.
+
+Confirmed archives re-fit changed visible packing while retaining surviving
+focus, selection, filters and expanded groups. Partial refreshes, disconnections
+and native roster unloading do not count as archives.
+
 **Fullscreen graph** fills the display with Overview and its controls. Escape
 exits fullscreen first, preserving graph focus, selection and expanded groups.
 The button is available on supported browsers.
@@ -33,8 +47,10 @@ The button is available on supported browsers.
 **N inactive** represents quiet subordinate branches, with finished, idle, closed
 and canceled counts kept distinct. Click to expand and use
 **Collapse N** on the parent to fold them again. The choice survives focus and
-refreshes. Running agents, blockers, errors and unread results remain visible.
-Counts include every represented agent.
+refreshes. Running agents, blockers, errors, unread results, agents with positive
+reported background work and agents with archive recovery progress remain visible.
+An absent background count is unknown, not zero. Counts include every represented
+agent.
 
 Light trails follow fresh observed activity along ownership paths, with ancestor
 responses on arrival. Quiet heartbeats also indicate reported working state.
@@ -47,8 +63,9 @@ neighbours recede modestly. Centres stay fixed, geometry limits growth and
 inspection holds the graph steady. A perspective floor and back wall provide a
 stable room behind the graphs. Soft geometric clouds drift behind active graphs
 and gently bend the nearby grid. Small binary heads with longer light trails
-follow grid lines across both surfaces. Activity feeds brighten their cloud on
-arrival; a few decorative streams simply cross the grid. These effects never
+follow grid lines across both surfaces without retracing a same-surface segment.
+Activity feeds produce a localized glow and ripple where they reach their cloud;
+a few decorative streams simply cross the grid. These effects never
 create additional work or replay missed events.
 
 **Appearance** offers Follow Paseo, Light or Dark for Overview, plus Animated,
@@ -73,6 +90,8 @@ Overview is read-only and never wakes a provider to discover native children.
 Unavailable native rosters differ from known empty ones. Refresh retains the
 last coherent graph while marking pending or stale information, then reconciles
 authoritative updates. Returning to a tab does not replay historical activity.
-Project names and icons update automatically.
+Structured agent-message notices are kept only as bounded metadata for about five
+minutes; duplicate or replayed deliveries do not add activity. Project names and
+icons update automatically.
 
 Requires a compatible host with passive subagent and public project-icon APIs.

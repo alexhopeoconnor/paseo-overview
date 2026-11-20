@@ -1,5 +1,6 @@
-import type { ObservationFreshness, OverviewHostSnapshot, OverviewHostSummary, OverviewModel } from "../shared/model";
+import type { ObservationFreshness, OverviewEvent, OverviewHostSnapshot, OverviewHostSummary, OverviewModel } from "../shared/model";
 import { createHostSnapshotComposer, emptyOverviewModel } from "../shared/hosts";
+import { RecentCommunications } from "./communications";
 import { createOverviewStore } from "./store";
 import { ReadGate, errorText, type OverviewApi } from "./transport";
 
@@ -82,10 +83,69 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
   let disposed = false;
   let revision = 0;
   let current: OverviewModel = emptyOverviewModel();
+  let communicationTimer: ReturnType<typeof setTimeout> | undefined;
   const compose = createHostSnapshotComposer();
+  const communications = new RecentCommunications();
+  /** A removed host's identities must not re-enter from another host's event. */
+  const removedHosts = new Set<string>();
+
+  function clearCommunicationTimer(): void {
+    if (communicationTimer !== undefined) {
+      clearTimeout(communicationTimer);
+      communicationTimer = undefined;
+    }
+  }
+
+  /** One timer only, always aimed at the next retained delivery's expiry. */
+  function scheduleCommunicationExpiry(now: number): void {
+    clearCommunicationTimer();
+    // A hidden view stops expiry work; the next visible emit re-ages the set.
+    if (disposed || !visible) return;
+    const next = communications.earliestExpiry(now);
+    if (next === undefined) return;
+    communicationTimer = setTimeout(() => {
+      communicationTimer = undefined;
+      emit();
+    }, Math.max(1, next - now));
+  }
+
+  /**
+   * Retained metadata outlives the store's short event window. A duplicate
+   * semantic delivery is rejected before composition/scoring. A saturated
+   * history drops only its metadata; the ordinary event and its weight remain.
+   */
+  function admitCommunications(snapshot: OverviewHostSnapshot, now: number): OverviewHostSnapshot {
+    let events: OverviewEvent[] | undefined;
+    for (const event of snapshot.events) {
+      const communication = event.communication;
+      if (!communication) {
+        events?.push(event);
+        continue;
+      }
+      if (removedHosts.has(communication.senderHostId) || removedHosts.has(communication.recipientHostId)) {
+        events ??= snapshot.events.slice(0, snapshot.events.indexOf(event));
+        const { communication: _removed, ...ordinary } = event;
+        events.push(ordinary);
+        continue;
+      }
+      const admission = communications.accept(communication, event.id, now);
+      if (admission === "accepted") {
+        if (events) events.push(event);
+        continue;
+      }
+      events ??= snapshot.events.slice(0, snapshot.events.indexOf(event));
+      if (admission === "limited") {
+        // Capacity declines retained history, never the ordinary event/weight.
+        const { communication: _retained, ...ordinary } = event;
+        events.push(ordinary);
+      }
+    }
+    return events ? { ...snapshot, events } : snapshot;
+  }
 
   function emit(): void {
     if (disposed) return;
+    const now = Date.now();
     const included = [...entries.values()].filter(entry => !filter || entry.summary.id === filter);
     const summaries: OverviewHostSummary[] = included.map(entry => {
       const error = entry.error ?? entry.acquireError;
@@ -95,12 +155,17 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
         ...(error ? { error } : {}),
       };
     });
+    const includedHosts = new Set(included.map(entry => entry.summary.id));
     const snapshots = new Map<string, OverviewHostSnapshot>();
     for (const entry of included) {
       const snapshot = displaySnapshot(entry);
-      if (snapshot) snapshots.set(entry.summary.id, snapshot);
+      if (snapshot) snapshots.set(entry.summary.id, admitCommunications(snapshot, now));
     }
-    current = compose(summaries, snapshots, ++revision);
+    current = {
+      ...compose(summaries, snapshots, ++revision),
+      recentCommunications: communications.list(includedHosts, now),
+    };
+    scheduleCommunicationExpiry(now);
     options.onChange(current, filter);
   }
 
@@ -199,13 +264,21 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
       if (disposed) return;
       const next = new Map<string, OverviewHostSummary>();
       for (const host of hosts) next.set(host.id, { ...host });
+      const removed = new Set<string>();
       for (const [id, entry] of entries) {
         if (next.has(id)) continue;
         entry.token = undefined;
         entry.store?.dispose();
         entries.delete(id);
+        removed.add(id);
+      }
+      // Metadata for a host that is no longer configured must not become a ghost.
+      if (removed.size) {
+        communications.removeHosts(removed);
+        for (const id of removed) removedHosts.add(id);
       }
       for (const [id, summary] of next) {
+        removedHosts.delete(id);
         const entry = entries.get(id);
         if (entry) entry.summary = summary;
         else entries.set(id, { summary, started: false });
@@ -232,6 +305,8 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      clearCommunicationTimer();
+      communications.clear();
       for (const entry of entries.values()) {
         entry.token = undefined;
         entry.store?.dispose();

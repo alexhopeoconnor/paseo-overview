@@ -74,6 +74,7 @@ varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
 varying float vCloudSeed;
+varying float vCloudImpact;
 
 vec4 cloudState(float column) {
   return texture2D(uCloudStates, vec2((column + 0.5) / uCloudStateSize.x,
@@ -84,6 +85,19 @@ void main() {
   vec4 centrePhase = cloudState(0.0);
   vec4 radiusEnergy = cloudState(1.0);
   vec4 metadata = cloudState(2.0);
+  vec4 impact = cloudState(3.0);
+  float impactAge = impact.z;
+  float impactEnvelope = smoothstep(0.0, 0.08, impactAge) *
+    (1.0 - smoothstep(0.55, 0.9, impactAge)) * impact.w;
+  vec2 impactDelta = position.xy - impact.xy;
+  float impactDistance = length(impactDelta);
+  float spread = clamp(impactAge / 0.55, 0.0, 1.0);
+  float ringDistance = (impactDistance - spread * 1.2) / (0.13 + spread * 0.08);
+  float ripple = exp(-ringDistance * ringDistance);
+  float absorption = exp(-impactDistance * impactDistance / 0.045) * (1.0 - smoothstep(0.0, 0.2, impactAge));
+  float impactOffsetCss = clamp((ripple - absorption * 0.65) * 3.0 * impactEnvelope, -3.0, 3.0);
+  vec3 impactOffset = vec3(impactDelta / max(0.0001, impactDistance) * impactOffsetCss * metadata.y, 0.0);
+  vCloudImpact = clamp(absorption + ripple, 0.0, 1.0) * impactEnvelope;
   float phase = 6.28318530718 * centrePhase.w / ${AMBIENT_PHASE_PERIOD_SECONDS.toFixed(1)};
   float frequencyX = 7.0 + floor(aCloudSeed * 7.0);
   float frequencyY = 8.0 + floor(aCloudSeed * 8.0);
@@ -93,15 +107,17 @@ void main() {
     cos(phase * frequencyY + aCloudSeed * 23.0),
     sin(phase * (frequencyX - 1.0) + aCloudSeed * 29.0) * 0.35
   ) * driftCss * metadata.y;
-  vec3 displaced = centrePhase.xyz + position * radiusEnergy.xyz + drift;
+  // Points and line endpoints share this exact local displacement.
+  vec3 displaced = centrePhase.xyz + position * radiusEnergy.xyz + drift + impactOffset;
   vec4 viewPosition = modelViewMatrix * vec4(displaced, 1.0);
   gl_Position = projectionMatrix * viewPosition;
-  float cssSize = aCloudSize * (0.8 + radiusEnergy.w * 0.55);
+  float cssSize = aCloudSize * (0.8 + radiusEnergy.w * 0.55) * (1.0 + vCloudImpact * 0.3);
   float volumeSize = (7.0 + 11.0 * (1.0 - clamp(length(position), 0.0, 1.0))) *
     (0.75 + radiusEnergy.w * 0.35);
   gl_PointSize = mix(clamp(cssSize, 0.65, 3.4), clamp(volumeSize, 4.0, 22.0), uVolume) * uPixelRatio;
   vCloudEnergy = radiusEnergy.w;
-  vCloudAlpha = metadata.x * aCloudAlpha;
+  // Impact can modulate existing coverage, never project visibility.
+  vCloudAlpha = metadata.x * min(1.0, aCloudAlpha + vCloudImpact * 0.3);
   vCloudRim = aCloudRim;
   vCloudSeed = aCloudSeed;
 }
@@ -117,9 +133,11 @@ varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
 varying float vCloudSeed;
+varying float vCloudImpact;
 
 void main() {
   vec3 colour = mix(uInk, uEnergy, clamp(vCloudEnergy, 0.0, 1.0) * 0.7);
+  colour = mix(colour, uEnergy, vCloudImpact * 0.65);
   colour = mix(colour, uShade, 0.2 + (1.0 - vCloudSeed) * 0.18);
   colour = mix(colour, uRim, vCloudRim * 0.48);
   gl_FragColor = vec4(colour, vCloudAlpha * 0.42 * uOpacity);
@@ -138,12 +156,14 @@ varying float vCloudEnergy;
 varying float vCloudAlpha;
 varying float vCloudRim;
 varying float vCloudSeed;
+varying float vCloudImpact;
 
 void main() {
   vec2 centred = gl_PointCoord * 2.0 - 1.0;
   float radius = length(centred);
   if (radius > 1.0) discard;
   vec3 colour = mix(uInk, uEnergy, clamp(vCloudEnergy, 0.0, 1.0) * 0.7);
+  colour = mix(colour, uEnergy, vCloudImpact * 0.75);
   float light = clamp(0.78 - centred.x * 0.2 + centred.y * 0.3 - radius * 0.3, 0.0, 1.0);
   colour = mix(uShade, colour, 0.3 + light * 0.7);
   colour = mix(colour, uRim, smoothstep(0.42, 0.96, radius) * vCloudRim * 0.48);
