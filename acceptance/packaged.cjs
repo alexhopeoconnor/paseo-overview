@@ -49,13 +49,19 @@ async function assistantMessageText(message) {
   });
 }
 
-async function checkArchiveRefit({ page, client, overviewUrl, workspaceId, agents, output }) {
+async function checkArchiveRefit({ page, client, overviewUrl, workspaceId, agents, nativeCounts, output }) {
   await page.goto(overviewUrl);
   await page.getByTestId("overview-screen").waitFor({ state: "visible" });
   for (let step = 0; step < 2 && await page.getByTestId("overview-back").count(); step++)
     await page.getByTestId("overview-back").click();
   await page.getByTestId("overview-project-filter").click();
   await page.getByTestId("overview-project-filter-show-all").click();
+  const representedNative = () => page.locator('[data-overview-kind]').evaluateAll(nodes =>
+    new Set(nodes.flatMap(node => node.dataset.overviewKind === "provider-subagent" ? [node.dataset.overviewId]
+      : node.dataset.overviewKind === "completed-group" ? JSON.parse(node.dataset.overviewMembers || "[]") : [])).size);
+  // This fresh navigation deliberately receives delayed passive rosters. Compare
+  // fits for the same complete inventory, not before/after roster hydration.
+  await waitFor(async () => await representedNative() === nativeCounts.before, "native inventory before archive fitting");
   const moving = await page.getByTestId("overview-motion").getAttribute("aria-label") === "Pause animation";
   if (moving) await page.getByTestId("overview-motion").click();
   await delay(250);
@@ -74,6 +80,7 @@ async function checkArchiveRefit({ page, client, overviewUrl, workspaceId, agent
   await client.archiveWorkspace(workspaceId);
   await waitFor(async () => await page.locator('[data-overview-kind="workspace"]').count() === 13
     && await page.locator('[data-overview-kind="agent"]').count() === 14, "authoritative workspace archive disappears without reload");
+  await waitFor(async () => await representedNative() === nativeCounts.after, "surviving native inventory after archive");
   await delay(300);
   const after = await geometry();
   assert.ok(await canvas.evaluate(element => element.isConnected
@@ -91,9 +98,11 @@ async function checkArchiveRefit({ page, client, overviewUrl, workspaceId, agent
   await page.getByTestId("overview-project-filter-apply").click();
   await delay(200);
   const fresh = await geometry();
+  fs.writeFileSync(path.join(output, "archive-refit-evidence.json"), JSON.stringify({ before, after, fresh, nativeCounts }, null, 2));
   assert.deepEqual(after.map(node => node.id), fresh.map(node => node.id));
   for (let index = 0; index < after.length; index++) for (const key of ["x", "y", "width", "height", "scale"])
-    assert.ok(Math.abs(after[index][key] - fresh[index][key]) < 0.5, "Removal framing matches the explicit fresh fit");
+    assert.ok(Math.abs(after[index][key] - fresh[index][key]) < 0.5,
+      `Removal framing matches the explicit fresh fit: ${after[index].id} ${key}: ${after[index][key]} -> ${fresh[index][key]}`);
 
   await client.undoWorkspaceArchive(workspaceId);
   await waitFor(async () => await page.locator('[data-overview-kind="workspace"]').count() === 14
@@ -728,7 +737,12 @@ async function run() {
       await waitFor(async () => (await assistantMessageText(customMessage)).includes("ACCEPTANCE_RESPONSE_END"), "one-way chat expansion still works");
       assert.equal(await customMessage.getByText("Show less",{exact:true}).count(),0);
     }
-    const archiveRefit = await checkArchiveRefit({ page, client, overviewUrl, workspaceId: denseWorkspace.workspaceId, agents, output });
+    const archivedParentIds = new Set(denseParents.map(agent => agent.id));
+    const nativeCounts = {
+      before: nativeFixtureCount,
+      after: [...nativeParents].reduce((sum, [id, count]) => sum + (archivedParentIds.has(id) ? 0 : count), 0),
+    };
+    const archiveRefit = await checkArchiveRefit({ page, client, overviewUrl, workspaceId: denseWorkspace.workspaceId, agents, nativeCounts, output });
     const multipleHosts = await checkMultipleHosts({ page, cli, env, output, overviewUrl, directory: directories[0], freePort, waitFor, DaemonClient, WebSocket, runtimeVersion: status.version, expectedOfflineErrors, onRemoteShutdown, localClient: client, localAgent: agents[0] });
     fs.writeFileSync(path.join(output, "multi-host.json"), JSON.stringify(multipleHosts, null, 2));
     assert.deepEqual(pageErrors,[]);
