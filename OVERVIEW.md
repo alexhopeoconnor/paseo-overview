@@ -16,8 +16,17 @@ until removed. Changing hosts resets the project filter to All projects.
 Filter and expansion choices stay in this client's plugin session.
 
 Every selected project is a root with its current icon, including empty projects.
-Actual workspaces, agents and available subagents branch beneath it. Dashed
-connections show delegation without changing ownership.
+Actual workspaces, agents and available subagents branch beneath it.
+
+| Graph element | Meaning |
+| --- | --- |
+| Pale solid branches | Project, workspace and agent ownership. |
+| Dashed connections | Explicit parent delegation across workspaces or hosts, including between projects. Both endpoints must be visible. |
+| Solid directional arrows | Recently observed agent communication, normally green, pointing from sender to recipient. Opposing messages can show arrows in both directions. |
+| Highlighted branches | The selected or hovered item's ownership path. |
+| Branch pulses and nearby bubbles | Fresh observed activity and bounded previews. |
+| **N inactive** | An expandable group of quiet subordinate agents. |
+| Grid streaks and cloud impacts | Activity feeds and decorative ambient motion, separate from agent relationships. |
 
 Click a project or workspace to focus its graph. Agents use stable animal emoji
 nodes: rounded tiles for workspace-level agents and smaller diamond backings for
@@ -30,11 +39,15 @@ Archive progress appears separately from runtime status: **Archiving**,
 **Archive incomplete · children pending** or **Archive unresolved**. A retry hint
 only points to **Open chat**. Known background work is shown without turning a
 missing count into zero. In the browser, recent agent-to-agent notices show their counterpart,
-direction, notice kind and last contact for a few minutes, without message text or
-extra graph connections.
+direction, notice kind, last contact and retained-delivery count for a few minutes,
+without message text or changes to ownership and delegation.
 Fresh deliveries also draw a brief solid directional route between visible
-agents. Dashed lines retain their parent-delegation meaning. Pause or hiding
-consumes communication routes without replaying them later.
+agents in the same or different workspaces/projects. The travelling head takes
+about 2.4 seconds; the route fades within eight seconds. Messaging alone never
+creates a dashed parent-delegation link. Pause, reduced motion or hiding consumes
+communication routes without replaying them later. A collapsed subordinate does
+not redirect its communication to the **N inactive** group; expand it before the
+exchange to see its arrow.
 
 Confirmed archives re-fit changed visible packing while retaining surviving
 focus, selection, filters and expanded groups. Partial refreshes, disconnections
@@ -91,7 +104,10 @@ Unavailable native rosters differ from known empty ones. Refresh retains the
 last coherent graph while marking pending or stale information, then reconciles
 authoritative updates. Returning to a tab does not replay historical activity.
 Structured agent-message notices are kept only as bounded metadata for about five
-minutes; duplicate or replayed deliveries do not add activity. Project names and
-icons update automatically.
+minutes while the browser view observes them. Opening or reloading Overview after
+an exchange does not reconstruct it from chat history. Recognized duplicates and
+replays do not add activity; retention and overload limits are described in the
+[observation notes](README.md#observation-and-coverage). Native mobile views do not
+collect these communication notices. Project names and icons update automatically.
 
 Requires a compatible host with passive subagent and public project-icon APIs.

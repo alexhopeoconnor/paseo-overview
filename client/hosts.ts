@@ -96,17 +96,19 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
     }
   }
 
-  /** One timer only, always aimed at the next retained delivery's expiry. */
-  function scheduleCommunicationExpiry(now: number): void {
+  /** One timer for expiry and minute-scale relative ages in visible details. */
+  function scheduleCommunicationRefresh(now: number): void {
     clearCommunicationTimer();
     // A hidden view stops expiry work; the next visible emit re-ages the set.
     if (disposed || !visible) return;
     const next = communications.earliestExpiry(now);
     if (next === undefined) return;
+    const delay = current.recentCommunications?.length
+      ? Math.min(next - now, 60_000) : next - now;
     communicationTimer = setTimeout(() => {
       communicationTimer = undefined;
       emit();
-    }, Math.max(1, next - now));
+    }, Math.max(1, delay));
   }
 
   /**
@@ -165,7 +167,7 @@ export function createOverviewHosts(options: OverviewHostsOptions) {
       ...compose(summaries, snapshots, ++revision),
       recentCommunications: communications.list(includedHosts, now),
     };
-    scheduleCommunicationExpiry(now);
+    scheduleCommunicationRefresh(now);
     options.onChange(current, filter);
   }
 

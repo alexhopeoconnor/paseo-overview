@@ -6,7 +6,7 @@ import { isHostAuthoritative, isHostLive } from "../shared/hosts";
 import type { AgentRecord, NativeRecord, ProjectIcon, RosterSnapshot } from "../shared/observation";
 import { BubbleStore } from "../client/bubbles";
 import { ActivityTracker } from "../client/activity";
-import { COMMUNICATION_TTL_MS } from "../client/communications";
+import { COMMUNICATION_TTL_MS, lastContactLabel } from "../client/communications";
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -1213,6 +1213,57 @@ describe("multi-host coordinator", () => {
     expect(hosts.model.recentCommunications).toHaveLength(1);
     expect(hosts.model.events.filter(event => event.communication)).toEqual([]);
     expect(hosts.model.events.some(event => event.kind === "tool")).toBe(false);
+  });
+
+  it("refreshes quiet recent-contact ages without replay or graph changes and stops when hidden or disposed", async () => {
+    const one = coordinatorHost("one");
+    let displayedAge: string | undefined;
+    const changed = vi.fn(model => {
+      const contact = model.recentCommunications?.[0];
+      displayedAge = contact ? lastContactLabel(contact.observedAt) : undefined;
+    });
+    const hosts = createOverviewHosts({
+      acquire: () => one.api, observeActivity: true, onChange: changed,
+    });
+    disposals.push(() => hosts.dispose());
+    hosts.setHosts([{ id: "one", label: "One", status: "online" }]);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    emitCommunication(one, 1, "quiet-contact");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(displayedAge).toBe("just now");
+    const before = hosts.model;
+    const tracker = new ActivityTracker();
+    expect(tracker.ingest(before.events, Date.now())).toHaveLength(1);
+
+    // Once the short event ring expires, no source activity drives the UI.
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(displayedAge).toBe("1 min ago");
+    expect(hosts.model.events).toEqual([]);
+    expect(tracker.ingest(hosts.model.events, Date.now())).toEqual([]);
+    expect(hosts.model.projects).toBe(before.projects);
+    expect(hosts.model.workspaces).toBe(before.workspaces);
+    expect(hosts.model.nodes).toBe(before.nodes);
+    expect(hosts.model.edges).toBe(before.edges);
+    const emissions = changed.mock.calls.length;
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(displayedAge).toBe("2 min ago");
+    expect(changed).toHaveBeenCalledTimes(emissions + 1);
+
+    hosts.setVisible(false);
+    const hiddenEmissions = changed.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(changed).toHaveBeenCalledTimes(hiddenEmissions);
+    expect(vi.getTimerCount()).toBe(0);
+    hosts.setVisible(true);
+    await flush(); await vi.advanceTimersByTimeAsync(50);
+    expect(displayedAge).toBe("3 min ago");
+    expect(vi.getTimerCount()).toBe(1);
+    hosts.dispose();
+    const disposedEmissions = changed.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(COMMUNICATION_TTL_MS);
+    expect(changed).toHaveBeenCalledTimes(disposedEmissions);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("retains metadata through transient expiry and disconnect, then re-ages it while hidden", async () => {

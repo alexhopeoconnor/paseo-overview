@@ -32,9 +32,11 @@ settings.
 Each visible project uses its current icon and name; its actual workspaces,
 managed agents and known provider-native subagents branch beneath it. Membership
 follows Paseo IDs, not directory nesting or project names. Ownership routes avoid
-unrelated nodes and labels. Delegation has a separate dashed route, shown only
-when both endpoints are included. Activity produces bounded heartbeats,
-travelling pulses and short-lived text bubbles.
+unrelated nodes and labels. Explicit parent delegation across workspaces or hosts
+has a separate dashed route, shown only when both endpoints are included. This
+can connect different projects, but messaging or project membership alone never
+creates a delegation link. See the [graph key](OVERVIEW.md) for the visual meanings.
+Activity produces bounded heartbeats, travelling pulses and short-lived text bubbles.
 
 Click a project or workspace to bring its graph or branch forward. Each agent's
 animal emoji is its node, assigned consistently from its host-qualified ID.
@@ -59,13 +61,18 @@ A retryable archive only points back to **Open chat**; Overview never performs i
 Known background work is also informational, and a missing count remains unknown
 rather than zero. Recent structured agent-to-agent deliveries to a managed
 recipient can add a bounded details readout with the counterpart, direction,
-automatic notice kind and last contact. It contains no message text and does not
-create graph nodes, membership or delegation edges.
+automatic notice kind, last contact and retained-delivery count. It contains no
+message text and does not create graph nodes, membership or delegation edges.
 In the browser, fresh deliveries draw a short solid directional route between
-visible agents; dashed lines continue to mean parent delegation. Routes are
-bounded to twelve directed pairs and disappear after a few seconds. Pausing,
-hiding or filtering consumes them without later replay; Recent communication
-details remain available for the longer observation window.
+visible agents, including agents in the same workspace. Dashed lines continue
+to mean parent delegation. Each arrow points from sender to recipient; messages
+in both directions can produce opposing arrows. Routes are bounded to twelve
+directed pairs. A travelling head takes about 2.4 seconds and the route lasts
+at most eight seconds. Pausing, reduced motion, hiding or filtering consumes them
+without later replay. Collapsed subordinate endpoints are not replaced by a
+group-level route. Recent communication details remain available for the longer
+observation window, independently of animation. While visible, quiet last-contact
+ages refresh once a minute until the retained metadata expires.
 
 **Fullscreen graph** expands the Overview container, including its header,
 bubbles and details, while leaving the surrounding Paseo navigation outside it.
@@ -104,9 +111,8 @@ surface, including the floor/wall seam. Same-surface feeds do not retrace their
 segments. Fresh activity admits a bounded feed to a grid junction behind its
 cloud; arrival creates one localized ripple and glow at that endpoint, separate
 from sustained activity. Particle connections follow the displaced particles.
-A few
-decorative streams also cross the room without a cloud destination. These are
-visual summaries and decoration, not byte counters. They never add activity
+A few decorative streams also cross the room without a cloud destination. These
+are visual summaries and decoration, not byte counters. They never add activity
 scores or replay missed events. Selected quiet and empty projects remain visible.
 
 The graph and room share one resolved depth projection. Recent owned activity
@@ -173,8 +179,9 @@ counts without changing runtime state. A recognized structured delivery on a
 managed recipient's timeline is reduced at observation time to bounded
 metadata: semantic identity, host-qualified sender and recipient, notice kind,
 observation time and expiry after about five minutes. The delivered text is never
-retained or displayed. Timeline replay and malformed payloads are rejected;
-missing sender host metadata is treated as the recipient's local host, while an
+retained or displayed. Timeline replay is rejected; malformed provenance does
+not become communication metadata but can still produce ordinary tool activity.
+Missing sender host metadata is treated as the recipient's local host, while an
 explicitly invalid value is rejected rather than guessed. Duplicate deliveries
 are deduplicated across epochs, reconnects and store replacements, and the
 bounded recent-history collection never displaces ordinary event activity. The
@@ -183,8 +190,10 @@ exact identity instead of inventing a node when the counterpart is outside the
 current view.
 
 Recent communication is collected by the browser view's existing activity
-subscriptions. The native view keeps its passive roster behavior and does not
-subscribe to activity timelines. Rendered native component checks establish how
+subscriptions while Overview is observing. It is not reconstructed from chat
+history: opening or reloading Overview after an exchange does not recover it.
+The native view keeps its passive roster behavior and does not subscribe to
+activity timelines. Rendered native component checks establish how
 shared details present supplied metadata, not live communication observation on
 a phone.
 

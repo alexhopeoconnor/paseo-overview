@@ -45,6 +45,9 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   A separate communication/feed burst checks route bounds and released geometry,
   captures real cloud arrivals and decay, and exercises resize, endpoint removal,
   hiding and remounting. These samples do not replace the matched baseline.
+  A same-frame impact/control pair also isolates the local arrival at unchanged
+  phase, sustained energy, geometry and room field, recording its committed impact
+  texel and changed pixels. These canvas-only crops exclude HTML overlays.
   Distinguish an Overview-local theme update from the current host's global
   appearance boundary: the latter remounts screen contents and reloads passive
   rosters/icons. Renderer identity preservation applies to local appearance
@@ -88,8 +91,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   remain discoverable in recipient details after the transient pulse expires,
   without retaining the message body. A real dense-workspace archive must remove
   its entities, preserve the canvas and a surviving selection, enlarge the
-  remaining graph, and match the established explicit-fit result. Workspace Undo
-  restores the fixture through the host API. Recovery failure labels are covered
+  remaining graph, and match the established explicit-fit result. That comparison
+  waits for the fixture's delayed native roster before measuring either layout,
+  and retains the compared geometry. Workspace Undo restores the fixture through
+  the host API. Recovery failure labels are covered
   with controlled observation/component fixtures; this runner does not introduce
   another host archive-failure implementation or claim to retest its internals.
 
