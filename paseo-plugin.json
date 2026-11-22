@@ -2,5 +2,5 @@
   "id": "overview",
   "name": "Overview",
   "description": "Explore live project, workspace and agent activity in read-only graphs.",
-  "requirements": { "paseo": "^0.16.1" }
+  "requirements": { "paseo": "^0.17.1" }
 }

@@ -75,7 +75,10 @@ messages and IDs are synthetic; do not copy real chat or roster data here.
   parent, rapid updates and Escape. It asserts graph containment with a 12-pixel
   margin and confirms that opening the card does not change graph dimensions.
 - `compile.mjs` uses the Paseo plugin compiler and checks the compiled native
-  boundary, including Hermes where the pinned build environment provides it.
+  boundary. It requires the Linux Hermes compiler in the prepared host
+  environment, by default at
+  `/fork/node_modules/hermes-compiler/hermesc/linux64-bin/hermesc`, and fails if
+  that binary is missing or exits nonzero.
 - `packaged.cjs` exercises the selected plugin directory on an exact host
   package, including screenshot-based room structure, theme and
   pause checks, host-persisted appearance controls, additive streaming previews, actual element fullscreen,
